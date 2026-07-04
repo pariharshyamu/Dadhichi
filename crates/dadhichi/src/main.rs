@@ -18,7 +18,10 @@ mod console;
 
 use std::sync::Arc;
 
-use dadhichi_agent::{Agent, AgentContext, ConversationalAgent, SemanticMemory};
+use dadhichi_agent::{
+    Agent, AgentContext, ConversationalAgent, Orchestrator, SemanticMemory, SpecialistAgent,
+    Workflow,
+};
 use dadhichi_ai::{MockEmbedder, MockProvider, ModelRouter};
 use dadhichi_cache::RocksBlobCache;
 use dadhichi_core::Kernel;
@@ -144,6 +147,38 @@ async fn main() {
             eprintln!("\ndadhichi ▸ agent failed: {err}");
         }
     }
+
+    // 4b. Phase 4 — multi-agent workflow automation from natural language.
+    //     The request is decomposed and each clause delegated to a specialist.
+    let mut orchestrator = Orchestrator::new();
+    for specialist in [
+        SpecialistAgent::code(),
+        SpecialistAgent::refactor(),
+        SpecialistAgent::test(),
+        SpecialistAgent::docs(),
+        SpecialistAgent::review(),
+        SpecialistAgent::git(),
+        SpecialistAgent::security(),
+    ] {
+        orchestrator.register(Arc::new(specialist));
+    }
+
+    let request = "Refactor authentication, write tests, and update the documentation";
+    println!("\ndadhichi ▸ workflow: {request}");
+    let workflow = Workflow::parse(request);
+    let report = workflow.execute(&orchestrator, &ctx).await;
+    for step in &report.steps {
+        println!(
+            "dadhichi ▸   {} → {} ({:.0}%)",
+            step.agent,
+            if step.ok { "ok" } else { "failed" },
+            step.confidence * 100.0
+        );
+    }
+    println!(
+        "dadhichi ▸ workflow confidence: {:.0}%",
+        report.overall_confidence() * 100.0
+    );
 
     // 5. Drain the console by dropping the kernel's bus handles.
     drop(ctx);

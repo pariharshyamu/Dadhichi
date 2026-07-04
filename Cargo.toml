@@ -9,6 +9,7 @@ members = [
     "crates/dadhichi-parse",
     "crates/dadhichi-index",
     "crates/dadhichi-lsp",
+    "crates/dadhichi-dap",
     "crates/dadhichi-cache",
     "crates/dadhichi-vector",
     "crates/dadhichi-ui",
@@ -58,6 +59,7 @@ dadhichi-workspace = { path = "crates/dadhichi-workspace" }
 dadhichi-parse = { path = "crates/dadhichi-parse" }
 dadhichi-index = { path = "crates/dadhichi-index" }
 dadhichi-lsp = { path = "crates/dadhichi-lsp" }
+dadhichi-dap = { path = "crates/dadhichi-dap" }
 dadhichi-cache = { path = "crates/dadhichi-cache" }
 dadhichi-vector = { path = "crates/dadhichi-vector" }
 dadhichi-ui = { path = "crates/dadhichi-ui" }

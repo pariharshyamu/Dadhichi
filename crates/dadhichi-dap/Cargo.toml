@@ -1,19 +1,19 @@
 [package]
-name = "dadhichi-mcp"
+name = "dadhichi-dap"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Model Context Protocol client/server and tool registry for Dadhichi"
+description = "Debug Adapter Protocol client service for the Dadhichi IDE"
 
 [lints]
 workspace = true
 
 [dependencies]
+dadhichi-core.workspace = true
 tokio = { workspace = true, features = ["process"] }
-async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

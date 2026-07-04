@@ -78,4 +78,97 @@ impl Memory {
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
     }
+
+    /// Clone the full item list — a checkpoint the caller can later
+    /// [`restore`](Self::restore) after a failed or abandoned step.
+    pub fn snapshot(&self) -> Vec<MemoryItem> {
+        self.items.clone()
+    }
+
+    /// Replace all items with a previously taken [`snapshot`](Self::snapshot).
+    pub fn restore(&mut self, items: Vec<MemoryItem>) {
+        self.items = items;
+    }
+
+    /// Bound memory to at most `max` items, evicting the oldest first but never
+    /// dropping `LongTerm` entries. Returns the number of items evicted.
+    pub fn prune(&mut self, max: usize) -> usize {
+        if self.items.len() <= max {
+            return 0;
+        }
+        let mut removed = 0;
+        // Walk oldest-first, dropping non-durable items until within budget.
+        let target = self.items.len() - max;
+        let mut kept = Vec::with_capacity(self.items.len());
+        for item in std::mem::take(&mut self.items) {
+            if removed < target && item.tier != Tier::LongTerm {
+                removed += 1;
+            } else {
+                kept.push(item);
+            }
+        }
+        self.items = kept;
+        removed
+    }
+
+    /// Collapse every `Conversation` item into a single `LongTerm` summary,
+    /// freeing working space while preserving the gist. `summarise_fn` receives
+    /// the concatenated conversation text and returns the summary to store.
+    pub fn summarise_conversation(&mut self, summarise_fn: impl Fn(&str) -> String) {
+        let convo: Vec<String> = self
+            .items
+            .iter()
+            .filter(|i| i.tier == Tier::Conversation)
+            .map(|i| i.content.clone())
+            .collect();
+        if convo.is_empty() {
+            return;
+        }
+        let summary = summarise_fn(&convo.join("\n"));
+        self.items.retain(|i| i.tier != Tier::Conversation);
+        self.remember(Tier::LongTerm, summary);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn snapshot_and_restore_round_trip() {
+        let mut mem = Memory::new();
+        mem.remember(Tier::Working, "a");
+        let snap = mem.snapshot();
+        mem.remember(Tier::Working, "b");
+        assert_eq!(mem.len(), 2);
+        mem.restore(snap);
+        assert_eq!(mem.len(), 1);
+    }
+
+    #[test]
+    fn prune_evicts_oldest_but_keeps_long_term() {
+        let mut mem = Memory::new();
+        mem.remember(Tier::LongTerm, "durable");
+        mem.remember(Tier::Working, "old");
+        mem.remember(Tier::Working, "new");
+        let evicted = mem.prune(2);
+        assert_eq!(evicted, 1);
+        assert_eq!(mem.len(), 2);
+        // The durable item survives; the oldest working item is gone.
+        assert!(!mem.recall("durable").is_empty());
+        assert!(mem.recall("old").is_empty());
+    }
+
+    #[test]
+    fn summarise_collapses_conversation_into_long_term() {
+        let mut mem = Memory::new();
+        mem.remember(Tier::Conversation, "user asked X");
+        mem.remember(Tier::Conversation, "assistant answered Y");
+        mem.summarise_conversation(|text| format!("summary({} chars)", text.len()));
+
+        assert!(mem.recall_tier(Tier::Conversation).is_empty());
+        let long = mem.recall_tier(Tier::LongTerm);
+        assert_eq!(long.len(), 1);
+        assert!(long[0].content.starts_with("summary("));
+    }
 }

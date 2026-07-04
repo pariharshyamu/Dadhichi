@@ -38,14 +38,23 @@
 pub mod agent;
 pub mod agents;
 pub mod memory;
+pub mod orchestrator;
 pub mod plan;
 pub mod semantic;
+pub mod verify;
+pub mod workflow;
+
+#[cfg(test)]
+mod test_support;
 
 pub use agent::{Agent, AgentContext, AgentError, AgentOutcome, AgentStatus};
-pub use agents::ConversationalAgent;
+pub use agents::{ConversationalAgent, SpecialistAgent};
 pub use memory::{Memory, MemoryItem, Tier};
+pub use orchestrator::{Checkpoint, Orchestrator};
 pub use plan::{Plan, Step};
 pub use semantic::SemanticMemory;
+pub use verify::{HeuristicVerifier, Verdict, Verifier};
+pub use workflow::{Workflow, WorkflowReport, WorkflowStep};
 
 #[cfg(test)]
 mod tests {

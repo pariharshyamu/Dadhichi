@@ -53,6 +53,9 @@ pub enum AgentError {
     /// A tool invocation failed.
     #[error("tool error: {0}")]
     Tool(String),
+    /// No agent was registered under the requested name.
+    #[error("unknown agent: {0}")]
+    UnknownAgent(String),
     /// The run was cancelled cooperatively.
     #[error("cancelled")]
     Cancelled,
@@ -101,6 +104,26 @@ impl AgentContext {
     pub fn emit(&self, topic: &str, payload: serde_json::Value) {
         self.bus
             .publish(Event::new(topic, payload).with_correlation(self.correlation_id));
+    }
+
+    /// Create a sibling context that shares the services (model router, tool
+    /// registry, event bus) and grants but gets fresh memory and a new
+    /// correlation id. This is how the orchestrator runs several agents in
+    /// parallel without them sharing mutable memory.
+    pub fn fork(&self) -> AgentContext {
+        AgentContext {
+            models: self.models.clone(),
+            tools: self.tools.clone(),
+            grants: self.grants.clone(),
+            memory: Memory::new(),
+            correlation_id: Uuid::new_v4(),
+            bus: self.bus.clone(),
+        }
+    }
+
+    /// The event bus this context publishes on.
+    pub fn bus(&self) -> &EventBus {
+        &self.bus
     }
 }
 

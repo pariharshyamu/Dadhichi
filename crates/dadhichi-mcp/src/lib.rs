@@ -22,10 +22,14 @@
 //! # }
 //! ```
 
+pub mod bridge;
+pub mod client;
 pub mod protocol;
 pub mod registry;
 pub mod tool;
 
+pub use bridge::McpToolBridge;
+pub use client::McpConnection;
 pub use protocol::{
     McpClient, McpError, RpcErrorObject, RpcRequest, RpcResponse, ServerCapabilities,
 };

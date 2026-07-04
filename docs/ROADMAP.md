@@ -70,14 +70,26 @@ draws purely from `dadhichi-ui`'s view-models and holds no state, a GPU shell
 plugs in by writing a new `render` over the same `App` — no application logic
 changes. `< 20 ms` latency and the GPU pipeline remain a GPU-shell concern.
 
-## Phase 4 — Autonomous Agents & MCP at Scale
+## Phase 4 — Autonomous Agents & MCP at Scale ✅ (complete)
 
-- [ ] Specialised agents: code, refactor, test, review, docs, security, git
-- [ ] Multi-agent delegation, checkpoints/rollback, background & parallel runs
-- [ ] Reflection/verification passes with confidence scoring
-- [ ] LanceDB long-term memory with embedding recall; summarisation & pruning
-- [ ] Live MCP clients (stdio/WebSocket) for GitHub, Docker, Kubernetes, DBs
-- [ ] DAP debugger service; workflow automation from natural language
+- [x] Specialised agents: `SpecialistAgent` with code / refactor / test / review
+      / docs / git / security constructors, each planning and reflecting
+- [x] Orchestrator: run by name, parallel fan-out on forked contexts, and
+      `Checkpoint` capture/restore for rollback
+- [x] Reflection/verification: `HeuristicVerifier` scores confidence from real
+      structural signals (plan completion, answer substance)
+- [x] Memory summarisation & pruning (`Memory::prune`,
+      `summarise_conversation`); semantic recall shipped in Phase 2
+- [x] Live MCP client: transport-generic `McpConnection` (line-delimited
+      JSON-RPC, id-correlated) with `connect_stdio`, plus `McpToolBridge` that
+      exposes discovered external tools through the permission-gated registry
+- [x] DAP debugger service (`dadhichi-dap`): initialize, breakpoints, threads,
+      continue, with adapter events republished as `dap.<event>`
+- [x] Workflow automation from natural language: `Workflow::parse` decomposes a
+      request and delegates each clause to the right specialist
+
+Deferred to a later pass: a WebSocket MCP transport, and the LanceDB backend for
+durable long-term memory (the `VectorStore` trait already abstracts it).
 
 ## Phase 5 — Extensibility, Collaboration & Reach
 

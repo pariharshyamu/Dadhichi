@@ -5,5 +5,7 @@
 //! as a template for the specialised agents (code, refactor, test, review, git).
 
 mod conversational;
+mod specialists;
 
 pub use conversational::ConversationalAgent;
+pub use specialists::SpecialistAgent;
