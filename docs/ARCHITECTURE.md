@@ -60,9 +60,11 @@ crates/
 ├── dadhichi-mcp         # tools + MCP     — depends on nothing internal
 ├── dadhichi-workspace   # index model     — depends on nothing internal
 ├── dadhichi-parse       # tree-sitter     — depends on workspace
-├── dadhichi-index       # indexing svc    — depends on core, workspace, parse
+├── dadhichi-cache       # RocksDB cache   — depends on nothing internal
+├── dadhichi-vector      # vector store    — depends on nothing internal
+├── dadhichi-index       # indexing svc    — depends on core, workspace, parse, cache
 ├── dadhichi-lsp         # LSP client      — depends on core
-├── dadhichi-agent       # agents          — depends on core, ai, mcp
+├── dadhichi-agent       # agents          — depends on core, ai, mcp, vector
 ├── dadhichi-plugin      # plugin SDK      — depends on core
 └── dadhichi             # binary          — depends on all of the above
 ```
@@ -166,8 +168,9 @@ skipping the network entirely).
 **[implemented]** `dadhichi-ai`, including concrete `OpenAiProvider` (OpenAI /
 OpenRouter / Ollama / vLLM / LM Studio) and `AnthropicProvider` over reqwest
 with SSE streaming, the `complete_resilient` fallback chain, a `CostTable` for
-per-completion pricing, and both caching layers. **[design]** embeddings and
-rerankers.
+per-completion pricing, both caching layers, and an `EmbeddingModel`
+abstraction (`MockEmbedder` + `OpenAiEmbedder`) feeding semantic search.
+**[design]** rerankers.
 
 ---
 
@@ -256,14 +259,17 @@ Three stores, each chosen for its access pattern:
   `symbols(id, file_id, name, kind, line, col)`,
   `refs(symbol_id, file_id, line)`, `edges(from_symbol, to_symbol, kind)`.
 - **RocksDB** — high-throughput cache: parsed ASTs, incremental build artifacts.
-- **LanceDB** — vector store for embeddings powering semantic search and
-  long-term agent memory.
+- **Vector store** — embeddings powering semantic search and long-term agent
+  memory.
 
-The `SymbolIndex` in `dadhichi-workspace` defines the query surface these
-backends implement; the in-memory version is the reference implementation, and
-`dadhichi-index::SqliteSymbolStore` is the working SQLite backend. **[implemented]**
-the symbols schema + store; **[design]** the reference/call-graph tables,
-RocksDB cache, and LanceDB vector store.
+**[implemented]** the SQLite `SqliteSymbolStore` now holds both the `symbols`
+table and a `refs` table (the call/reference graph), answering `definitions`,
+`callers_of`, and `callees_of`. `dadhichi-cache::RocksBlobCache` is the working
+RocksDB blob cache — the indexer memoises each file's parse result by content
+hash, so an unchanged file is never re-parsed. `dadhichi-vector` provides the
+`VectorStore` trait with an exact cosine-kNN `InMemoryVectorStore`; **[design]**
+LanceDB is the drop-in on-disk ANN backend behind the same trait, and the
+`files`/`edges`-with-kinds schema refinement.
 
 ---
 
@@ -275,13 +281,17 @@ Layered, tiered memory for agents:
 |------|----------|------------------|
 | `Working` | current step | in-memory, cleared per step |
 | `Conversation` | current session | in-memory / SQLite |
-| `LongTerm` | durable | LanceDB (vector) + SQLite |
+| `LongTerm` | durable | vector store + SQLite |
 
-`Memory::recall()` is the retrieval API; the in-memory keyword match is a
-stand-in for embedding similarity, which the LanceDB backend supplies without
-changing callers. **[design]** automatic summarisation and pruning.
+Two retrieval paths exist: `Memory::recall()` for keyword recall, and
+`SemanticMemory` for **recall by meaning** — it embeds each item with an
+`EmbeddingModel` and stores it in a `VectorStore`, so a query retrieves the
+nearest items by cosine similarity even when the wording differs. **[design]**
+automatic summarisation and pruning; the LanceDB backend for durable, scalable
+semantic memory.
 
-**[implemented]** `dadhichi-agent::memory`.
+**[implemented]** `dadhichi-agent::memory` and `dadhichi-agent::semantic`, with
+`MockEmbedder` for offline determinism and `OpenAiEmbedder` for real embeddings.
 
 ---
 

@@ -5,7 +5,7 @@
 //! **incremental** — [`replace_file`](SymbolStore::replace_file) swaps only one
 //! file's rows — so a single save re-indexes without rewriting the database.
 
-use dadhichi_workspace::{Symbol, SymbolKind};
+use dadhichi_workspace::{Reference, Symbol, SymbolKind};
 use std::path::Path;
 use std::sync::Mutex;
 use thiserror::Error;
@@ -28,6 +28,19 @@ pub trait SymbolStore: Send + Sync {
 
     /// Total number of stored symbols.
     fn symbol_count(&self) -> Result<usize, StoreError>;
+
+    /// Replace every reference edge previously recorded for `file`.
+    fn replace_file_references(
+        &self,
+        file: &Path,
+        references: &[Reference],
+    ) -> Result<(), StoreError>;
+
+    /// The edges that reference `name` — i.e. its callers (incoming edges).
+    fn callers_of(&self, name: &str) -> Result<Vec<Reference>, StoreError>;
+
+    /// The edges originating in `caller` — i.e. what it calls (outgoing edges).
+    fn callees_of(&self, caller: &str) -> Result<Vec<Reference>, StoreError>;
 }
 
 /// A SQLite-backed [`SymbolStore`].
@@ -57,7 +70,17 @@ impl SqliteSymbolStore {
                  line INTEGER NOT NULL
              );
              CREATE INDEX IF NOT EXISTS idx_symbols_name ON symbols(name);
-             CREATE INDEX IF NOT EXISTS idx_symbols_file ON symbols(file);",
+             CREATE INDEX IF NOT EXISTS idx_symbols_file ON symbols(file);
+
+             CREATE TABLE IF NOT EXISTS refs (
+                 from_symbol TEXT,
+                 to_name TEXT NOT NULL,
+                 file TEXT NOT NULL,
+                 line INTEGER NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS idx_refs_to ON refs(to_name);
+             CREATE INDEX IF NOT EXISTS idx_refs_from ON refs(from_symbol);
+             CREATE INDEX IF NOT EXISTS idx_refs_file ON refs(file);",
         )?;
         Ok(Self {
             conn: Mutex::new(conn),
@@ -111,6 +134,61 @@ impl SymbolStore for SqliteSymbolStore {
         let n: i64 = conn.query_row("SELECT COUNT(*) FROM symbols", [], |r| r.get(0))?;
         Ok(n as usize)
     }
+
+    fn replace_file_references(
+        &self,
+        file: &Path,
+        references: &[Reference],
+    ) -> Result<(), StoreError> {
+        let file_str = file.to_string_lossy();
+        let mut conn = self.conn.lock().expect("store mutex poisoned");
+        let tx = conn.transaction()?;
+        tx.execute("DELETE FROM refs WHERE file = ?1", [file_str.as_ref()])?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO refs (from_symbol, to_name, file, line) VALUES (?1, ?2, ?3, ?4)",
+            )?;
+            for r in references {
+                stmt.execute(rusqlite::params![
+                    r.from,
+                    r.to,
+                    r.file.to_string_lossy(),
+                    r.line,
+                ])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn callers_of(&self, name: &str) -> Result<Vec<Reference>, StoreError> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let mut stmt =
+            conn.prepare("SELECT from_symbol, to_name, file, line FROM refs WHERE to_name = ?1")?;
+        let rows = stmt.query_map([name], reference_from_row)?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    fn callees_of(&self, caller: &str) -> Result<Vec<Reference>, StoreError> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let mut stmt = conn
+            .prepare("SELECT from_symbol, to_name, file, line FROM refs WHERE from_symbol = ?1")?;
+        let rows = stmt.query_map([caller], reference_from_row)?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+}
+
+fn reference_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Reference> {
+    let from: Option<String> = row.get(0)?;
+    let to: String = row.get(1)?;
+    let file: String = row.get(2)?;
+    let line: u32 = row.get(3)?;
+    Ok(Reference {
+        from,
+        to,
+        file: file.into(),
+        line,
+    })
 }
 
 fn kind_to_str(kind: SymbolKind) -> &'static str {
@@ -181,5 +259,60 @@ mod tests {
         assert_eq!(store.definitions("new").unwrap().len(), 1);
         assert_eq!(store.definitions("keep").unwrap().len(), 1);
         assert_eq!(store.symbol_count().unwrap(), 2);
+    }
+
+    fn reference(from: Option<&str>, to: &str, file: &str, line: u32) -> Reference {
+        Reference {
+            from: from.map(str::to_string),
+            to: to.into(),
+            file: file.into(),
+            line,
+        }
+    }
+
+    #[test]
+    fn stores_and_queries_the_call_graph() {
+        let store = SqliteSymbolStore::in_memory().unwrap();
+        store
+            .replace_file_references(
+                Path::new("a.rs"),
+                &[
+                    reference(Some("main"), "helper", "a.rs", 3),
+                    reference(Some("main"), "log", "a.rs", 4),
+                    reference(Some("helper"), "log", "a.rs", 8),
+                ],
+            )
+            .unwrap();
+
+        // Who calls `log`? main and helper.
+        let callers = store.callers_of("log").unwrap();
+        assert_eq!(callers.len(), 2);
+
+        // What does `main` call? helper and log.
+        let callees = store.callees_of("main").unwrap();
+        let names: Vec<_> = callees.iter().map(|r| r.to.as_str()).collect();
+        assert!(names.contains(&"helper"));
+        assert!(names.contains(&"log"));
+    }
+
+    #[test]
+    fn reference_reindex_is_incremental() {
+        let store = SqliteSymbolStore::in_memory().unwrap();
+        store
+            .replace_file_references(Path::new("a.rs"), &[reference(Some("f"), "old", "a.rs", 1)])
+            .unwrap();
+        store
+            .replace_file_references(
+                Path::new("b.rs"),
+                &[reference(Some("g"), "keep", "b.rs", 1)],
+            )
+            .unwrap();
+        store
+            .replace_file_references(Path::new("a.rs"), &[reference(Some("f"), "new", "a.rs", 1)])
+            .unwrap();
+
+        assert!(store.callers_of("old").unwrap().is_empty());
+        assert_eq!(store.callers_of("new").unwrap().len(), 1);
+        assert_eq!(store.callers_of("keep").unwrap().len(), 1);
     }
 }

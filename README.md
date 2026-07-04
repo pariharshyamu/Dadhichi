@@ -72,9 +72,11 @@ crates/
 ├── dadhichi-mcp         # MCP layer: tools, permission-gated registry, JSON-RPC
 ├── dadhichi-agent       # agent framework: planning, memory, lifecycle, tools
 ├── dadhichi-workspace   # workspace model + incremental symbol index
-├── dadhichi-parse       # tree-sitter symbol extraction (Rust grammar)
-├── dadhichi-index       # indexing service: file watcher + SQLite persistence
+├── dadhichi-parse       # tree-sitter symbol + call-graph extraction (Rust)
+├── dadhichi-index       # indexing service: file watcher + SQLite + blob cache
 ├── dadhichi-lsp         # LSP client: hover, definition, references, diagnostics
+├── dadhichi-cache       # persistent RocksDB blob cache for parse results
+├── dadhichi-vector      # vector store + cosine-kNN semantic search
 ├── dadhichi-plugin      # plugin SDK: manifest, capabilities, host lifecycle
 └── dadhichi             # runtime binary: wires the kernel + Agent Console
 ```

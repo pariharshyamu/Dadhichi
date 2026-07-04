@@ -58,6 +58,24 @@ pub struct Symbol {
     pub line: u32,
 }
 
+/// A reference: a use-site of a name, attributed to its enclosing definition.
+///
+/// References are the edges of the call/reference graph. `from` is the name of
+/// the enclosing symbol (the caller, if any) and `to` is the referenced name
+/// (the callee). An edge with `from == None` is a top-level reference outside
+/// any function.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Reference {
+    /// The enclosing symbol's name (the caller), if the reference is inside one.
+    pub from: Option<String>,
+    /// The referenced name (the callee).
+    pub to: String,
+    /// The file the reference occurs in.
+    pub file: PathBuf,
+    /// 1-based line number of the reference.
+    pub line: u32,
+}
+
 /// A workspace root: one folder that participates in the workspace.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Root {

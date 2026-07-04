@@ -18,8 +18,9 @@ mod console;
 
 use std::sync::Arc;
 
-use dadhichi_agent::{Agent, AgentContext, ConversationalAgent};
-use dadhichi_ai::{MockProvider, ModelRouter};
+use dadhichi_agent::{Agent, AgentContext, ConversationalAgent, SemanticMemory};
+use dadhichi_ai::{MockEmbedder, MockProvider, ModelRouter};
+use dadhichi_cache::RocksBlobCache;
 use dadhichi_core::Kernel;
 use dadhichi_index::store::SqliteSymbolStore;
 use dadhichi_index::{Indexer, store::SymbolStore};
@@ -64,13 +65,19 @@ async fn main() {
     let console = console::spawn(kernel.bus());
 
     // 3b. Index the workspace: tree-sitter parse → SQLite store, incremental
-    //     and event-emitting. This is the Phase 2 code-intelligence pipeline.
+    //     and event-emitting, with parse results memoised in a persistent
+    //     RocksDB blob cache. This is the Phase 2 code-intelligence pipeline.
     let store = Arc::new(SqliteSymbolStore::in_memory().expect("open symbol store"));
-    let indexer = Indexer::new(store.clone()).with_event_bus(kernel.bus().clone());
+    let mut indexer = Indexer::new(store.clone()).with_event_bus(kernel.bus().clone());
+    let cache_dir = std::env::temp_dir().join("dadhichi-parse-cache");
+    match RocksBlobCache::open(&cache_dir) {
+        Ok(cache) => indexer = indexer.with_blob_cache(Arc::new(cache)),
+        Err(err) => eprintln!("dadhichi ▸ blob cache unavailable ({err}); parsing uncached"),
+    }
     match indexer.index_dir(std::env::current_dir().unwrap_or_else(|_| ".".into())) {
         Ok(total) => {
             println!("dadhichi ▸ indexed {total} symbols across the workspace");
-            // Demonstrate a go-to-definition style lookup against the index.
+            // Go-to-definition lookup against the symbol index.
             if let Ok(defs) = store.definitions("main")
                 && let Some(def) = defs.first()
             {
@@ -80,8 +87,33 @@ async fn main() {
                     def.line
                 );
             }
+            // Call-graph query: who calls `index_source`?
+            if let Ok(callers) = store.callers_of("index_source") {
+                println!(
+                    "dadhichi ▸ 'index_source' has {} call site(s) in the codebase",
+                    callers.len()
+                );
+            }
         }
         Err(err) => eprintln!("dadhichi ▸ indexing failed: {err}"),
+    }
+
+    // 3c. Semantic memory: embed notes and recall by meaning (vector search).
+    let mut semantic = SemanticMemory::new(Arc::new(MockEmbedder::default()));
+    for note in [
+        "Dadhichi is agent-native",
+        "The kernel is a microkernel",
+        "Agents use MCP tools",
+    ] {
+        let _ = semantic.remember(note, serde_json::json!({})).await;
+    }
+    if let Ok(hits) = semantic.recall("The kernel is a microkernel", 1).await
+        && let Some(hit) = hits.first()
+    {
+        println!(
+            "dadhichi ▸ semantic recall top hit: {:?} (score {:.2})",
+            hit.payload["text"], hit.score
+        );
     }
 
     // 4. Run an agent.

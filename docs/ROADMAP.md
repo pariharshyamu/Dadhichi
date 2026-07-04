@@ -38,9 +38,16 @@ The bootable foundation, fully offline and tested.
 - [x] LSP client service — hover, go-to-definition, references, and live
       diagnostics over stdio, with responses correlated by id and diagnostics
       republished as `lsp.diagnostics` events (`dadhichi-lsp`)
-
-Remaining for a later pass: reference/call-graph tables, RocksDB cache, and the
-LanceDB vector store (semantic memory/search).
+- [x] Reference/call-graph tables: the parser extracts call/use edges attributed
+      to their enclosing function; the SQLite store answers `callers_of` /
+      `callees_of` (`dadhichi-parse`, `dadhichi-index`)
+- [x] RocksDB blob cache memoising parse results by content hash, so unchanged
+      files are never re-parsed (`dadhichi-cache`)
+- [x] Vector store + semantic search: cosine-kNN `VectorStore`, an
+      `EmbeddingModel` abstraction (mock + OpenAI), and `SemanticMemory` for
+      embed-and-recall (`dadhichi-vector`, `dadhichi-ai`, `dadhichi-agent`). The
+      in-memory store is the reference backend; LanceDB is the drop-in
+      production backend behind the same trait.
 
 ## Phase 3 — The GUI Shell
 
