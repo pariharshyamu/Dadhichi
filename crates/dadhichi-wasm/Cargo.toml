@@ -1,0 +1,19 @@
+[package]
+name = "dadhichi-wasm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Sandboxed WASM plugin runtime with fuel metering and a host capability boundary"
+
+[lints]
+workspace = true
+
+[dependencies]
+thiserror.workspace = true
+wasmi = "0.36"
+
+[dev-dependencies]
+wat = "1"

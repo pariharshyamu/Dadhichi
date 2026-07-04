@@ -16,6 +16,10 @@ members = [
     "crates/dadhichi-term",
     "crates/dadhichi-git",
     "crates/dadhichi-tui",
+    "crates/dadhichi-collab",
+    "crates/dadhichi-security",
+    "crates/dadhichi-telemetry",
+    "crates/dadhichi-wasm",
     "crates/dadhichi-plugin",
     "crates/dadhichi",
 ]
@@ -65,6 +69,10 @@ dadhichi-vector = { path = "crates/dadhichi-vector" }
 dadhichi-ui = { path = "crates/dadhichi-ui" }
 dadhichi-term = { path = "crates/dadhichi-term" }
 dadhichi-git = { path = "crates/dadhichi-git" }
+dadhichi-collab = { path = "crates/dadhichi-collab" }
+dadhichi-security = { path = "crates/dadhichi-security" }
+dadhichi-telemetry = { path = "crates/dadhichi-telemetry" }
+dadhichi-wasm = { path = "crates/dadhichi-wasm" }
 dadhichi-plugin = { path = "crates/dadhichi-plugin" }
 
 [profile.release]

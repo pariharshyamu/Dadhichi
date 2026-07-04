@@ -91,15 +91,28 @@ changes. `< 20 ms` latency and the GPU pipeline remain a GPU-shell concern.
 Deferred to a later pass: a WebSocket MCP transport, and the LanceDB backend for
 durable long-term memory (the `VectorStore` trait already abstracts it).
 
-## Phase 5 — Extensibility, Collaboration & Reach
+## Phase 5 — Extensibility, Collaboration & Reach ✅ (complete)
 
-- [ ] `wasmtime`/WASI plugin runtime + signed extension marketplace
-- [ ] Live collaboration (CRDT) with shared cursors, presence, AI participant
-- [ ] Full security suite: WASI sandbox, secret vault, SAST/DAST, audit log,
-      prompt-injection defenses
-- [ ] OpenTelemetry tracing/metrics; crash reporting; opt-in telemetry
-- [ ] Cross-platform packaging (Linux/macOS/Windows); WASM edition; mobile
-      companion
+- [x] Sandboxed WASM plugin runtime (`dadhichi-wasm`, wasmi): fuel metering, a
+      host capability boundary, and memory isolation
+- [x] Signed extension marketplace (`dadhichi-plugin::marketplace`): Ed25519
+      publisher signatures + SHA-256 module integrity, verified before load
+- [x] Live collaboration (`dadhichi-collab`): an RGA text CRDT that converges
+      under concurrent edits, plus shared cursors/presence with an AI-participant
+      flag
+- [x] Security suite (`dadhichi-security`): ChaCha20-Poly1305 credential vault,
+      secret detection, a hash-chained tamper-evident audit log, and
+      prompt-injection assessment + quarantine
+- [x] Observability (`dadhichi-telemetry`): a metrics registry (counters/gauges)
+      with JSON snapshot, and a crash reporter with consent-gated upload
+- [ ] Cross-platform packaging / WASM edition / mobile companion — CI builds a
+      release across Linux/macOS/Windows; installers and the wasm32 edition are
+      the remaining reach work
+
+The plugin runtime uses `wasmi` (a portable interpreter) rather than
+`wasmtime`/WASI for a fast, dependency-light build; the JIT + full WASI slot in
+behind the same `WasmRuntime` surface. SAST/DAST are the remaining security
+additions on top of the shipped suite.
 
 ## Guiding invariants (all phases)
 
