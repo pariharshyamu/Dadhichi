@@ -22,7 +22,10 @@ SQLite indexing pipeline with a call graph and RocksDB parse cache; an LSP
 client; and vector/semantic search. Phase 3 (The Shell) — **complete**: a
 toolkit-agnostic UI core (editor, explorer, problems, command palette, agent
 console) rendered by a real ratatui terminal frontend, plus integrated
-pseudo-terminal and Git view-models. See
+pseudo-terminal and Git view-models. Phase 4 (Autonomous Agents) —
+**complete**: specialist agents, an orchestrator with parallel runs and
+checkpoints, natural-language workflow automation, reflection/verification, a
+live stdio MCP client with tool bridging, and a DAP debugger client. See
 [`docs/ROADMAP.md`](docs/ROADMAP.md) for the phased plan toward the full
 autonomous agentic IDE, and [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for
 the complete system design.
@@ -78,6 +81,7 @@ crates/
 ├── dadhichi-parse       # tree-sitter symbol + call-graph extraction (Rust)
 ├── dadhichi-index       # indexing service: file watcher + SQLite + blob cache
 ├── dadhichi-lsp         # LSP client: hover, definition, references, diagnostics
+├── dadhichi-dap         # DAP debugger client: breakpoints, threads, events
 ├── dadhichi-cache       # persistent RocksDB blob cache for parse results
 ├── dadhichi-vector      # vector store + cosine-kNN semantic search
 ├── dadhichi-ui          # toolkit-agnostic UI core: panels, editor, palette

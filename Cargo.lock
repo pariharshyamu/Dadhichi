@@ -304,6 +304,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "dadhichi-dap"
+version = "0.1.0"
+dependencies = [
+ "dadhichi-core",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "dadhichi-git"
 version = "0.1.0"
 dependencies = [

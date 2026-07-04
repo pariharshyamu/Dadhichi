@@ -64,6 +64,7 @@ crates/
 ├── dadhichi-vector      # vector store    — depends on nothing internal
 ├── dadhichi-index       # indexing svc    — depends on core, workspace, parse, cache
 ├── dadhichi-lsp         # LSP client      — depends on core
+├── dadhichi-dap         # DAP client      — depends on core
 ├── dadhichi-ui          # UI core         — depends on core
 ├── dadhichi-term        # terminal        — depends on nothing internal
 ├── dadhichi-git         # git view-model  — depends on nothing internal
@@ -198,9 +199,14 @@ uniformly and new agent types need no runtime changes.
 - `ConversationalAgent` — the reference implementation exercising the full loop
   offline.
 
-**[implemented]** `dadhichi-agent`. **[design]** multi-agent delegation,
-checkpoints/rollback, parallel background execution, reflection/verification
-passes with confidence scoring.
+**[implemented]** `dadhichi-agent`, including seven specialist agents
+(`SpecialistAgent`: code, refactor, test, review, docs, git, security); an
+`Orchestrator` that runs agents by name, fans several out **in parallel** on
+forked contexts, and captures/restores `Checkpoint`s for rollback;
+reflection/verification via `HeuristicVerifier` (confidence from real structural
+signals); and `Workflow`, which decomposes a natural-language request and
+**delegates** each clause to the right specialist. **[design]** richer
+per-step (rather than one-shot) execution and model-driven planning.
 
 ---
 
@@ -234,8 +240,13 @@ server (exposing its own workspace tools to other agents).
 - `protocol` — JSON-RPC 2.0 envelope plus `McpClient` trait and capability
   negotiation for bridging external MCP servers behind the same `Tool` trait.
 
-**[implemented]** `dadhichi-mcp`. **[design]** concrete stdio/WebSocket
-transports, discovery, auth.
+**[implemented]** `dadhichi-mcp`, now including a live `McpConnection` — a
+transport-generic, id-correlated JSON-RPC client with a `connect_stdio`
+constructor — and `McpToolBridge`, which discovers a remote server's tools and
+exposes each through the permission-gated `ToolRegistry` (defaulting external
+tools to the `Network` scope). An agent invokes a GitHub or Docker MCP tool
+exactly as it invokes a built-in one. **[design]** a WebSocket transport and
+auth.
 
 ---
 
@@ -300,9 +311,10 @@ Layered, tiered memory for agents:
 Two retrieval paths exist: `Memory::recall()` for keyword recall, and
 `SemanticMemory` for **recall by meaning** — it embeds each item with an
 `EmbeddingModel` and stores it in a `VectorStore`, so a query retrieves the
-nearest items by cosine similarity even when the wording differs. **[design]**
-automatic summarisation and pruning; the LanceDB backend for durable, scalable
-semantic memory.
+nearest items by cosine similarity even when the wording differs.
+`Memory::prune` bounds working memory (evicting oldest, never `LongTerm`) and
+`summarise_conversation` collapses the transcript into a durable summary.
+**[design]** the LanceDB backend for durable, scalable semantic memory.
 
 **[implemented]** `dadhichi-agent::memory` and `dadhichi-agent::semantic`, with
 `MockEmbedder` for offline determinism and `OpenAiEmbedder` for real embeddings.
@@ -329,9 +341,12 @@ talking to an MCP server".
 - **LSP**: `dadhichi-lsp::LspClient` speaks the Language Server Protocol over
   stdio — Content-Length framing, id-correlated requests, and notifications
   (diagnostics) forwarded onto the event bus as `lsp.diagnostics`.
-- **DAP** **[design]**: a Debug Adapter Protocol client of the same shape.
+- **DAP**: `dadhichi-dap::DapClient` — the same Content-Length framing and
+  id-correlation as LSP, with adapter events (`stopped`, `terminated`) forwarded
+  onto the bus as `dap.<event>`.
 
-**[implemented]** internal command RPC, MCP envelope, and the LSP client.
+**[implemented]** internal command RPC, MCP envelope + live client, and the LSP
+and DAP clients.
 
 ---
 
