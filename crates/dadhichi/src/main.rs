@@ -24,10 +24,13 @@ use dadhichi_agent::{
 };
 use dadhichi_ai::{MockEmbedder, MockProvider, ModelRouter};
 use dadhichi_cache::RocksBlobCache;
+use dadhichi_collab::Rga;
 use dadhichi_core::Kernel;
 use dadhichi_index::store::SqliteSymbolStore;
 use dadhichi_index::{Indexer, store::SymbolStore};
 use dadhichi_mcp::{EchoTool, GrantSet, Permission, ToolRegistry};
+use dadhichi_telemetry::Metrics;
+use dadhichi_wasm::WasmRuntime;
 use dadhichi_workspace::Workspace;
 
 #[tokio::main]
@@ -179,6 +182,55 @@ async fn main() {
         "dadhichi ▸ workflow confidence: {:.0}%",
         report.overall_confidence() * 100.0
     );
+
+    // 4c. Phase 5 — extensibility, collaboration, security, observability.
+    println!("\ndadhichi ▸ phase 5 capabilities:");
+
+    // Sandboxed WASM plugin: run untrusted code under fuel metering.
+    if let Ok(wasm) = wat::parse_str(
+        r#"(module (func (export "add") (param i32 i32) (result i32)
+             local.get 0 local.get 1 i32.add))"#,
+    ) && let Ok(mut plugin) = WasmRuntime::new().instantiate(&wasm, 1_000_000)
+        && let Ok(sum) = plugin.call_ii_i("add", 40, 2)
+    {
+        println!("dadhichi ▸   wasm plugin add(40,2) = {sum} (sandboxed, fuel-metered)");
+    }
+
+    // CRDT collaboration: two replicas converge under concurrent edits.
+    let mut a = Rga::new(1);
+    let mut b = Rga::new(2);
+    let ops: Vec<_> = "hi"
+        .chars()
+        .enumerate()
+        .map(|(i, c)| a.insert(i, c))
+        .collect();
+    for op in ops {
+        b.apply(op);
+    }
+    let oa = a.insert(2, '!');
+    let ob = b.insert(0, '>');
+    b.apply(oa);
+    a.apply(ob);
+    println!(
+        "dadhichi ▸   crdt converged: replica-a={:?} replica-b={:?} (equal={})",
+        a.text(),
+        b.text(),
+        a.text() == b.text()
+    );
+
+    // Security: catch a leaked credential before it is committed.
+    let sample = "let token = \"ghp_0123456789abcdefghij\";";
+    let findings = dadhichi_security::scan(sample);
+    println!(
+        "dadhichi ▸   secret scan flagged {} credential(s)",
+        findings.len()
+    );
+
+    // Observability: metrics captured this session.
+    let metrics = Metrics::new();
+    metrics.incr("agent.runs", 1 + report.steps.len() as u64);
+    metrics.incr("symbols.indexed", store.symbol_count().unwrap_or(0) as u64);
+    println!("dadhichi ▸   metrics: {}", metrics.snapshot());
 
     // 5. Drain the console by dropping the kernel's bus handles.
     drop(ctx);

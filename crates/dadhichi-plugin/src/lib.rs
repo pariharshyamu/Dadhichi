@@ -10,6 +10,10 @@
 //! across it, but native (in-process) plugins used in tests implement it
 //! directly.
 
+pub mod marketplace;
+
+pub use marketplace::{MarketError, SignedPackage, TrustedPublishers, sign_package};
+
 use dadhichi_core::Kernel;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;

@@ -69,6 +69,10 @@ crates/
 ├── dadhichi-term        # terminal        — depends on nothing internal
 ├── dadhichi-git         # git view-model  — depends on nothing internal
 ├── dadhichi-tui         # TUI frontend    — depends on ui, git
+├── dadhichi-collab      # CRDT collab     — depends on nothing internal
+├── dadhichi-security    # security suite  — depends on nothing internal
+├── dadhichi-telemetry   # observability   — depends on nothing internal
+├── dadhichi-wasm        # WASM runtime    — depends on nothing internal
 ├── dadhichi-agent       # agents          — depends on core, ai, mcp, vector
 ├── dadhichi-plugin      # plugin SDK      — depends on core
 └── dadhichi             # binary          — depends on all of the above
@@ -221,8 +225,13 @@ manifest declared and the user approved. The trait is the stable ABI boundary
 the WASM runtime marshals across.
 
 **[implemented]** `dadhichi-plugin` (native in-process plugins + capability
-gating). **[design]** the `wasmtime`/WASI runtime, marketplace, versioning,
-dependency isolation.
+gating) and its **signed marketplace** (`SignedPackage`: Ed25519 publisher
+signatures over `(id, version, module-hash)`, verified against
+`TrustedPublishers` with SHA-256 integrity before load); plus `dadhichi-wasm`,
+a **sandboxed WASM runtime** (wasmi) with fuel metering, memory isolation, and a
+host capability boundary — a module reaches the host only through explicitly
+linked functions. **[design]** the `wasmtime`/WASI JIT (same `WasmRuntime`
+surface), versioning, dependency isolation.
 
 ---
 
@@ -402,11 +411,17 @@ Defense in depth, **secure by design**:
   manifest requests an ungranted `Capability`.
 - **Agent sandboxing**: agents act only through granted tools — they hold no
   ambient authority over the filesystem or network.
-- **[design]**: WASI sandbox for plugins, secret detection and a credential
-  vault, dependency/license scanning (SAST/DAST), prompt-injection guards on
-  untrusted content, and an append-only audit log of every tool invocation.
+- **Security suite** (`dadhichi-security`): a ChaCha20-Poly1305 credential
+  **vault** (keys never stored in the clear), **secret detection** that catches
+  credentials leaking into text at the boundary, a **hash-chained audit log**
+  that makes every security action tamper-evident, and **prompt-injection**
+  assessment + quarantine for untrusted content.
+- **Plugin sandbox**: WASM modules run under wasmi with fuel metering and no
+  ambient authority (see §8).
+- **[design]**: full WASI sandbox, dependency/license scanning (SAST/DAST).
 
-**[implemented]** the two capability-enforcement choke points.
+**[implemented]** the two capability-enforcement choke points, the security
+suite, the WASM sandbox, and the signed marketplace.
 
 ---
 
@@ -447,7 +462,11 @@ fmt/clippy/test.
 
 ---
 
-## 22. Cross-Platform Packaging **[design]**
+## 22. Cross-Platform Packaging
+
+**[implemented]** CI builds a release of the whole workspace on
+Linux, macOS, and Windows (a matrix job), so every commit is proven to compile
+on all three. **[design]** the packaging/signing steps below.
 
 - **Linux**: AppImage + `.deb`/`.rpm`.
 - **macOS**: signed & notarised `.app` / `.dmg` (universal arm64 + x86_64).

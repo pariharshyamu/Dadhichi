@@ -25,7 +25,10 @@ console) rendered by a real ratatui terminal frontend, plus integrated
 pseudo-terminal and Git view-models. Phase 4 (Autonomous Agents) —
 **complete**: specialist agents, an orchestrator with parallel runs and
 checkpoints, natural-language workflow automation, reflection/verification, a
-live stdio MCP client with tool bridging, and a DAP debugger client. See
+live stdio MCP client with tool bridging, and a DAP debugger client. Phase 5
+(Extensibility & Collaboration) — **complete**: a sandboxed WASM plugin runtime,
+a signed extension marketplace, CRDT collaboration, a security suite (vault,
+secret scan, audit log, injection defense), and observability. See
 [`docs/ROADMAP.md`](docs/ROADMAP.md) for the phased plan toward the full
 autonomous agentic IDE, and [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for
 the complete system design.
@@ -88,7 +91,11 @@ crates/
 ├── dadhichi-term        # integrated pseudo-terminal sessions (portable-pty)
 ├── dadhichi-git         # Git view-model (git2): branch, status, commit, log
 ├── dadhichi-tui         # terminal frontend (ratatui) rendering the UI core
-├── dadhichi-plugin      # plugin SDK: manifest, capabilities, host lifecycle
+├── dadhichi-collab      # CRDT collaboration: convergent text, cursors, presence
+├── dadhichi-security    # credential vault, secret scan, audit log, injection guard
+├── dadhichi-telemetry   # metrics registry + crash reporting
+├── dadhichi-wasm        # sandboxed WASM plugin runtime (wasmi, fuel-metered)
+├── dadhichi-plugin      # plugin SDK: manifest, capabilities, signed marketplace
 └── dadhichi             # runtime binary: wires the kernel + Agent Console
 ```
 
