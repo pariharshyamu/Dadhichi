@@ -64,6 +64,10 @@ crates/
 ├── dadhichi-vector      # vector store    — depends on nothing internal
 ├── dadhichi-index       # indexing svc    — depends on core, workspace, parse, cache
 ├── dadhichi-lsp         # LSP client      — depends on core
+├── dadhichi-ui          # UI core         — depends on core
+├── dadhichi-term        # terminal        — depends on nothing internal
+├── dadhichi-git         # git view-model  — depends on nothing internal
+├── dadhichi-tui         # TUI frontend    — depends on ui, git
 ├── dadhichi-agent       # agents          — depends on core, ai, mcp, vector
 ├── dadhichi-plugin      # plugin SDK      — depends on core
 └── dadhichi             # binary          — depends on all of the above
@@ -235,17 +239,27 @@ transports, discovery, auth.
 
 ---
 
-## 10. UI Architecture **[design]**
+## 10. UI Architecture
 
-A thin, GPU-accelerated shell (candidate: **GPUI** or **Slint**, rendered via
-`wgpu`) that owns *no business logic*. The UI dispatches commands and subscribes
-to events; every panel (Explorer, Editor, Terminal, Chat, Agent Console,
-Problems, Timeline) is an event-bus consumer. State flows one way: UI intent →
-command → service → event → UI update. Target: **< 20 ms UI latency**, achieved
-by keeping the render thread free of blocking work (all I/O is async on Tokio)
-and using incremental rendering. The headless `dadhichi` binary already proves
-the kernel/console split the GUI will reuse — the Agent Console is today a
-stdout event subscriber and becomes a panel unchanged.
+The UI is split into a **toolkit-agnostic core** and a **renderer**, so the
+application logic is written and tested once and every frontend reuses it.
+
+- **`dadhichi-ui`** owns the view-models — a rope-backed `Document` editor, the
+  `Explorer` tree, the `ProblemsPanel`, the fuzzy `CommandPalette`, and the
+  chat/agent transcript — aggregated in `App`. It owns *no business logic and no
+  rendering*. `App::apply_event` is the single seam where bus events mutate UI
+  state, realising the one-way flow **UI intent → command → service → event →
+  view-model update**.
+- **`dadhichi-tui`** is a concrete renderer (ratatui + crossterm) that draws
+  `App` and translates keystrokes into view-model calls. It holds no state, so a
+  `wgpu`/GPUI shell plugs in by writing a new `render` over the same `App`.
+
+**[implemented]** the UI core and the terminal frontend, both unit-tested —
+the TUI renders against ratatui's `TestBackend` so the full multi-panel layout
+is verified headlessly. **[design]** the GPU shell (GPUI/Slint + `wgpu`) and its
+`< 20 ms` frame budget; because the render thread only reads view-models and all
+I/O is async on Tokio, that target is a renderer concern, not an architectural
+one.
 
 ---
 

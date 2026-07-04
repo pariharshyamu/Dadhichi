@@ -18,8 +18,11 @@ executes an agent run end to end.
 Phase 1 (Minimum Viable Kernel) — **complete**. Phase 2 (Real Models &
 Editing) — **complete**: real OpenAI/Anthropic providers with SSE streaming,
 fallback routing, cost accounting, and prompt/response caching; a tree-sitter →
-SQLite indexing pipeline driven by a file watcher; and an LSP client for hover,
-go-to-definition, references, and live diagnostics. See
+SQLite indexing pipeline with a call graph and RocksDB parse cache; an LSP
+client; and vector/semantic search. Phase 3 (The Shell) — **complete**: a
+toolkit-agnostic UI core (editor, explorer, problems, command palette, agent
+console) rendered by a real ratatui terminal frontend, plus integrated
+pseudo-terminal and Git view-models. See
 [`docs/ROADMAP.md`](docs/ROADMAP.md) for the phased plan toward the full
 autonomous agentic IDE, and [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for
 the complete system design.
@@ -77,9 +80,16 @@ crates/
 ├── dadhichi-lsp         # LSP client: hover, definition, references, diagnostics
 ├── dadhichi-cache       # persistent RocksDB blob cache for parse results
 ├── dadhichi-vector      # vector store + cosine-kNN semantic search
+├── dadhichi-ui          # toolkit-agnostic UI core: panels, editor, palette
+├── dadhichi-term        # integrated pseudo-terminal sessions (portable-pty)
+├── dadhichi-git         # Git view-model (git2): branch, status, commit, log
+├── dadhichi-tui         # terminal frontend (ratatui) rendering the UI core
 ├── dadhichi-plugin      # plugin SDK: manifest, capabilities, host lifecycle
 └── dadhichi             # runtime binary: wires the kernel + Agent Console
 ```
+
+Launch the terminal shell with `cargo run -p dadhichi-tui`, or render a
+headless snapshot of it with `cargo run -p dadhichi-tui --example snapshot`.
 
 Each crate has its own crate-level Rustdoc (`cargo doc --open`) and unit tests.
 

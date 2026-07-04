@@ -49,13 +49,26 @@ The bootable foundation, fully offline and tested.
       in-memory store is the reference backend; LanceDB is the drop-in
       production backend behind the same trait.
 
-## Phase 3 — The GUI Shell
+## Phase 3 — The Shell ✅ (complete)
 
-- [ ] GPU-accelerated shell (GPUI/Slint + wgpu), < 20 ms interaction latency
-- [ ] Editor (rope + incremental layout), Explorer, Problems, Timeline
-- [ ] Chat panel + Agent Console as event-bus-driven panels
-- [ ] Command Palette over the `CommandRegistry`; universal + semantic search
-- [ ] Integrated GPU terminal (portable-pty) and built-in Git UI (git2-rs)
+- [x] Toolkit-agnostic UI application core (`dadhichi-ui`): the `App` aggregate
+      with one-way data flow (`apply_event`), reused by any renderer
+- [x] Rope-backed editor (`ropey`) with incremental edits and cursor navigation
+- [x] Explorer (collapsible file tree), Problems (fed by `lsp.diagnostics`),
+      and Chat / Agent Console as event-bus-driven panels
+- [x] Command Palette over the command names, with fuzzy ranking
+- [x] A real, running terminal frontend (`dadhichi-tui`, ratatui + crossterm)
+      that renders the shared view-models; verified headlessly against a
+      `TestBackend`
+- [x] Integrated pseudo-terminal sessions (`dadhichi-term`, portable-pty)
+- [x] Built-in Git view-model (`dadhichi-git`, git2): branch, status, stage,
+      commit, history
+
+The GUI shell is a ratatui TUI rather than a `wgpu`/GPUI window: a GPU surface
+can neither run nor be tested in a headless CI environment. Because rendering
+draws purely from `dadhichi-ui`'s view-models and holds no state, a GPU shell
+plugs in by writing a new `render` over the same `App` — no application logic
+changes. `< 20 ms` latency and the GPU pipeline remain a GPU-shell concern.
 
 ## Phase 4 — Autonomous Agents & MCP at Scale
 

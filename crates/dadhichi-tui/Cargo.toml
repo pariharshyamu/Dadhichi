@@ -1,0 +1,30 @@
+[package]
+name = "dadhichi-tui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Terminal frontend for the Dadhichi IDE, rendering the toolkit-agnostic UI core"
+
+[lints]
+workspace = true
+
+[lib]
+name = "dadhichi_tui"
+path = "src/lib.rs"
+
+[[bin]]
+name = "dadhichi-tui"
+path = "src/main.rs"
+
+[dependencies]
+dadhichi-ui.workspace = true
+dadhichi-git.workspace = true
+ratatui = "0.28"
+crossterm = "0.28"
+
+[dev-dependencies]
+dadhichi-core.workspace = true
+serde_json.workspace = true
