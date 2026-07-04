@@ -12,9 +12,11 @@
 //! unit-tested without any network access.
 
 pub mod anthropic;
+pub mod embeddings;
 pub mod openai;
 pub mod sse;
 
 pub use anthropic::AnthropicProvider;
+pub use embeddings::OpenAiEmbedder;
 pub use openai::OpenAiProvider;
 pub use sse::SseDecoder;

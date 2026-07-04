@@ -1,39 +1,63 @@
 //! # dadhichi-parse
 //!
-//! Tree-sitter-backed extraction of [`Symbol`]s from source code. The indexer
-//! feeds files here on every change; the resulting symbols are handed to
-//! [`SymbolIndex`](dadhichi_workspace::SymbolIndex) to power go-to-definition,
-//! outline, breadcrumbs, and symbol search.
+//! Tree-sitter-backed extraction of [`Symbol`]s and [`Reference`]s from source
+//! code. The indexer feeds files here on every change; the resulting symbols
+//! power go-to-definition, outline, and symbol search, while the references form
+//! the edges of the call/reference graph.
 //!
 //! The current grammar is Rust. Adding a language is additive: implement
-//! [`LanguageParser`] over another tree-sitter grammar and register it — the
-//! rest of the pipeline is language-agnostic.
+//! [`LanguageParser`] over another tree-sitter grammar — the rest of the
+//! pipeline is language-agnostic.
 //!
 //! ```
 //! use dadhichi_parse::{LanguageParser, RustParser};
 //! use std::path::Path;
 //!
-//! let symbols = RustParser::new().parse("fn main() {}\nstruct S;", Path::new("a.rs"));
-//! assert!(symbols.iter().any(|s| s.name == "main"));
-//! assert!(symbols.iter().any(|s| s.name == "S"));
+//! let parsed = RustParser::new()
+//!     .parse_all("fn helper() {}\nfn main() { helper(); }", Path::new("a.rs"));
+//! assert!(parsed.symbols.iter().any(|s| s.name == "main"));
+//! // `main` calls `helper`.
+//! assert!(parsed
+//!     .references
+//!     .iter()
+//!     .any(|r| r.to == "helper" && r.from.as_deref() == Some("main")));
 //! ```
 
-use dadhichi_workspace::{Symbol, SymbolKind};
+use dadhichi_workspace::{Reference, Symbol, SymbolKind};
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 use tree_sitter::{Node, Parser};
 
-/// A language-agnostic source parser producing definition symbols.
-///
-/// The `&Path` argument (rather than `impl AsRef<Path>`) keeps the trait
-/// dyn-compatible so the indexer can hold a `Box<dyn LanguageParser>` chosen at
-/// runtime by file extension.
-pub trait LanguageParser {
-    /// Extract every top-level and nested definition symbol from `source`,
-    /// tagging each with `path`.
-    fn parse(&self, source: &str, path: &Path) -> Vec<Symbol>;
+/// The full result of analysing one file.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct Parsed {
+    /// Definition symbols found in the file.
+    pub symbols: Vec<Symbol>,
+    /// Reference edges (call/use sites) found in the file.
+    pub references: Vec<Reference>,
 }
 
-/// A Rust source parser built on the `tree-sitter-rust` grammar.
+/// A language-agnostic source analyser producing symbols and references.
+///
+/// [`parse_all`](Self::parse_all) is the primary method (one parse, both
+/// outputs); [`parse`](Self::parse) and
+/// [`parse_references`](Self::parse_references) are convenience projections.
+pub trait LanguageParser {
+    /// Analyse `source`, returning both symbols and references.
+    fn parse_all(&self, source: &str, path: &Path) -> Parsed;
+
+    /// Extract only definition symbols.
+    fn parse(&self, source: &str, path: &Path) -> Vec<Symbol> {
+        self.parse_all(source, path).symbols
+    }
+
+    /// Extract only reference edges.
+    fn parse_references(&self, source: &str, path: &Path) -> Vec<Reference> {
+        self.parse_all(source, path).references
+    }
+}
+
+/// A Rust source analyser built on the `tree-sitter-rust` grammar.
 #[derive(Debug, Default)]
 pub struct RustParser;
 
@@ -60,46 +84,105 @@ fn kind_of(node_kind: &str) -> Option<SymbolKind> {
 }
 
 impl LanguageParser for RustParser {
-    fn parse(&self, source: &str, path: &Path) -> Vec<Symbol> {
+    fn parse_all(&self, source: &str, path: &Path) -> Parsed {
         let mut parser = Parser::new();
         if parser
             .set_language(&tree_sitter_rust::LANGUAGE.into())
             .is_err()
         {
-            return Vec::new();
+            return Parsed::default();
         }
         let Some(tree) = parser.parse(source, None) else {
-            return Vec::new();
+            return Parsed::default();
         };
 
-        let mut symbols = Vec::new();
+        let mut parsed = Parsed::default();
         let bytes = source.as_bytes();
-        // Iterative pre-order walk so deeply nested items (e.g. functions inside
-        // modules or impls) are captured without recursion depth limits.
-        let mut stack = vec![tree.root_node()];
-        while let Some(node) = stack.pop() {
-            if let Some(kind) = kind_of(node.kind())
-                && let Some(name_node) = node.child_by_field_name("name")
-                && let Ok(name) = name_node.utf8_text(bytes)
-            {
-                symbols.push(Symbol {
-                    name: name.to_string(),
-                    kind,
-                    file: path.to_path_buf(),
-                    // tree-sitter rows are 0-based; editors and LSP are 1-based.
-                    line: name_node.start_position().row as u32 + 1,
-                });
-            }
-            push_named_children(node, &mut stack);
-        }
-        symbols
+        walk(tree.root_node(), None, bytes, path, &mut parsed);
+        parsed
     }
 }
 
-fn push_named_children<'a>(node: Node<'a>, stack: &mut Vec<Node<'a>>) {
+/// Recursively walk the tree, collecting symbols and references while tracking
+/// the nearest enclosing function so references can be attributed to a caller.
+///
+/// `enclosing` is owned (cloned only at each function boundary, which is rare),
+/// sidestepping the borrow conflict of holding a reference into `out` while also
+/// mutating `out`.
+fn walk(node: Node<'_>, enclosing: Option<String>, bytes: &[u8], path: &Path, out: &mut Parsed) {
+    let mut current_enclosing = enclosing;
+
+    // Definitions.
+    if let Some(kind) = kind_of(node.kind())
+        && let Some(name_node) = node.child_by_field_name("name")
+        && let Ok(name) = name_node.utf8_text(bytes)
+    {
+        out.symbols.push(Symbol {
+            name: name.to_string(),
+            kind,
+            file: path.to_path_buf(),
+            // tree-sitter rows are 0-based; editors and LSP are 1-based.
+            line: name_node.start_position().row as u32 + 1,
+        });
+        // References inside a function body are attributed to that function.
+        if kind == SymbolKind::Function {
+            current_enclosing = Some(name.to_string());
+        }
+    }
+
+    // References: calls and macro invocations.
+    if let Some((to, line)) = reference_target(node, bytes) {
+        out.references.push(Reference {
+            from: current_enclosing.clone(),
+            to,
+            file: path.to_path_buf(),
+            line,
+        });
+    }
+
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
-        stack.push(child);
+        walk(child, current_enclosing.clone(), bytes, path, out);
+    }
+}
+
+/// If `node` is a call or macro invocation, return the callee name and its line.
+fn reference_target(node: Node<'_>, bytes: &[u8]) -> Option<(String, u32)> {
+    match node.kind() {
+        "call_expression" => {
+            let func = node.child_by_field_name("function")?;
+            let name = callee_name(func, bytes)?;
+            Some((name, func.start_position().row as u32 + 1))
+        }
+        "macro_invocation" => {
+            let macro_node = node.child_by_field_name("macro")?;
+            let name = callee_name(macro_node, bytes)?;
+            Some((name, macro_node.start_position().row as u32 + 1))
+        }
+        _ => None,
+    }
+}
+
+/// Extract a callee name from the `function`/`macro` node of a call, resolving
+/// paths to their final segment and method calls to the method name.
+fn callee_name(node: Node<'_>, bytes: &[u8]) -> Option<String> {
+    match node.kind() {
+        "identifier" => node.utf8_text(bytes).ok().map(str::to_string),
+        // `path::to::func` — take the final segment.
+        "scoped_identifier" => node
+            .child_by_field_name("name")
+            .and_then(|n| n.utf8_text(bytes).ok())
+            .map(str::to_string),
+        // `receiver.method(...)` — take the method name.
+        "field_expression" => node
+            .child_by_field_name("field")
+            .and_then(|n| n.utf8_text(bytes).ok())
+            .map(str::to_string),
+        // `func::<T>(...)` — unwrap the generic to its inner function.
+        "generic_function" => node
+            .child_by_field_name("function")
+            .and_then(|n| callee_name(n, bytes)),
+        _ => None,
     }
 }
 
@@ -146,5 +229,35 @@ mod tests {
     fn tags_symbols_with_the_given_path() {
         let syms = RustParser::new().parse("fn a() {}", Path::new("src/x.rs"));
         assert_eq!(syms[0].file, PathBuf::from("src/x.rs"));
+    }
+
+    #[test]
+    fn attributes_calls_to_the_enclosing_function() {
+        let src = "fn helper() {}\nfn caller() {\n    helper();\n    println!(\"hi\");\n}\n";
+        let parsed = RustParser::new().parse_all(src, Path::new("a.rs"));
+
+        let call = parsed
+            .references
+            .iter()
+            .find(|r| r.to == "helper")
+            .expect("call to helper recorded");
+        assert_eq!(call.from.as_deref(), Some("caller"));
+        assert_eq!(call.line, 3);
+
+        // The macro invocation is captured too, attributed to the same caller.
+        assert!(
+            parsed
+                .references
+                .iter()
+                .any(|r| r.to == "println" && r.from.as_deref() == Some("caller"))
+        );
+    }
+
+    #[test]
+    fn resolves_paths_and_methods_to_final_segment() {
+        let src = "fn f() {\n    std::mem::swap();\n    thing.method();\n}\n";
+        let refs = RustParser::new().parse_references(src, Path::new("a.rs"));
+        assert!(refs.iter().any(|r| r.to == "swap"));
+        assert!(refs.iter().any(|r| r.to == "method"));
     }
 }

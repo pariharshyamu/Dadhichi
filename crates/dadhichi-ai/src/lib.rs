@@ -20,14 +20,18 @@
 //! # }
 //! ```
 
+pub mod cache;
 pub mod cost;
+pub mod embedding;
 pub mod provider;
 #[cfg(feature = "http")]
 pub mod providers;
 pub mod router;
 pub mod types;
 
+pub use cache::{CachingModel, CompletionCache};
 pub use cost::{CostTable, ModelPricing};
+pub use embedding::{EmbeddingModel, MockEmbedder};
 pub use provider::{LanguageModel, MockProvider, ModelCapabilities, ProviderError, ProviderResult};
 pub use router::ModelRouter;
 pub use types::{
@@ -35,7 +39,7 @@ pub use types::{
 };
 
 #[cfg(feature = "http")]
-pub use providers::{AnthropicProvider, OpenAiProvider};
+pub use providers::{AnthropicProvider, OpenAiEmbedder, OpenAiProvider};
 
 #[cfg(test)]
 mod tests {

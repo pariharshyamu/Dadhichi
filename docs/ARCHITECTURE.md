@@ -60,8 +60,15 @@ crates/
 ├── dadhichi-mcp         # tools + MCP     — depends on nothing internal
 ├── dadhichi-workspace   # index model     — depends on nothing internal
 ├── dadhichi-parse       # tree-sitter     — depends on workspace
-├── dadhichi-index       # indexing svc    — depends on core, workspace, parse
-├── dadhichi-agent       # agents          — depends on core, ai, mcp
+├── dadhichi-cache       # RocksDB cache   — depends on nothing internal
+├── dadhichi-vector      # vector store    — depends on nothing internal
+├── dadhichi-index       # indexing svc    — depends on core, workspace, parse, cache
+├── dadhichi-lsp         # LSP client      — depends on core
+├── dadhichi-ui          # UI core         — depends on core
+├── dadhichi-term        # terminal        — depends on nothing internal
+├── dadhichi-git         # git view-model  — depends on nothing internal
+├── dadhichi-tui         # TUI frontend    — depends on ui, git
+├── dadhichi-agent       # agents          — depends on core, ai, mcp, vector
 ├── dadhichi-plugin      # plugin SDK      — depends on core
 └── dadhichi             # binary          — depends on all of the above
 ```
@@ -156,11 +163,18 @@ IDE only ever sees this trait, which is what makes Dadhichi **model-agnostic**.
 - `MockProvider` is a deterministic, offline provider used for tests, demos, and
   offline-first operation.
 
+Caching operates at two layers: **provider-side prompt caching**
+(`Message::cached()` inserts an Anthropic `cache_control` breakpoint over a
+stable prefix) and **client-side response caching** (`CachingModel` wraps any
+provider and serves byte-identical repeat requests from a `CompletionCache`,
+skipping the network entirely).
+
 **[implemented]** `dadhichi-ai`, including concrete `OpenAiProvider` (OpenAI /
 OpenRouter / Ollama / vLLM / LM Studio) and `AnthropicProvider` over reqwest
-with SSE streaming, the `complete_resilient` fallback chain, and a `CostTable`
-for per-completion pricing. **[design]** prompt/context caching, embeddings and
-rerankers.
+with SSE streaming, the `complete_resilient` fallback chain, a `CostTable` for
+per-completion pricing, both caching layers, and an `EmbeddingModel`
+abstraction (`MockEmbedder` + `OpenAiEmbedder`) feeding semantic search.
+**[design]** rerankers.
 
 ---
 
@@ -225,17 +239,27 @@ transports, discovery, auth.
 
 ---
 
-## 10. UI Architecture **[design]**
+## 10. UI Architecture
 
-A thin, GPU-accelerated shell (candidate: **GPUI** or **Slint**, rendered via
-`wgpu`) that owns *no business logic*. The UI dispatches commands and subscribes
-to events; every panel (Explorer, Editor, Terminal, Chat, Agent Console,
-Problems, Timeline) is an event-bus consumer. State flows one way: UI intent →
-command → service → event → UI update. Target: **< 20 ms UI latency**, achieved
-by keeping the render thread free of blocking work (all I/O is async on Tokio)
-and using incremental rendering. The headless `dadhichi` binary already proves
-the kernel/console split the GUI will reuse — the Agent Console is today a
-stdout event subscriber and becomes a panel unchanged.
+The UI is split into a **toolkit-agnostic core** and a **renderer**, so the
+application logic is written and tested once and every frontend reuses it.
+
+- **`dadhichi-ui`** owns the view-models — a rope-backed `Document` editor, the
+  `Explorer` tree, the `ProblemsPanel`, the fuzzy `CommandPalette`, and the
+  chat/agent transcript — aggregated in `App`. It owns *no business logic and no
+  rendering*. `App::apply_event` is the single seam where bus events mutate UI
+  state, realising the one-way flow **UI intent → command → service → event →
+  view-model update**.
+- **`dadhichi-tui`** is a concrete renderer (ratatui + crossterm) that draws
+  `App` and translates keystrokes into view-model calls. It holds no state, so a
+  `wgpu`/GPUI shell plugs in by writing a new `render` over the same `App`.
+
+**[implemented]** the UI core and the terminal frontend, both unit-tested —
+the TUI renders against ratatui's `TestBackend` so the full multi-panel layout
+is verified headlessly. **[design]** the GPU shell (GPUI/Slint + `wgpu`) and its
+`< 20 ms` frame budget; because the render thread only reads view-models and all
+I/O is async on Tokio, that target is a renderer concern, not an architectural
+one.
 
 ---
 
@@ -249,14 +273,17 @@ Three stores, each chosen for its access pattern:
   `symbols(id, file_id, name, kind, line, col)`,
   `refs(symbol_id, file_id, line)`, `edges(from_symbol, to_symbol, kind)`.
 - **RocksDB** — high-throughput cache: parsed ASTs, incremental build artifacts.
-- **LanceDB** — vector store for embeddings powering semantic search and
-  long-term agent memory.
+- **Vector store** — embeddings powering semantic search and long-term agent
+  memory.
 
-The `SymbolIndex` in `dadhichi-workspace` defines the query surface these
-backends implement; the in-memory version is the reference implementation, and
-`dadhichi-index::SqliteSymbolStore` is the working SQLite backend. **[implemented]**
-the symbols schema + store; **[design]** the reference/call-graph tables,
-RocksDB cache, and LanceDB vector store.
+**[implemented]** the SQLite `SqliteSymbolStore` now holds both the `symbols`
+table and a `refs` table (the call/reference graph), answering `definitions`,
+`callers_of`, and `callees_of`. `dadhichi-cache::RocksBlobCache` is the working
+RocksDB blob cache — the indexer memoises each file's parse result by content
+hash, so an unchanged file is never re-parsed. `dadhichi-vector` provides the
+`VectorStore` trait with an exact cosine-kNN `InMemoryVectorStore`; **[design]**
+LanceDB is the drop-in on-disk ANN backend behind the same trait, and the
+`files`/`edges`-with-kinds schema refinement.
 
 ---
 
@@ -268,13 +295,17 @@ Layered, tiered memory for agents:
 |------|----------|------------------|
 | `Working` | current step | in-memory, cleared per step |
 | `Conversation` | current session | in-memory / SQLite |
-| `LongTerm` | durable | LanceDB (vector) + SQLite |
+| `LongTerm` | durable | vector store + SQLite |
 
-`Memory::recall()` is the retrieval API; the in-memory keyword match is a
-stand-in for embedding similarity, which the LanceDB backend supplies without
-changing callers. **[design]** automatic summarisation and pruning.
+Two retrieval paths exist: `Memory::recall()` for keyword recall, and
+`SemanticMemory` for **recall by meaning** — it embeds each item with an
+`EmbeddingModel` and stores it in a `VectorStore`, so a query retrieves the
+nearest items by cosine similarity even when the wording differs. **[design]**
+automatic summarisation and pruning; the LanceDB backend for durable, scalable
+semantic memory.
 
-**[implemented]** `dadhichi-agent::memory`.
+**[implemented]** `dadhichi-agent::memory` and `dadhichi-agent::semantic`, with
+`MockEmbedder` for offline determinism and `OpenAiEmbedder` for real embeddings.
 
 ---
 
@@ -295,10 +326,12 @@ talking to an MCP server".
   universal RPC surface between UI and services.
 - **External MCP**: `McpClient::{initialize, call}` over the JSON-RPC envelope
   in `dadhichi-mcp::protocol`.
-- **LSP/DAP** **[design]**: adapters that translate the Language/Debug Adapter
-  Protocols into kernel commands and events.
+- **LSP**: `dadhichi-lsp::LspClient` speaks the Language Server Protocol over
+  stdio — Content-Length framing, id-correlated requests, and notifications
+  (diagnostics) forwarded onto the event bus as `lsp.diagnostics`.
+- **DAP** **[design]**: a Debug Adapter Protocol client of the same shape.
 
-**[implemented]** internal command RPC + MCP envelope.
+**[implemented]** internal command RPC, MCP envelope, and the LSP client.
 
 ---
 

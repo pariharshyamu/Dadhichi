@@ -39,11 +39,13 @@ pub mod agent;
 pub mod agents;
 pub mod memory;
 pub mod plan;
+pub mod semantic;
 
 pub use agent::{Agent, AgentContext, AgentError, AgentOutcome, AgentStatus};
 pub use agents::ConversationalAgent;
 pub use memory::{Memory, MemoryItem, Tier};
 pub use plan::{Plan, Step};
+pub use semantic::SemanticMemory;
 
 #[cfg(test)]
 mod tests {

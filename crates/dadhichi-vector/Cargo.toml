@@ -1,18 +1,17 @@
 [package]
-name = "dadhichi-parse"
+name = "dadhichi-vector"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Tree-sitter parsing that extracts symbols for the Dadhichi index"
+description = "Vector store and semantic-search primitives for the Dadhichi IDE"
 
 [lints]
 workspace = true
 
 [dependencies]
-dadhichi-workspace.workspace = true
 serde.workspace = true
-tree-sitter = "0.25"
-tree-sitter-rust = "0.24"
+serde_json.workspace = true
+thiserror.workspace = true

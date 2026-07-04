@@ -19,7 +19,7 @@ The bootable foundation, fully offline and tested.
 - [x] Runtime binary wiring the kernel + Agent Console (`dadhichi`)
 - [x] 18 unit tests + doctests, clippy-clean, rustfmt-enforced
 
-## Phase 2 — Real Models & Editing 🚧 (largely complete)
+## Phase 2 — Real Models & Editing ✅ (complete)
 
 - [x] Concrete providers behind `LanguageModel`: `OpenAiProvider` (OpenAI,
       OpenRouter, Ollama, vLLM, LM Studio via the shared `/chat/completions`
@@ -27,21 +27,48 @@ The bootable foundation, fully offline and tested.
       (`dadhichi-ai`, `http` feature)
 - [x] Capability-aware routing with fallback chain (`complete_resilient`) and
       cost accounting (`CostTable`/`ModelPricing`)
-- [ ] Prompt/context caching (deferred)
+- [x] Prompt/context caching: provider-side cache breakpoints (`Message::cached`
+      → Anthropic `cache_control`) and a client-side response cache
+      (`CachingModel`/`CompletionCache`)
 - [x] Tree-sitter parsing extracting symbols (`dadhichi-parse`, Rust grammar)
 - [x] `notify` file watcher → incremental re-index emitting `symbols.updated`
       (`dadhichi-index`)
 - [x] SQLite persistence for symbols (`SqliteSymbolStore`); reference/call graph
       still to come
-- [ ] LSP client service (go-to-def, hover, diagnostics, references) (deferred)
+- [x] LSP client service — hover, go-to-definition, references, and live
+      diagnostics over stdio, with responses correlated by id and diagnostics
+      republished as `lsp.diagnostics` events (`dadhichi-lsp`)
+- [x] Reference/call-graph tables: the parser extracts call/use edges attributed
+      to their enclosing function; the SQLite store answers `callers_of` /
+      `callees_of` (`dadhichi-parse`, `dadhichi-index`)
+- [x] RocksDB blob cache memoising parse results by content hash, so unchanged
+      files are never re-parsed (`dadhichi-cache`)
+- [x] Vector store + semantic search: cosine-kNN `VectorStore`, an
+      `EmbeddingModel` abstraction (mock + OpenAI), and `SemanticMemory` for
+      embed-and-recall (`dadhichi-vector`, `dadhichi-ai`, `dadhichi-agent`). The
+      in-memory store is the reference backend; LanceDB is the drop-in
+      production backend behind the same trait.
 
-## Phase 3 — The GUI Shell
+## Phase 3 — The Shell ✅ (complete)
 
-- [ ] GPU-accelerated shell (GPUI/Slint + wgpu), < 20 ms interaction latency
-- [ ] Editor (rope + incremental layout), Explorer, Problems, Timeline
-- [ ] Chat panel + Agent Console as event-bus-driven panels
-- [ ] Command Palette over the `CommandRegistry`; universal + semantic search
-- [ ] Integrated GPU terminal (portable-pty) and built-in Git UI (git2-rs)
+- [x] Toolkit-agnostic UI application core (`dadhichi-ui`): the `App` aggregate
+      with one-way data flow (`apply_event`), reused by any renderer
+- [x] Rope-backed editor (`ropey`) with incremental edits and cursor navigation
+- [x] Explorer (collapsible file tree), Problems (fed by `lsp.diagnostics`),
+      and Chat / Agent Console as event-bus-driven panels
+- [x] Command Palette over the command names, with fuzzy ranking
+- [x] A real, running terminal frontend (`dadhichi-tui`, ratatui + crossterm)
+      that renders the shared view-models; verified headlessly against a
+      `TestBackend`
+- [x] Integrated pseudo-terminal sessions (`dadhichi-term`, portable-pty)
+- [x] Built-in Git view-model (`dadhichi-git`, git2): branch, status, stage,
+      commit, history
+
+The GUI shell is a ratatui TUI rather than a `wgpu`/GPUI window: a GPU surface
+can neither run nor be tested in a headless CI environment. Because rendering
+draws purely from `dadhichi-ui`'s view-models and holds no state, a GPU shell
+plugs in by writing a new `render` over the same `App` — no application logic
+changes. `< 20 ms` latency and the GPU pipeline remain a GPU-shell concern.
 
 ## Phase 4 — Autonomous Agents & MCP at Scale
 

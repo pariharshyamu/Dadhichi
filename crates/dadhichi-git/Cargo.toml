@@ -1,0 +1,19 @@
+[package]
+name = "dadhichi-git"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Git integration (git2) view-model for the Dadhichi IDE"
+
+[lints]
+workspace = true
+
+[dependencies]
+thiserror.workspace = true
+git2 = { version = "0.19", default-features = false }
+
+[dev-dependencies]
+tempfile = "3"

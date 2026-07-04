@@ -1,0 +1,17 @@
+[package]
+name = "dadhichi-ui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Toolkit-agnostic UI application core: view-models, panels, command palette"
+
+[lints]
+workspace = true
+
+[dependencies]
+dadhichi-core.workspace = true
+serde_json.workspace = true
+ropey = "1.6"

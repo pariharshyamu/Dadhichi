@@ -25,8 +25,11 @@
 
 pub mod store;
 
+use dadhichi_cache::BlobCache;
 use dadhichi_core::{Event, EventBus};
-use dadhichi_parse::{LanguageParser, RustParser};
+use dadhichi_parse::{LanguageParser, Parsed, RustParser};
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::sync::Arc;
 use store::{StoreError, SymbolStore};
@@ -59,12 +62,14 @@ pub enum IndexError {
 pub struct Indexer {
     store: Arc<dyn SymbolStore>,
     bus: Option<EventBus>,
+    cache: Option<Arc<dyn BlobCache>>,
 }
 
 impl std::fmt::Debug for Indexer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Indexer")
             .field("has_bus", &self.bus.is_some())
+            .field("has_cache", &self.cache.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -72,13 +77,24 @@ impl std::fmt::Debug for Indexer {
 impl Indexer {
     /// Create an indexer writing into `store`, with no event bus attached.
     pub fn new(store: Arc<dyn SymbolStore>) -> Self {
-        Self { store, bus: None }
+        Self {
+            store,
+            bus: None,
+            cache: None,
+        }
     }
 
     /// Attach a kernel event bus so the indexer emits `symbols.updated` and
     /// `fs.changed` events.
     pub fn with_event_bus(mut self, bus: EventBus) -> Self {
         self.bus = Some(bus);
+        self
+    }
+
+    /// Attach a persistent blob cache. Parse results are memoised by file path
+    /// and content hash, so an unchanged file is never re-parsed.
+    pub fn with_blob_cache(mut self, cache: Arc<dyn BlobCache>) -> Self {
+        self.cache = Some(cache);
         self
     }
 
@@ -91,21 +107,45 @@ impl Indexer {
         }
     }
 
-    /// Parse `source` for `path`, replace that file's symbols in the store, and
-    /// emit `symbols.updated`. Returns the number of symbols indexed (0 if the
-    /// language is unsupported).
+    /// Analyse `source`, consulting the blob cache first when present.
+    fn analyze(&self, parser: &dyn LanguageParser, path: &Path, source: &str) -> Parsed {
+        let Some(cache) = &self.cache else {
+            return parser.parse_all(source, path);
+        };
+        let key = cache_key(path, source);
+        if let Ok(Some(bytes)) = cache.get(key.as_bytes())
+            && let Ok(parsed) = serde_json::from_slice::<Parsed>(&bytes)
+        {
+            return parsed;
+        }
+        let parsed = parser.parse_all(source, path);
+        if let Ok(bytes) = serde_json::to_vec(&parsed) {
+            let _ = cache.put(key.as_bytes(), &bytes);
+        }
+        parsed
+    }
+
+    /// Parse `source` for `path`, replace that file's symbols and references in
+    /// the store, and emit `symbols.updated`. Returns the number of symbols
+    /// indexed (0 if the language is unsupported).
     pub fn index_source(&self, path: impl AsRef<Path>, source: &str) -> Result<usize, IndexError> {
         let path = path.as_ref();
         let Some(parser) = Self::parser_for(path) else {
             return Ok(0);
         };
-        let symbols = parser.parse(source, path);
-        self.store.replace_file(path, &symbols)?;
+        let parsed = self.analyze(&*parser, path, source);
+        self.store.replace_file(path, &parsed.symbols)?;
+        self.store
+            .replace_file_references(path, &parsed.references)?;
         self.emit(
             "symbols.updated",
-            serde_json::json!({ "file": path.to_string_lossy(), "count": symbols.len() }),
+            serde_json::json!({
+                "file": path.to_string_lossy(),
+                "count": parsed.symbols.len(),
+                "references": parsed.references.len(),
+            }),
         );
-        Ok(symbols.len())
+        Ok(parsed.symbols.len())
     }
 
     /// Read `path` from disk and index it.
@@ -180,6 +220,14 @@ impl Indexer {
     }
 }
 
+/// A content-addressed cache key: the file path plus a hash of its contents, so
+/// editing a file invalidates its cached parse while a byte-identical file hits.
+fn cache_key(path: &Path, source: &str) -> String {
+    let mut hasher = DefaultHasher::new();
+    source.hash(&mut hasher);
+    format!("parse:{}:{:x}", path.to_string_lossy(), hasher.finish())
+}
+
 /// Keeps a filesystem watch alive; dropping it stops the watch.
 pub struct WatchGuard {
     _watcher: notify::RecommendedWatcher,
@@ -249,5 +297,56 @@ mod tests {
         let event = sub.recv().await.expect("event delivered");
         assert_eq!(event.payload["count"], 1);
         assert_eq!(event.payload["file"], "x.rs");
+    }
+
+    #[test]
+    fn indexes_the_call_graph() {
+        let (indexer, store) = indexer();
+        indexer
+            .index_source("a.rs", "fn helper() {}\nfn main() { helper(); }")
+            .unwrap();
+        // `main` calls `helper`.
+        let callers = store.callers_of("helper").unwrap();
+        assert_eq!(callers.len(), 1);
+        assert_eq!(callers[0].from.as_deref(), Some("main"));
+    }
+
+    /// An in-memory `BlobCache` that counts writes, to prove cache hits skip
+    /// re-parsing.
+    #[derive(Default)]
+    struct CountingCache {
+        map: std::sync::Mutex<std::collections::HashMap<Vec<u8>, Vec<u8>>>,
+        puts: std::sync::atomic::AtomicU64,
+    }
+
+    impl BlobCache for CountingCache {
+        fn put(&self, key: &[u8], value: &[u8]) -> Result<(), dadhichi_cache::CacheError> {
+            self.puts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.map
+                .lock()
+                .unwrap()
+                .insert(key.to_vec(), value.to_vec());
+            Ok(())
+        }
+        fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, dadhichi_cache::CacheError> {
+            Ok(self.map.lock().unwrap().get(key).cloned())
+        }
+        fn delete(&self, key: &[u8]) -> Result<(), dadhichi_cache::CacheError> {
+            self.map.lock().unwrap().remove(key);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn blob_cache_avoids_reparsing_unchanged_files() {
+        let store = Arc::new(SqliteSymbolStore::in_memory().unwrap());
+        let cache = Arc::new(CountingCache::default());
+        let indexer = Indexer::new(store).with_blob_cache(cache.clone());
+
+        let src = "fn main() {}";
+        indexer.index_source("a.rs", src).unwrap(); // miss → parse + put
+        indexer.index_source("a.rs", src).unwrap(); // hit  → no put
+
+        assert_eq!(cache.puts.load(std::sync::atomic::Ordering::Relaxed), 1);
     }
 }

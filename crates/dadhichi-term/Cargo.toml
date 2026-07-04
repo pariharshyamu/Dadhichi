@@ -1,0 +1,16 @@
+[package]
+name = "dadhichi-term"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Integrated pseudo-terminal sessions (portable-pty) for the Dadhichi IDE"
+
+[lints]
+workspace = true
+
+[dependencies]
+thiserror.workspace = true
+portable-pty = "0.8"

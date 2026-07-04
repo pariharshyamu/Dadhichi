@@ -1,0 +1,19 @@
+[package]
+name = "dadhichi-cache"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Persistent blob cache (RocksDB) for parsed ASTs and build artifacts"
+
+[lints]
+workspace = true
+
+[dependencies]
+thiserror.workspace = true
+rocksdb = { version = "0.22", default-features = false }
+
+[dev-dependencies]
+tempfile = "3"

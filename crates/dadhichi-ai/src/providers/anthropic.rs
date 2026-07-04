@@ -54,10 +54,27 @@ impl AnthropicProvider {
     }
 }
 
-/// Build the JSON request body, splitting out system messages and defaulting
-/// `max_tokens`. Pure, so the wire format is unit-testable.
+/// An ephemeral prompt-cache breakpoint marker.
+fn cache_control() -> serde_json::Value {
+    serde_json::json!({ "type": "ephemeral" })
+}
+
+/// Render a message's content: a bare string, or a single text block carrying a
+/// `cache_control` breakpoint when the message is marked for caching.
+fn content_value(text: &str, cache: bool) -> serde_json::Value {
+    if cache {
+        serde_json::json!([{ "type": "text", "text": text, "cache_control": cache_control() }])
+    } else {
+        serde_json::json!(text)
+    }
+}
+
+/// Build the JSON request body, splitting out system messages, defaulting
+/// `max_tokens`, and attaching prompt-cache breakpoints. Pure, so the wire
+/// format is unit-testable.
 fn build_body(request: &CompletionRequest, stream: bool) -> serde_json::Value {
     let mut system = String::new();
+    let mut system_cached = false;
     let mut messages = Vec::new();
     for m in &request.messages {
         match m.role {
@@ -66,10 +83,11 @@ fn build_body(request: &CompletionRequest, stream: bool) -> serde_json::Value {
                     system.push_str("\n\n");
                 }
                 system.push_str(&m.content);
+                system_cached |= m.cache;
             }
             role => messages.push(serde_json::json!({
                 "role": if matches!(role, Role::Assistant) { "assistant" } else { "user" },
-                "content": m.content,
+                "content": content_value(&m.content, m.cache),
             })),
         }
     }
@@ -83,7 +101,13 @@ fn build_body(request: &CompletionRequest, stream: bool) -> serde_json::Value {
         "stream": stream,
     });
     if !system.is_empty() {
-        body["system"] = serde_json::json!(system);
+        // A cached system prompt must be sent as blocks so the breakpoint has a
+        // block to attach to.
+        body["system"] = if system_cached {
+            serde_json::json!([{ "type": "text", "text": system, "cache_control": cache_control() }])
+        } else {
+            serde_json::json!(system)
+        };
     }
     if !request.params.stop.is_empty() {
         body["stop_sequences"] = serde_json::json!(request.params.stop);
@@ -254,6 +278,29 @@ impl LanguageModel for AnthropicProvider {
 mod tests {
     use super::*;
     use crate::types::Message;
+
+    #[test]
+    fn cache_breakpoint_renders_control_blocks() {
+        let req = CompletionRequest::new("claude-sonnet-5")
+            .message(Message::system("big stable context").cached())
+            .message(Message::user("hi").cached());
+        let body = build_body(&req, false);
+
+        // System becomes a block array carrying cache_control.
+        assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
+        // The cached user message becomes a text block with cache_control.
+        assert_eq!(
+            body["messages"][0]["content"][0]["cache_control"]["type"],
+            "ephemeral"
+        );
+    }
+
+    #[test]
+    fn uncached_messages_stay_plain_strings() {
+        let req = CompletionRequest::new("claude-sonnet-5").message(Message::user("hi"));
+        let body = build_body(&req, false);
+        assert_eq!(body["messages"][0]["content"], "hi");
+    }
 
     #[test]
     fn system_message_is_hoisted_out() {
