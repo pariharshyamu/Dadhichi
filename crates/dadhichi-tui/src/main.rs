@@ -1,9 +1,10 @@
 //! Interactive entry point for the Dadhichi terminal shell.
 //!
-//! It builds an [`App`] from the current workspace, then runs a `crossterm`
-//! event loop translating keystrokes into view-model updates and redrawing via
-//! [`dadhichi_tui::render`]. The render path and view-models are unit-tested in
-//! the library; this file is the thin, TTY-bound driver.
+//! It boots an [`AppController`] — the live kernel, agents, and indexer — then
+//! runs a `crossterm` loop that pumps bus events into the UI each frame and
+//! translates keystrokes into view-model updates and command dispatches. The
+//! render path and view-models are unit-tested in the library; this file is the
+//! thin, TTY-bound driver.
 
 use std::io;
 use std::time::Duration;
@@ -13,19 +14,33 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
+use dadhichi_app::AppController;
 use dadhichi_git::GitRepo;
-use dadhichi_ui::{App, Focus};
+use dadhichi_ui::Focus;
 use ratatui::{Terminal, backend::CrosstermBackend};
 
-fn main() -> io::Result<()> {
-    let mut app = build_app();
+#[tokio::main]
+async fn main() -> io::Result<()> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
+    let mut controller = AppController::new(&cwd).await;
+
+    // Seed the editor with a file and the status bar with the git branch.
+    if let Ok(text) = std::fs::read_to_string(cwd.join("Cargo.toml")) {
+        controller
+            .ui_mut()
+            .open_document(Some(cwd.join("Cargo.toml")), &text);
+    }
+    controller.ui_mut().status = match GitRepo::open(&cwd).ok().and_then(|r| r.current_branch()) {
+        Some(branch) => format!("on branch {branch}  ·  Ctrl-P for commands"),
+        None => "no git repository".into(),
+    };
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout))?;
 
-    let result = run_loop(&mut terminal, &mut app);
+    let result = run_loop(&mut terminal, &mut controller).await;
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
@@ -33,44 +48,23 @@ fn main() -> io::Result<()> {
     result
 }
 
-/// Assemble the initial shell state from the current directory.
-fn build_app() -> App {
-    let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
-    let mut app = App::new();
-    app.open_workspace(&cwd);
-    app.set_commands(vec![
-        "agent.run".into(),
-        "editor.save".into(),
-        "editor.format".into(),
-        "workspace.reindex".into(),
-        "git.commit".into(),
-        "git.status".into(),
-        "quit".into(),
-    ]);
-
-    if let Ok(text) = std::fs::read_to_string(cwd.join("Cargo.toml")) {
-        app.open_document(Some(cwd.join("Cargo.toml")), &text);
-    }
-    app.status = match GitRepo::open(&cwd).ok().and_then(|r| r.current_branch()) {
-        Some(branch) => format!("on branch {branch}"),
-        None => "no git repository".into(),
-    };
-    app
-}
-
-fn run_loop(
+async fn run_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    app: &mut App,
+    controller: &mut AppController,
 ) -> io::Result<()> {
     loop {
-        terminal.draw(|f| dadhichi_tui::render(app, f))?;
-        if event::poll(Duration::from_millis(200))?
+        // Drain live bus events (agent progress, diagnostics, indexing) into the
+        // view-models, then draw.
+        controller.pump();
+        terminal.draw(|f| dadhichi_tui::render(controller.ui(), f))?;
+
+        if event::poll(Duration::from_millis(150))?
             && let Event::Key(key) = event::read()?
         {
             if key.kind != KeyEventKind::Press {
                 continue;
             }
-            if handle_key(app, key.code, key.modifiers) {
+            if handle_key(controller, key.code, key.modifiers).await {
                 return Ok(());
             }
         }
@@ -78,42 +72,38 @@ fn run_loop(
 }
 
 /// Handle one keypress. Returns `true` when the app should quit.
-fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> bool {
-    if app.palette.is_open() {
+async fn handle_key(ctrl: &mut AppController, code: KeyCode, mods: KeyModifiers) -> bool {
+    if ctrl.ui().palette.is_open() {
         match code {
-            KeyCode::Esc => app.palette.close(),
+            KeyCode::Esc => ctrl.ui_mut().palette.close(),
             KeyCode::Enter => {
-                if let Some(cmd) = app.palette.accept() {
-                    app.push_chat(format!("▶ dispatch {cmd}"));
-                    app.status = format!("ran {cmd}");
-                    app.palette.close();
-                    return cmd == "quit";
-                }
-                app.palette.close();
+                // Dispatch the selected command through the kernel; its events
+                // stream back into the panels on the next pump.
+                ctrl.run_palette_selection().await;
             }
-            KeyCode::Backspace => app.palette.backspace(),
-            KeyCode::Up => app.palette.select_prev(),
-            KeyCode::Down => app.palette.select_next(),
-            KeyCode::Char(c) => app.palette.push(c),
+            KeyCode::Backspace => ctrl.ui_mut().palette.backspace(),
+            KeyCode::Up => ctrl.ui_mut().palette.select_prev(),
+            KeyCode::Down => ctrl.ui_mut().palette.select_next(),
+            KeyCode::Char(c) => ctrl.ui_mut().palette.push(c),
             _ => {}
         }
         return false;
     }
 
     match (code, mods) {
-        (KeyCode::Char('p'), KeyModifiers::CONTROL) => app.toggle_palette(),
+        (KeyCode::Char('p'), KeyModifiers::CONTROL) => ctrl.ui_mut().toggle_palette(),
         (KeyCode::Char('q'), _) | (KeyCode::Esc, _) => return true,
-        (KeyCode::Tab, _) => app.cycle_focus(),
-        (KeyCode::Up, _) => navigate(app, -1),
-        (KeyCode::Down, _) => navigate(app, 1),
-        (KeyCode::Enter, _) => activate(app),
-        (KeyCode::Backspace, _) if app.focus() == Focus::Editor => {
-            if let Some(doc) = app.active_document_mut() {
+        (KeyCode::Tab, _) => ctrl.ui_mut().cycle_focus(),
+        (KeyCode::Up, _) => navigate(ctrl, -1),
+        (KeyCode::Down, _) => navigate(ctrl, 1),
+        (KeyCode::Enter, _) => activate(ctrl),
+        (KeyCode::Backspace, _) if ctrl.ui().focus() == Focus::Editor => {
+            if let Some(doc) = ctrl.ui_mut().active_document_mut() {
                 doc.backspace();
             }
         }
-        (KeyCode::Char(c), _) if app.focus() == Focus::Editor => {
-            if let Some(doc) = app.active_document_mut() {
+        (KeyCode::Char(c), _) if ctrl.ui().focus() == Focus::Editor => {
+            if let Some(doc) = ctrl.ui_mut().active_document_mut() {
                 doc.insert(&c.to_string());
             }
         }
@@ -123,7 +113,8 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> bool {
 }
 
 /// Move the selection/cursor within the focused panel.
-fn navigate(app: &mut App, delta: i32) {
+fn navigate(ctrl: &mut AppController, delta: i32) {
+    let app = ctrl.ui_mut();
     match app.focus() {
         Focus::Explorer => {
             if let Some(explorer) = app.explorer.as_mut() {
@@ -155,7 +146,8 @@ fn navigate(app: &mut App, delta: i32) {
 }
 
 /// Activate the selection in the focused panel (Enter).
-fn activate(app: &mut App) {
+fn activate(ctrl: &mut AppController) {
+    let app = ctrl.ui_mut();
     if app.focus() == Focus::Explorer
         && let Some(explorer) = app.explorer.as_mut()
     {

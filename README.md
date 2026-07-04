@@ -95,12 +95,16 @@ crates/
 ├── dadhichi-security    # credential vault, secret scan, audit log, injection guard
 ├── dadhichi-telemetry   # metrics registry + crash reporting
 ├── dadhichi-wasm        # sandboxed WASM plugin runtime (wasmi, fuel-metered)
+├── dadhichi-app         # application controller: wires kernel + agents + UI live
 ├── dadhichi-plugin      # plugin SDK: manifest, capabilities, signed marketplace
 └── dadhichi             # runtime binary: wires the kernel + Agent Console
 ```
 
-Launch the terminal shell with `cargo run -p dadhichi-tui`, or render a
-headless snapshot of it with `cargo run -p dadhichi-tui --example snapshot`.
+Launch the live terminal shell with `cargo run -p dadhichi-tui` — Ctrl-P opens
+the command palette, which dispatches real kernel commands (run an agent,
+re-index the workspace) whose progress streams into the panels. Render a
+headless snapshot with `cargo run -p dadhichi-tui --example live` (the wired
+stack) or `--example snapshot` (the static layout).
 
 Each crate has its own crate-level Rustdoc (`cargo doc --open`) and unit tests.
 

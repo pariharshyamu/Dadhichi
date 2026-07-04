@@ -74,6 +74,7 @@ crates/
 ├── dadhichi-telemetry   # observability   — depends on nothing internal
 ├── dadhichi-wasm        # WASM runtime    — depends on nothing internal
 ├── dadhichi-agent       # agents          — depends on core, ai, mcp, vector
+├── dadhichi-app         # app controller  — depends on core, ui, agent, ai, mcp, index
 ├── dadhichi-plugin      # plugin SDK      — depends on core
 └── dadhichi             # binary          — depends on all of the above
 ```
@@ -274,12 +275,23 @@ application logic is written and tested once and every frontend reuses it.
   `App` and translates keystrokes into view-model calls. It holds no state, so a
   `wgpu`/GPUI shell plugs in by writing a new `render` over the same `App`.
 
-**[implemented]** the UI core and the terminal frontend, both unit-tested —
-the TUI renders against ratatui's `TestBackend` so the full multi-panel layout
-is verified headlessly. **[design]** the GPU shell (GPUI/Slint + `wgpu`) and its
-`< 20 ms` frame budget; because the render thread only reads view-models and all
-I/O is async on Tokio, that target is a renderer concern, not an architectural
-one.
+Between the two sits **`dadhichi-app::AppController`** — the integration seam
+that makes the phases one running IDE. It boots the kernel, registers real
+commands (`agent.run`, `workspace.reindex`, `editor.save`), seeds the palette
+from the command registry, and bridges the bus into the view-models. A frontend
+drives it with three calls: `dispatch` (run a command, as the palette does),
+`pump` (drain bus events into the UI each frame), and `ui`/`ui_mut`. A palette
+selection therefore dispatches a kernel command, which runs an agent, whose
+progress streams straight back into the Agent Console panel — one bus, end to
+end.
+
+**[implemented]** the UI core, the `AppController` wiring, and the live terminal
+frontend, all unit-tested — the TUI renders against ratatui's `TestBackend` so
+the full multi-panel layout is verified headlessly, and the controller's
+command→agent→event→panel path is tested end to end. **[design]** the GPU shell
+(GPUI/Slint + `wgpu`) and its `< 20 ms` frame budget; because the render thread
+only reads view-models and all I/O is async on Tokio, that target is a renderer
+concern, not an architectural one.
 
 ---
 

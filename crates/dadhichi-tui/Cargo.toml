@@ -22,6 +22,8 @@ path = "src/main.rs"
 [dependencies]
 dadhichi-ui.workspace = true
 dadhichi-git.workspace = true
+dadhichi-app.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 ratatui = "0.28"
 crossterm = "0.28"
 
