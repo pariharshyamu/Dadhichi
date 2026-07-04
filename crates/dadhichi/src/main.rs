@@ -21,6 +21,8 @@ use std::sync::Arc;
 use dadhichi_agent::{Agent, AgentContext, ConversationalAgent};
 use dadhichi_ai::{MockProvider, ModelRouter};
 use dadhichi_core::Kernel;
+use dadhichi_index::store::SqliteSymbolStore;
+use dadhichi_index::{Indexer, store::SymbolStore};
 use dadhichi_mcp::{EchoTool, GrantSet, Permission, ToolRegistry};
 use dadhichi_workspace::Workspace;
 
@@ -60,6 +62,27 @@ async fn main() {
 
     // 3. Attach the Agent Console to the event bus.
     let console = console::spawn(kernel.bus());
+
+    // 3b. Index the workspace: tree-sitter parse → SQLite store, incremental
+    //     and event-emitting. This is the Phase 2 code-intelligence pipeline.
+    let store = Arc::new(SqliteSymbolStore::in_memory().expect("open symbol store"));
+    let indexer = Indexer::new(store.clone()).with_event_bus(kernel.bus().clone());
+    match indexer.index_dir(std::env::current_dir().unwrap_or_else(|_| ".".into())) {
+        Ok(total) => {
+            println!("dadhichi ▸ indexed {total} symbols across the workspace");
+            // Demonstrate a go-to-definition style lookup against the index.
+            if let Ok(defs) = store.definitions("main")
+                && let Some(def) = defs.first()
+            {
+                println!(
+                    "dadhichi ▸ 'main' defined at {}:{}",
+                    def.file.display(),
+                    def.line
+                );
+            }
+        }
+        Err(err) => eprintln!("dadhichi ▸ indexing failed: {err}"),
+    }
 
     // 4. Run an agent.
     let goal = std::env::args()

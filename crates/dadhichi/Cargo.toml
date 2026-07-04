@@ -22,6 +22,7 @@ dadhichi-ai.workspace = true
 dadhichi-agent.workspace = true
 dadhichi-mcp.workspace = true
 dadhichi-workspace.workspace = true
+dadhichi-index.workspace = true
 dadhichi-plugin.workspace = true
 tokio.workspace = true
 serde_json.workspace = true

@@ -19,16 +19,21 @@ The bootable foundation, fully offline and tested.
 - [x] Runtime binary wiring the kernel + Agent Console (`dadhichi`)
 - [x] 18 unit tests + doctests, clippy-clean, rustfmt-enforced
 
-## Phase 2 — Real Models & Editing
+## Phase 2 — Real Models & Editing 🚧 (largely complete)
 
-- [ ] Concrete providers behind `LanguageModel`: Anthropic, OpenAI, Ollama,
-      OpenRouter (reqwest, streaming SSE)
-- [ ] Prompt/context caching; capability-aware routing with fallback & cost
-      accounting
-- [ ] Tree-sitter parsing feeding `SymbolIndex`; `notify` file watcher →
-      incremental re-index
-- [ ] SQLite persistence for the symbol/reference/call graph
-- [ ] LSP client service (go-to-def, hover, diagnostics, references)
+- [x] Concrete providers behind `LanguageModel`: `OpenAiProvider` (OpenAI,
+      OpenRouter, Ollama, vLLM, LM Studio via the shared `/chat/completions`
+      schema) and `AnthropicProvider`, both with reqwest + streaming SSE
+      (`dadhichi-ai`, `http` feature)
+- [x] Capability-aware routing with fallback chain (`complete_resilient`) and
+      cost accounting (`CostTable`/`ModelPricing`)
+- [ ] Prompt/context caching (deferred)
+- [x] Tree-sitter parsing extracting symbols (`dadhichi-parse`, Rust grammar)
+- [x] `notify` file watcher → incremental re-index emitting `symbols.updated`
+      (`dadhichi-index`)
+- [x] SQLite persistence for symbols (`SqliteSymbolStore`); reference/call graph
+      still to come
+- [ ] LSP client service (go-to-def, hover, diagnostics, references) (deferred)
 
 ## Phase 3 — The GUI Shell
 

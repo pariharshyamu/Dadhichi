@@ -59,6 +59,8 @@ crates/
 ├── dadhichi-ai          # AI runtime      — depends on nothing internal
 ├── dadhichi-mcp         # tools + MCP     — depends on nothing internal
 ├── dadhichi-workspace   # index model     — depends on nothing internal
+├── dadhichi-parse       # tree-sitter     — depends on workspace
+├── dadhichi-index       # indexing svc    — depends on core, workspace, parse
 ├── dadhichi-agent       # agents          — depends on core, ai, mcp
 ├── dadhichi-plugin      # plugin SDK      — depends on core
 └── dadhichi             # binary          — depends on all of the above
@@ -154,8 +156,11 @@ IDE only ever sees this trait, which is what makes Dadhichi **model-agnostic**.
 - `MockProvider` is a deterministic, offline provider used for tests, demos, and
   offline-first operation.
 
-**[implemented]** `dadhichi-ai`. **[design]** concrete HTTP providers (reqwest),
-prompt/context caching, embeddings and rerankers.
+**[implemented]** `dadhichi-ai`, including concrete `OpenAiProvider` (OpenAI /
+OpenRouter / Ollama / vLLM / LM Studio) and `AnthropicProvider` over reqwest
+with SSE streaming, the `complete_resilient` fallback chain, and a `CostTable`
+for per-completion pricing. **[design]** prompt/context caching, embeddings and
+rerankers.
 
 ---
 
@@ -248,7 +253,10 @@ Three stores, each chosen for its access pattern:
   long-term agent memory.
 
 The `SymbolIndex` in `dadhichi-workspace` defines the query surface these
-backends implement; the in-memory version is the reference implementation.
+backends implement; the in-memory version is the reference implementation, and
+`dadhichi-index::SqliteSymbolStore` is the working SQLite backend. **[implemented]**
+the symbols schema + store; **[design]** the reference/call-graph tables,
+RocksDB cache, and LanceDB vector store.
 
 ---
 
