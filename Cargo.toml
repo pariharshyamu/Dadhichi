@@ -1,0 +1,66 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/dadhichi-core",
+    "crates/dadhichi-ai",
+    "crates/dadhichi-agent",
+    "crates/dadhichi-mcp",
+    "crates/dadhichi-workspace",
+    "crates/dadhichi-plugin",
+    "crates/dadhichi",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "Apache-2.0"
+repository = "https://github.com/pariharshyamu/Dadhichi"
+authors = ["Dadhichi contributors"]
+description = "Dadhichi — a modern, AI-first, agent-native IDE written in Rust"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "io-std", "signal"] }
+futures = "0.3"
+async-trait = "0.1"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Errors & diagnostics
+thiserror = "2"
+anyhow = "1"
+
+# Observability
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+# Utilities
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# Internal crates
+dadhichi-core = { path = "crates/dadhichi-core" }
+dadhichi-ai = { path = "crates/dadhichi-ai" }
+dadhichi-agent = { path = "crates/dadhichi-agent" }
+dadhichi-mcp = { path = "crates/dadhichi-mcp" }
+dadhichi-workspace = { path = "crates/dadhichi-workspace" }
+dadhichi-plugin = { path = "crates/dadhichi-plugin" }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+
+[profile.dev]
+opt-level = 0
+
+[workspace.lints.rust]
+unsafe_code = "warn"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+

@@ -1,0 +1,29 @@
+[package]
+name = "dadhichi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "The Dadhichi agentic IDE runtime and CLI entry point"
+default-run = "dadhichi"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "dadhichi"
+path = "src/main.rs"
+
+[dependencies]
+dadhichi-core.workspace = true
+dadhichi-ai.workspace = true
+dadhichi-agent.workspace = true
+dadhichi-mcp.workspace = true
+dadhichi-workspace.workspace = true
+dadhichi-plugin.workspace = true
+tokio.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
