@@ -19,7 +19,7 @@ The bootable foundation, fully offline and tested.
 - [x] Runtime binary wiring the kernel + Agent Console (`dadhichi`)
 - [x] 18 unit tests + doctests, clippy-clean, rustfmt-enforced
 
-## Phase 2 — Real Models & Editing 🚧 (largely complete)
+## Phase 2 — Real Models & Editing ✅ (complete)
 
 - [x] Concrete providers behind `LanguageModel`: `OpenAiProvider` (OpenAI,
       OpenRouter, Ollama, vLLM, LM Studio via the shared `/chat/completions`
@@ -27,13 +27,20 @@ The bootable foundation, fully offline and tested.
       (`dadhichi-ai`, `http` feature)
 - [x] Capability-aware routing with fallback chain (`complete_resilient`) and
       cost accounting (`CostTable`/`ModelPricing`)
-- [ ] Prompt/context caching (deferred)
+- [x] Prompt/context caching: provider-side cache breakpoints (`Message::cached`
+      → Anthropic `cache_control`) and a client-side response cache
+      (`CachingModel`/`CompletionCache`)
 - [x] Tree-sitter parsing extracting symbols (`dadhichi-parse`, Rust grammar)
 - [x] `notify` file watcher → incremental re-index emitting `symbols.updated`
       (`dadhichi-index`)
 - [x] SQLite persistence for symbols (`SqliteSymbolStore`); reference/call graph
       still to come
-- [ ] LSP client service (go-to-def, hover, diagnostics, references) (deferred)
+- [x] LSP client service — hover, go-to-definition, references, and live
+      diagnostics over stdio, with responses correlated by id and diagnostics
+      republished as `lsp.diagnostics` events (`dadhichi-lsp`)
+
+Remaining for a later pass: reference/call-graph tables, RocksDB cache, and the
+LanceDB vector store (semantic memory/search).
 
 ## Phase 3 — The GUI Shell
 

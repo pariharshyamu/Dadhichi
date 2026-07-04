@@ -8,6 +8,7 @@ members = [
     "crates/dadhichi-workspace",
     "crates/dadhichi-parse",
     "crates/dadhichi-index",
+    "crates/dadhichi-lsp",
     "crates/dadhichi-plugin",
     "crates/dadhichi",
 ]
@@ -50,6 +51,7 @@ dadhichi-mcp = { path = "crates/dadhichi-mcp" }
 dadhichi-workspace = { path = "crates/dadhichi-workspace" }
 dadhichi-parse = { path = "crates/dadhichi-parse" }
 dadhichi-index = { path = "crates/dadhichi-index" }
+dadhichi-lsp = { path = "crates/dadhichi-lsp" }
 dadhichi-plugin = { path = "crates/dadhichi-plugin" }
 
 [profile.release]

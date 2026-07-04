@@ -30,6 +30,12 @@ pub struct Message {
     /// For `Role::Tool` messages, the id of the tool call being answered.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// Marks this turn as a prompt-cache breakpoint. Providers that support
+    /// server-side prompt caching (Anthropic) cache the prefix up to and
+    /// including this message; the rest ignore it. Set it on large, stable
+    /// context (system prompts, pinned files) that recurs across requests.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cache: bool,
 }
 
 impl Message {
@@ -39,6 +45,7 @@ impl Message {
             role: Role::System,
             content: content.into(),
             tool_call_id: None,
+            cache: false,
         }
     }
     /// A user message.
@@ -47,6 +54,7 @@ impl Message {
             role: Role::User,
             content: content.into(),
             tool_call_id: None,
+            cache: false,
         }
     }
     /// An assistant message.
@@ -55,7 +63,14 @@ impl Message {
             role: Role::Assistant,
             content: content.into(),
             tool_call_id: None,
+            cache: false,
         }
+    }
+
+    /// Mark this message as a prompt-cache breakpoint, returning `self`.
+    pub fn cached(mut self) -> Self {
+        self.cache = true;
+        self
     }
 }
 

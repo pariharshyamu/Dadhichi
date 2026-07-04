@@ -20,6 +20,7 @@
 //! # }
 //! ```
 
+pub mod cache;
 pub mod cost;
 pub mod provider;
 #[cfg(feature = "http")]
@@ -27,6 +28,7 @@ pub mod providers;
 pub mod router;
 pub mod types;
 
+pub use cache::{CachingModel, CompletionCache};
 pub use cost::{CostTable, ModelPricing};
 pub use provider::{LanguageModel, MockProvider, ModelCapabilities, ProviderError, ProviderResult};
 pub use router::ModelRouter;

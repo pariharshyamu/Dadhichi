@@ -61,6 +61,7 @@ crates/
 ├── dadhichi-workspace   # index model     — depends on nothing internal
 ├── dadhichi-parse       # tree-sitter     — depends on workspace
 ├── dadhichi-index       # indexing svc    — depends on core, workspace, parse
+├── dadhichi-lsp         # LSP client      — depends on core
 ├── dadhichi-agent       # agents          — depends on core, ai, mcp
 ├── dadhichi-plugin      # plugin SDK      — depends on core
 └── dadhichi             # binary          — depends on all of the above
@@ -156,10 +157,16 @@ IDE only ever sees this trait, which is what makes Dadhichi **model-agnostic**.
 - `MockProvider` is a deterministic, offline provider used for tests, demos, and
   offline-first operation.
 
+Caching operates at two layers: **provider-side prompt caching**
+(`Message::cached()` inserts an Anthropic `cache_control` breakpoint over a
+stable prefix) and **client-side response caching** (`CachingModel` wraps any
+provider and serves byte-identical repeat requests from a `CompletionCache`,
+skipping the network entirely).
+
 **[implemented]** `dadhichi-ai`, including concrete `OpenAiProvider` (OpenAI /
 OpenRouter / Ollama / vLLM / LM Studio) and `AnthropicProvider` over reqwest
-with SSE streaming, the `complete_resilient` fallback chain, and a `CostTable`
-for per-completion pricing. **[design]** prompt/context caching, embeddings and
+with SSE streaming, the `complete_resilient` fallback chain, a `CostTable` for
+per-completion pricing, and both caching layers. **[design]** embeddings and
 rerankers.
 
 ---
@@ -295,10 +302,12 @@ talking to an MCP server".
   universal RPC surface between UI and services.
 - **External MCP**: `McpClient::{initialize, call}` over the JSON-RPC envelope
   in `dadhichi-mcp::protocol`.
-- **LSP/DAP** **[design]**: adapters that translate the Language/Debug Adapter
-  Protocols into kernel commands and events.
+- **LSP**: `dadhichi-lsp::LspClient` speaks the Language Server Protocol over
+  stdio — Content-Length framing, id-correlated requests, and notifications
+  (diagnostics) forwarded onto the event bus as `lsp.diagnostics`.
+- **DAP** **[design]**: a Debug Adapter Protocol client of the same shape.
 
-**[implemented]** internal command RPC + MCP envelope.
+**[implemented]** internal command RPC, MCP envelope, and the LSP client.
 
 ---
 

@@ -185,6 +185,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "dadhichi-lsp"
+version = "0.1.0"
+dependencies = [
+ "dadhichi-core",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "dadhichi-mcp"
 version = "0.1.0"
 dependencies = [

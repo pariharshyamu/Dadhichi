@@ -16,9 +16,10 @@ executes an agent run end to end.
 ## Status
 
 Phase 1 (Minimum Viable Kernel) — **complete**. Phase 2 (Real Models &
-Editing) — **largely complete**: real OpenAI/Anthropic providers with SSE
-streaming, fallback routing and cost accounting, plus a tree-sitter →
-SQLite indexing pipeline driven by a file watcher. See
+Editing) — **complete**: real OpenAI/Anthropic providers with SSE streaming,
+fallback routing, cost accounting, and prompt/response caching; a tree-sitter →
+SQLite indexing pipeline driven by a file watcher; and an LSP client for hover,
+go-to-definition, references, and live diagnostics. See
 [`docs/ROADMAP.md`](docs/ROADMAP.md) for the phased plan toward the full
 autonomous agentic IDE, and [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for
 the complete system design.
@@ -73,6 +74,7 @@ crates/
 ├── dadhichi-workspace   # workspace model + incremental symbol index
 ├── dadhichi-parse       # tree-sitter symbol extraction (Rust grammar)
 ├── dadhichi-index       # indexing service: file watcher + SQLite persistence
+├── dadhichi-lsp         # LSP client: hover, definition, references, diagnostics
 ├── dadhichi-plugin      # plugin SDK: manifest, capabilities, host lifecycle
 └── dadhichi             # runtime binary: wires the kernel + Agent Console
 ```
