@@ -11,6 +11,12 @@ description = "Model-agnostic AI runtime abstraction for the Dadhichi IDE"
 [lints]
 workspace = true
 
+[features]
+# Concrete HTTP-backed providers (OpenAI-compatible, Anthropic). Enabled by
+# default; disable for a pure-offline build that only ships the MockProvider.
+default = ["http"]
+http = ["dep:reqwest", "dep:bytes"]
+
 [dependencies]
 tokio.workspace = true
 futures.workspace = true
@@ -19,3 +25,5 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"], optional = true }
+bytes = { version = "1", optional = true }

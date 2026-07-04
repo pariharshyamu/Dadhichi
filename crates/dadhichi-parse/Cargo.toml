@@ -1,0 +1,17 @@
+[package]
+name = "dadhichi-parse"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Tree-sitter parsing that extracts symbols for the Dadhichi index"
+
+[lints]
+workspace = true
+
+[dependencies]
+dadhichi-workspace.workspace = true
+tree-sitter = "0.25"
+tree-sitter-rust = "0.24"

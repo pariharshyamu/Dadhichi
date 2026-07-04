@@ -16,7 +16,7 @@ pub fn spawn(bus: &EventBus) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
             match sub.recv().await {
-                Ok(event) if event.topic.as_str().starts_with("agent.") => {
+                Ok(event) if is_shown(event.topic.as_str()) => {
                     println!("  ┃ [{}] {}", event.topic.as_str(), compact(&event.payload));
                 }
                 Ok(_) => {}
@@ -27,6 +27,11 @@ pub fn spawn(bus: &EventBus) -> tokio::task::JoinHandle<()> {
             }
         }
     })
+}
+
+/// Topics the console mirrors: agent activity and indexing progress.
+fn is_shown(topic: &str) -> bool {
+    topic.starts_with("agent.") || topic.starts_with("symbols.") || topic.starts_with("fs.")
 }
 
 /// Render a JSON payload as a compact single line.
