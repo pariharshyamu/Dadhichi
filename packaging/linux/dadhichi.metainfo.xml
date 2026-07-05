@@ -32,7 +32,7 @@
   </provides>
   <content_rating type="oars-1.1"/>
   <releases>
-    <release version="0.1.0" date="2026-07-05">
+    <release version="0.1.1" date="2026-07-05">
       <description>
         <p>Foundational runtime: microkernel, AI runtime, agents, index,
         UI shell, WASM plugins, and cross-platform packaging.</p>

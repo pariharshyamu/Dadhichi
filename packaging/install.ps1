@@ -87,6 +87,13 @@ try {
     New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
     Copy-Item -Path $exe.FullName -Destination (Join-Path $BinDir "$BinName.exe") -Force
 
+    # The interactive terminal shell ships alongside the CLI, if present.
+    $tui = Get-ChildItem -Path $tmp -Filter "$BinName-tui.exe" -Recurse | Select-Object -First 1
+    if ($tui) {
+        Copy-Item -Path $tui.FullName -Destination (Join-Path $BinDir "$BinName-tui.exe") -Force
+        Log "installed $BinName-tui.exe (interactive shell)"
+    }
+
     # Add to the user PATH if it is not already there.
     $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
     if ($userPath -notlike "*$BinDir*") {

@@ -36,7 +36,9 @@ the complete system design.
 ## Install
 
 One-line installers detect your OS/architecture, download the matching release
-archive, verify its SHA-256 checksum, and install the `dadhichi` binary:
+archive, verify its SHA-256 checksum, and install two binaries — the `dadhichi`
+CLI and the interactive terminal shell `dadhichi-tui` (Ctrl-P for the command
+palette; `>` runs skills, `@` manages MCP servers):
 
 ```bash
 # Linux / macOS
@@ -115,8 +117,8 @@ OPENAI_API_KEY=... OPENAI_BASE_URL=http://localhost:8000/v1  cargo run   # vLLM,
 # OpenRouter
 OPENROUTER_API_KEY=sk-or-...        cargo run
 
-# Local Ollama (no key)
-OLLAMA_HOST=http://localhost:11434  cargo run
+# Local Ollama (no key) — name the model you have pulled
+OLLAMA_HOST=http://localhost:11434  OLLAMA_MODEL=llama3.2  cargo run
 ```
 
 | Variable | Effect |
@@ -125,7 +127,15 @@ OLLAMA_HOST=http://localhost:11434  cargo run
 | `OPENAI_API_KEY` | Use OpenAI (`OPENAI_BASE_URL` overrides the endpoint) |
 | `OPENROUTER_API_KEY` | Use the OpenRouter aggregator |
 | `OLLAMA_HOST` | Use a local Ollama server (no key) |
+| `OLLAMA_MODEL` | The Ollama model name to run (e.g. `llama3.2`) |
 | `DADHICHI_PROVIDER` | Pick the default when several are set (`anthropic`/`openai`/`openrouter`/`ollama`/`mock`) |
+| `DADHICHI_MODEL` | The concrete model name sent to the default provider (e.g. `gpt-4o`, `llama3.2`) |
+
+> **Model name vs. provider:** the provider id (`ollama`, `openai`, …) selects the
+> backend; the *model name* is what it runs. Real backends reject a request for a
+> model literally named `ollama`, so set `OLLAMA_MODEL`/`DADHICHI_MODEL` to a
+> concrete model. Without one, the name defaults to the provider id (fine only for
+> the offline mock).
 
 At startup the binary prints which provider is active, e.g.
 `dadhichi ▸ model provider: anthropic (default: anthropic, + mock fallback)`.

@@ -136,6 +136,14 @@ mkdir -p "$BIN_DIR"
 install -m 755 "$src" "$BIN_DIR/$BIN_NAME" 2>/dev/null \
     || { cp "$src" "$BIN_DIR/$BIN_NAME" && chmod 755 "$BIN_DIR/$BIN_NAME"; }
 
+# The interactive terminal shell ships alongside the CLI, if present.
+tui_src="$(find "$tmp" -name "$BIN_NAME-tui" -type f | head -n 1)"
+if [ -n "$tui_src" ]; then
+    install -m 755 "$tui_src" "$BIN_DIR/$BIN_NAME-tui" 2>/dev/null \
+        || { cp "$tui_src" "$BIN_DIR/$BIN_NAME-tui" && chmod 755 "$BIN_DIR/$BIN_NAME-tui"; }
+    log "installed $BIN_NAME-tui (interactive shell) to $BIN_DIR"
+fi
+
 log "installed $("$BIN_DIR/$BIN_NAME" --version 2>/dev/null || echo "$BIN_NAME") to $BIN_DIR"
 
 case ":$PATH:" in

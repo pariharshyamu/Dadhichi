@@ -102,8 +102,14 @@ ENVIRONMENT:
                          Azure / vLLM / LM Studio / proxies).
     OPENROUTER_API_KEY   Use the OpenRouter aggregator.
     OLLAMA_HOST          Use a local Ollama server at this host (no key needed).
+    OLLAMA_MODEL         The Ollama model name to run (e.g. llama3.2).
     DADHICHI_PROVIDER    Pick the default provider when several are configured
                          (anthropic | openai | openrouter | ollama | mock).
+    DADHICHI_MODEL       The concrete model name to send to the default provider
+                         (e.g. gpt-4o, claude-3-5-sonnet-latest, llama3.2).
+
+The interactive terminal shell installs alongside this CLI as `dadhichi-tui`
+(Ctrl-P for the command palette; `>` runs skills, `@` manages MCP servers).
 
 Everything runs offline by default via the built-in mock model provider, so no
 API keys are required to try it. See https://github.com/pariharshyamu/Dadhichi.",
