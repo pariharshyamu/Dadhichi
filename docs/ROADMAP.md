@@ -88,8 +88,14 @@ changes. `< 20 ms` latency and the GPU pipeline remain a GPU-shell concern.
       launches each, namespaces + permission-stamps its tools, and registers
       them into the now interior-mutable `ToolRegistry`. Secrets are `${...}`
       placeholders resolved at launch. Wired into `AppController` at boot with
-      `mcp.list` / `mcp.connect` commands. Remaining: WebSocket/HTTP transport
-      for hosted servers, and a vault-backed secret resolver
+      `mcp.list` / `mcp.connect` commands
+- [x] Networked MCP transports (`dadhichi-mcp`, `remote` feature): `McpConnection`
+      is now a facade over a pluggable transport, so a server declared with a
+      `url` is reached over **Streamable HTTP** (`http(s)://`, JSON or SSE reply,
+      `Mcp-Session-Id` carried across calls) or **WebSocket** (`ws(s)://`) instead
+      of a stdio subprocess — with `${...}`-resolved `headers` (e.g. a bearer
+      token) for hosted servers like Linear/Slack. Remaining: a vault-backed
+      secret resolver
 - [x] DAP debugger service (`dadhichi-dap`): initialize, breakpoints, threads,
       continue, with adapter events republished as `dap.<event>`
 - [x] Workflow automation from natural language: `Workflow::parse` decomposes a

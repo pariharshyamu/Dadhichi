@@ -207,6 +207,12 @@ discovered, namespaced (`github.create_issue`), stamped with the permissions you
 declare, and registered — so an agent invokes a remote tool exactly like a
 built-in one, through the same permission gate.
 
+A server is either a **local subprocess** (`command`) or a **hosted endpoint**
+(`url`) — Dadhichi picks the transport from the URL scheme: `http(s)://` for
+Streamable HTTP (JSON or SSE, with the `Mcp-Session-Id` carried across calls),
+`ws(s)://` for WebSocket. Hosted servers take `headers` (e.g. an `Authorization`
+bearer token), which support the same `${...}` secret placeholders as `env`.
+
 ```json
 {
   "servers": {
@@ -214,6 +220,11 @@ built-in one, through the same permission gate.
       "command": "npx",
       "args": ["-y", "@modelcontextprotocol/server-github"],
       "env": { "GITHUB_PERSONAL_ACCESS_TOKEN": "${env:GITHUB_TOKEN}" },
+      "grants": ["network"]
+    },
+    "linear": {
+      "url": "https://mcp.linear.app/mcp",
+      "headers": { "Authorization": "Bearer ${env:LINEAR_TOKEN}" },
       "grants": ["network"]
     }
   }
@@ -223,9 +234,10 @@ built-in one, through the same permission gate.
 Secrets never live in the config: `${env:NAME}` placeholders are resolved from
 the environment at launch (a vault-backed resolver is the planned extension). If
 a server fails to start it's reported (`mcp.error`) but never fatal. `mcp.list`
-enumerates the configured servers and available tools; `mcp.connect` (re)launches
-them. Only local (stdio) servers are supported today; a WebSocket/HTTP transport
-for hosted SaaS connectors is on the roadmap.
+enumerates the configured servers (with their transport) and available tools;
+`mcp.connect` (re)launches them. The networked transports live behind the crate's
+`remote` feature (enabled in the app binary); a pure-offline build keeps only the
+stdio path.
 
 ## Workspace layout
 

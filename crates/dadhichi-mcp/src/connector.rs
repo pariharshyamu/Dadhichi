@@ -26,10 +26,13 @@ fn default_true() -> bool {
     true
 }
 
-/// One configured MCP server.
+/// One configured MCP server — either a local subprocess (`command`) or a hosted
+/// endpoint (`url`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct McpServerConfig {
-    /// The executable to launch, e.g. `npx` or `uvx`.
+    /// The executable to launch for a stdio server, e.g. `npx` or `uvx`. Ignored
+    /// when `url` is set.
+    #[serde(default)]
     pub command: String,
     /// Arguments passed to the command.
     #[serde(default)]
@@ -38,6 +41,16 @@ pub struct McpServerConfig {
     /// placeholders resolved at launch (see [`connect_servers`]).
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    /// A remote MCP endpoint. When set, the server is reached over the network —
+    /// Streamable HTTP for `http(s)://`, WebSocket for `ws(s)://` — instead of
+    /// launching `command`. Requires the crate's `remote` feature.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// Headers sent to a remote `url` (on every HTTP request, or on the WebSocket
+    /// handshake). Values may contain `${key}` placeholders — the place for an
+    /// `Authorization: Bearer ${env:TOKEN}` on a hosted server.
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
     /// The permission envelope stamped onto every tool this server exposes, so
     /// external tools are gated exactly like built-ins. Empty means ungated.
     #[serde(default)]
@@ -45,6 +58,17 @@ pub struct McpServerConfig {
     /// Whether to launch this server. Defaults to `true`.
     #[serde(default = "default_true")]
     pub enabled: bool,
+}
+
+impl McpServerConfig {
+    /// How this server is reached, for display (`stdio` or the remote scheme).
+    pub fn transport(&self) -> &'static str {
+        match self.url.as_deref() {
+            Some(u) if u.starts_with("ws://") || u.starts_with("wss://") => "websocket",
+            Some(_) => "http",
+            None => "stdio",
+        }
+    }
 }
 
 /// A set of named MCP servers — the parsed form of an `mcp.json`.
@@ -248,10 +272,15 @@ async fn connect_one<F>(
 where
     F: Fn(&str) -> Option<String>,
 {
-    let env = resolve_env(&server.env, resolve)?;
-    let conn = McpConnection::connect_stdio_env(&server.command, &server.args, &env)
-        .await
-        .map_err(|e| e.to_string())?;
+    let conn = match &server.url {
+        Some(url) => connect_remote(url, server, resolve).await?,
+        None => {
+            let env = resolve_env(&server.env, resolve)?;
+            McpConnection::connect_stdio_env(&server.command, &server.args, &env)
+                .await
+                .map_err(|e| e.to_string())?
+        }
+    };
     conn.handshake().await.map_err(|e| e.to_string())?;
     let conn = Arc::new(conn);
 
@@ -259,6 +288,37 @@ where
         .await
         .map_err(|e| e.to_string())?;
     Ok((conn, tool_names))
+}
+
+/// Open a connection to a remote (`http(s)`/`ws(s)`) server, resolving any
+/// `${...}` placeholders in its headers first.
+#[cfg(feature = "remote")]
+async fn connect_remote<F>(
+    url: &str,
+    server: &McpServerConfig,
+    resolve: &F,
+) -> Result<McpConnection, String>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let headers = resolve_env(&server.headers, resolve)?;
+    McpConnection::connect_url(url, &headers)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Without the `remote` feature, a `url` server cannot be reached — report it as
+/// a non-fatal error rather than silently skipping it.
+#[cfg(not(feature = "remote"))]
+async fn connect_remote<F>(
+    _url: &str,
+    _server: &McpServerConfig,
+    _resolve: &F,
+) -> Result<McpConnection, String>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    Err("remote MCP transport not compiled in (enable the `remote` feature)".to_string())
 }
 
 /// Discover `conn`'s tools, stamp them with `server`'s permission envelope and a
@@ -294,6 +354,29 @@ async fn bridge_tools(
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn parses_remote_server_and_reports_transport() {
+        let cfg = McpServersConfig::from_json(
+            r#"{"servers":{
+                "linear":{"url":"https://mcp.linear.app/sse","headers":{"Authorization":"Bearer ${env:LINEAR}"},"grants":["network"]},
+                "chat":{"url":"wss://example.com/mcp"},
+                "local":{"command":"npx"}
+            }}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.servers["linear"].url.as_deref(),
+            Some("https://mcp.linear.app/sse")
+        );
+        assert_eq!(
+            cfg.servers["linear"].headers["Authorization"],
+            "Bearer ${env:LINEAR}"
+        );
+        assert_eq!(cfg.servers["linear"].transport(), "http");
+        assert_eq!(cfg.servers["chat"].transport(), "websocket");
+        assert_eq!(cfg.servers["local"].transport(), "stdio");
+    }
 
     #[test]
     fn parses_both_config_shapes() {
@@ -426,6 +509,8 @@ mod tests {
             command: "unused".into(),
             args: vec![],
             env: BTreeMap::new(),
+            url: None,
+            headers: BTreeMap::new(),
             grants: vec![Permission::Network],
             enabled: true,
         };
@@ -458,5 +543,60 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(out["issue"], 7);
+    }
+
+    // ── End-to-end over a real remote transport (loopback WebSocket) ──────────
+
+    /// Drives the full declarative path — `mcp.json` → `connect_servers` → live
+    /// WebSocket → namespaced, permission-stamped tools — against a loopback
+    /// server, so no network egress is needed.
+    #[cfg(feature = "remote")]
+    #[tokio::test]
+    async fn connects_a_remote_websocket_server_and_bridges_its_tools() {
+        use futures::{SinkExt, StreamExt};
+        use tokio::net::TcpListener;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(Ok(Message::Text(text))) = ws.next().await {
+                let req: serde_json::Value = serde_json::from_str(text.as_str()).unwrap();
+                let id = req.get("id").cloned().unwrap();
+                let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
+                let result = match method {
+                    "initialize" => serde_json::json!({ "capabilities": { "tools": {} } }),
+                    "tools/list" => serde_json::json!({
+                        "tools": [{ "name": "send_message", "description": "post", "inputSchema": {} }]
+                    }),
+                    "tools/call" => serde_json::json!({ "ok": true }),
+                    _ => serde_json::Value::Null,
+                };
+                let resp = serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result });
+                ws.send(Message::text(resp.to_string())).await.unwrap();
+            }
+        });
+
+        let cfg = McpServersConfig::from_json(&format!(
+            r#"{{"servers":{{"slack":{{"url":"ws://{addr}","grants":["network"]}}}}}}"#
+        ))
+        .unwrap();
+        let registry = ToolRegistry::new();
+        let (conns, report) = connect_servers(&cfg, &registry, |_| None).await;
+
+        assert!(conns.contains("slack"));
+        assert_eq!(report.errors.len(), 0, "{:?}", report.errors);
+        assert_eq!(report.tool_count(), 1);
+        assert!(registry.contains("slack.send_message"));
+
+        // Gated by the configured Network envelope, invocable with the grant.
+        let grants = GrantSet::from_iter([Permission::Network]);
+        let out = registry
+            .invoke("slack.send_message", serde_json::json!({}), &grants)
+            .await
+            .unwrap();
+        assert_eq!(out["ok"], true);
     }
 }

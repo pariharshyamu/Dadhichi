@@ -17,7 +17,7 @@ dadhichi-ui.workspace = true
 dadhichi-agent.workspace = true
 dadhichi-skill.workspace = true
 dadhichi-ai.workspace = true
-dadhichi-mcp.workspace = true
+dadhichi-mcp = { workspace = true, features = ["remote"] }
 dadhichi-index.workspace = true
 tokio.workspace = true
 serde_json.workspace = true

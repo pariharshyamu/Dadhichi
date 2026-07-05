@@ -557,7 +557,9 @@ async fn register_commands(
                             .map(|(name, cfg)| {
                                 serde_json::json!({
                                     "name": name,
+                                    "transport": cfg.transport(),
                                     "command": cfg.command,
+                                    "url": cfg.url,
                                     "enabled": cfg.enabled,
                                     "grants": cfg.grants.iter().map(|p| p.to_string()).collect::<Vec<_>>(),
                                 })
@@ -978,8 +980,37 @@ mod tests {
         let servers = out["servers"].as_array().unwrap();
         let gh = servers.iter().find(|s| s["name"] == "github").unwrap();
         assert_eq!(gh["command"], "definitely-not-a-real-binary-xyz");
+        assert_eq!(gh["transport"], "stdio");
         assert_eq!(gh["grants"][0], "network");
         assert!(gh["enabled"].as_bool().unwrap());
+    }
+
+    #[tokio::test]
+    async fn mcp_list_surfaces_remote_server_transport() {
+        // A hosted (URL) server is catalogued with its remote transport. The
+        // connect attempt fails offline (no such host), non-fatally.
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join(".dadhichi");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("mcp.json"),
+            r#"{"servers":{"linear":{
+                "url":"wss://mcp.invalid.example/socket",
+                "headers":{"Authorization":"Bearer ${env:NOPE}"},
+                "grants":["network"]
+            }}}"#,
+        )
+        .unwrap();
+
+        let ctrl = AppController::new(root.path()).await;
+        let out = ctrl
+            .dispatch("mcp.list", serde_json::json!({}))
+            .await
+            .unwrap();
+        let servers = out["servers"].as_array().unwrap();
+        let linear = servers.iter().find(|s| s["name"] == "linear").unwrap();
+        assert_eq!(linear["transport"], "websocket");
+        assert_eq!(linear["url"], "wss://mcp.invalid.example/socket");
     }
 
     #[tokio::test]

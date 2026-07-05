@@ -304,24 +304,32 @@ server (exposing its own workspace tools to other agents).
   negotiation for bridging external MCP servers behind the same `Tool` trait.
 - `connector` — the **declarative connector layer**. An `McpServersConfig`
   (loaded from `mcp.json`, à la the skills manifests) names servers by
-  `command`/`args`/`env` plus the `Permission` envelope their tools should
-  carry. `connect_servers` launches each enabled server over stdio, discovers
-  its tools, **namespaces** them (`<server>.<tool>`), **stamps** them with the
-  configured permissions, and registers them. Secrets never sit in the config:
-  `env` values may contain `${...}` placeholders resolved through an injected
+  `command`/`args`/`env` (a local subprocess) **or** a `url` + `headers` (a
+  hosted endpoint), plus the `Permission` envelope their tools should carry.
+  `connect_servers` connects each enabled server, discovers its tools,
+  **namespaces** them (`<server>.<tool>`), **stamps** them with the configured
+  permissions, and registers them. Secrets never sit in the config: `env` and
+  `headers` values may contain `${...}` placeholders resolved through an injected
   closure (process env today, a vault tomorrow), so tokens are injected at
-  launch, not committed.
+  connect time, not committed.
+- **Transports.** `McpConnection` is a facade over a pluggable `Transport`, so
+  every high-level call (`handshake`, `list_tools`, `call_tool`) funnels through
+  one id-correlated `request` primitive regardless of wire. Three ship: **stdio**
+  (a subprocess or, in tests, an in-memory pipe over a line-delimited stream);
+  **Streamable HTTP** (`http(s)://` — POST JSON-RPC, accepting a JSON *or* an SSE
+  `text/event-stream` reply, carrying the server's `Mcp-Session-Id` across
+  calls); and **WebSocket** (`ws(s)://` — a persistent bidirectional socket). The
+  two networked transports live behind the `remote` feature so a default build
+  stays offline; the app binary enables it.
 
-**[implemented]** `dadhichi-mcp`: a live `McpConnection` — a transport-generic,
-id-correlated JSON-RPC client with `connect_stdio`/`connect_stdio_env` — and
-`McpToolBridge`, which exposes a remote server's tools through the
-permission-gated `ToolRegistry`. The connector layer wires this into the
-`AppController`: servers declared in `mcp.json` are launched at boot (failures
-are non-fatal, surfaced as `mcp.error`), and the `mcp.list` / `mcp.connect`
-commands enumerate and (re)connect them. An agent invokes a GitHub or Slack MCP
-tool exactly as it invokes a built-in one. **[design]** a WebSocket/HTTP
-transport for hosted (non-subprocess) servers, and a vault-backed secret
-resolver.
+**[implemented]** `dadhichi-mcp`: a live `McpConnection` with `connect_stdio` /
+`connect_stdio_env` / `connect_url`, and `McpToolBridge`, which exposes a remote
+server's tools through the permission-gated `ToolRegistry`. The connector layer
+wires this into the `AppController`: servers declared in `mcp.json` (stdio or
+hosted) are connected at boot (failures are non-fatal, surfaced as `mcp.error`),
+and the `mcp.list` / `mcp.connect` commands enumerate (with transport) and
+(re)connect them. An agent invokes a GitHub, Slack, or Linear MCP tool exactly as
+it invokes a built-in one. **[design]** a vault-backed secret resolver.
 
 ---
 
