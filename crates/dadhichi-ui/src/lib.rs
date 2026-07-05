@@ -33,7 +33,7 @@ pub mod problems;
 
 pub use document::Document;
 pub use explorer::Explorer;
-pub use palette::CommandPalette;
+pub use palette::{CommandPalette, PaletteAction, PaletteItem, SkillEntry};
 pub use problems::ProblemsPanel;
 
 use dadhichi_core::Event;
@@ -192,7 +192,7 @@ impl App {
                     self.status = format!("changed: {path}");
                 }
             }
-            t if t.starts_with("agent.") => {
+            t if t.starts_with("agent.") || t.starts_with("skill.") => {
                 self.chat
                     .push(format!("[{}] {}", t, compact(&event.payload)));
             }
@@ -247,6 +247,17 @@ mod tests {
         ));
         assert_eq!(app.chat.len(), 1);
         assert!(app.chat[0].contains("running"));
+    }
+
+    #[test]
+    fn skill_events_land_in_chat() {
+        let mut app = App::new();
+        app.apply_event(&Event::new(
+            "skill.equipped",
+            serde_json::json!({ "skill": "code-review" }),
+        ));
+        assert_eq!(app.chat.len(), 1);
+        assert!(app.chat[0].contains("code-review"));
     }
 
     #[test]

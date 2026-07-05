@@ -2,14 +2,23 @@
 //!
 //! It mirrors the names from [`CommandRegistry`](dadhichi_core::CommandRegistry)
 //! and ranks them against the user's query with a subsequence fuzzy match, so
-//! `"agrn"` finds `"agent.run"`. Accepting a result yields the command name,
+//! `"agrn"` finds `"agent.run"`. Accepting a result yields a [`PaletteAction`],
 //! which the shell dispatches back through the kernel — the palette itself holds
 //! no behaviour, only selection state.
+//!
+//! Typing a leading `>` switches to **skill mode**: the list becomes the
+//! equippable skills (each with a capability summary), and accepting one runs
+//! it. `>` alone lists every skill; `>fs` filters them; the optional keyword
+//! `>skill fs` reads naturally and works too.
 
-/// A fuzzy-searchable command palette.
+/// The sigil that switches the palette into skill-browsing mode.
+pub const SKILL_SIGIL: char = '>';
+
+/// A fuzzy-searchable command-and-skill palette.
 #[derive(Debug, Default)]
 pub struct CommandPalette {
     commands: Vec<String>,
+    skills: Vec<SkillEntry>,
     query: String,
     selected: usize,
     open: bool,
@@ -24,6 +33,53 @@ pub struct Match {
     pub score: i32,
 }
 
+/// A skill shown in the palette's skill mode, with its capability summary.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct SkillEntry {
+    /// The skill id (dispatched as `skill.run { skill: <name> }`).
+    pub name: String,
+    /// One-line human description.
+    pub description: String,
+    /// A compact capability summary, e.g. `perms: read_workspace · tools: fs.read`.
+    pub detail: String,
+}
+
+/// A single row shown in the palette — a command or a skill.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PaletteItem {
+    /// A kernel command; the payload is its name.
+    Command(String),
+    /// A skill to equip and run.
+    Skill(SkillEntry),
+}
+
+impl PaletteItem {
+    /// The primary label (command name or skill name).
+    pub fn label(&self) -> &str {
+        match self {
+            PaletteItem::Command(name) => name,
+            PaletteItem::Skill(entry) => &entry.name,
+        }
+    }
+
+    /// The secondary detail line, if any (skills carry a capability summary).
+    pub fn detail(&self) -> Option<&str> {
+        match self {
+            PaletteItem::Skill(entry) => Some(&entry.detail),
+            PaletteItem::Command(_) => None,
+        }
+    }
+}
+
+/// What accepting a palette selection should do.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PaletteAction {
+    /// Dispatch the named kernel command with empty args.
+    RunCommand(String),
+    /// Run the named skill (dispatch `skill.run { skill: <name> }`).
+    RunSkill(String),
+}
+
 impl CommandPalette {
     /// Create an empty palette.
     pub fn new() -> Self {
@@ -34,6 +90,17 @@ impl CommandPalette {
     pub fn set_commands(&mut self, commands: Vec<String>) {
         self.commands = commands;
         self.clamp_selection();
+    }
+
+    /// Replace the set of skills shown in skill mode.
+    pub fn set_skills(&mut self, skills: Vec<SkillEntry>) {
+        self.skills = skills;
+        self.clamp_selection();
+    }
+
+    /// Whether the current query has switched the palette into skill mode.
+    pub fn in_skill_mode(&self) -> bool {
+        self.query.starts_with(SKILL_SIGIL)
     }
 
     /// Whether the palette is currently shown.
@@ -72,7 +139,7 @@ impl CommandPalette {
 
     /// Move the selection down (wrapping).
     pub fn select_next(&mut self) {
-        let n = self.results().len();
+        let n = self.items().len();
         if n > 0 {
             self.selected = (self.selected + 1) % n;
         }
@@ -80,7 +147,7 @@ impl CommandPalette {
 
     /// Move the selection up (wrapping).
     pub fn select_prev(&mut self) {
-        let n = self.results().len();
+        let n = self.items().len();
         if n > 0 {
             self.selected = (self.selected + n - 1) % n;
         }
@@ -91,9 +158,57 @@ impl CommandPalette {
         self.selected
     }
 
-    /// Accept the highlighted result, returning its command name.
-    pub fn accept(&self) -> Option<String> {
-        self.results().get(self.selected).map(|m| m.name.clone())
+    /// The rows to display for the current query — commands, or skills when in
+    /// skill mode — already ranked and filtered.
+    pub fn items(&self) -> Vec<PaletteItem> {
+        if self.in_skill_mode() {
+            self.skill_matches()
+                .into_iter()
+                .map(PaletteItem::Skill)
+                .collect()
+        } else {
+            self.results()
+                .into_iter()
+                .map(|m| PaletteItem::Command(m.name))
+                .collect()
+        }
+    }
+
+    /// Accept the highlighted row, returning the action to perform.
+    pub fn accept(&self) -> Option<PaletteAction> {
+        match self.items().into_iter().nth(self.selected)? {
+            PaletteItem::Command(name) => Some(PaletteAction::RunCommand(name)),
+            PaletteItem::Skill(entry) => Some(PaletteAction::RunSkill(entry.name)),
+        }
+    }
+
+    /// The query text used to filter skills — the part after the `>` sigil and
+    /// an optional `skill` keyword.
+    fn skill_filter(&self) -> &str {
+        let rest = self.query.strip_prefix(SKILL_SIGIL).unwrap_or(&self.query);
+        rest.strip_prefix("skill").unwrap_or(rest).trim_start()
+    }
+
+    /// Skills ranked against the skill filter (name and description). An empty
+    /// filter returns every skill in registration order.
+    fn skill_matches(&self) -> Vec<SkillEntry> {
+        let filter = self.skill_filter();
+        if filter.is_empty() {
+            return self.skills.clone();
+        }
+        // A name hit always outranks a description-only hit.
+        const NAME_BONUS: i32 = 100;
+        let mut scored: Vec<(i32, &SkillEntry)> = self
+            .skills
+            .iter()
+            .filter_map(|entry| {
+                let by_name = fuzzy_score(filter, &entry.name).map(|s| s + NAME_BONUS);
+                let by_desc = fuzzy_score(filter, &entry.description);
+                by_name.or(by_desc).map(|score| (score, entry))
+            })
+            .collect();
+        scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.name.len().cmp(&b.1.name.len())));
+        scored.into_iter().map(|(_, entry)| entry.clone()).collect()
     }
 
     /// The ranked matches for the current query. An empty query returns every
@@ -125,7 +240,7 @@ impl CommandPalette {
     }
 
     fn clamp_selection(&mut self) {
-        let n = self.results().len();
+        let n = self.items().len();
         if self.selected >= n {
             self.selected = n.saturating_sub(1);
         }
@@ -206,7 +321,66 @@ mod tests {
         assert_eq!(p.selected_index(), 3);
         p.select_next(); // wraps back to 0
         assert_eq!(p.selected_index(), 0);
-        assert_eq!(p.accept().as_deref(), Some("agent.run"));
+        assert_eq!(
+            p.accept(),
+            Some(PaletteAction::RunCommand("agent.run".into()))
+        );
+    }
+
+    fn palette_with_skills() -> CommandPalette {
+        let mut p = palette();
+        p.set_skills(vec![
+            SkillEntry {
+                name: "code-review".into(),
+                description: "Review a change".into(),
+                detail: "perms: read_workspace · tools: fs.read".into(),
+            },
+            SkillEntry {
+                name: "implement".into(),
+                description: "Write code".into(),
+                detail: "perms: read_workspace, write_workspace · tools: fs.read, fs.write".into(),
+            },
+        ]);
+        p
+    }
+
+    #[test]
+    fn sigil_switches_to_skill_mode() {
+        let mut p = palette_with_skills();
+        assert!(!p.in_skill_mode());
+        p.push('>');
+        assert!(p.in_skill_mode());
+        // `>` alone lists every skill as skill items.
+        let items = p.items();
+        assert_eq!(items.len(), 2);
+        assert!(matches!(items[0], PaletteItem::Skill(_)));
+        assert_eq!(items[0].label(), "code-review");
+        assert!(items[0].detail().unwrap().contains("read_workspace"));
+    }
+
+    #[test]
+    fn skill_mode_filters_and_accepts_a_skill() {
+        let mut p = palette_with_skills();
+        for c in ">impl".chars() {
+            p.push(c);
+        }
+        let items = p.items();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].label(), "implement");
+        assert_eq!(
+            p.accept(),
+            Some(PaletteAction::RunSkill("implement".into()))
+        );
+    }
+
+    #[test]
+    fn optional_skill_keyword_is_stripped() {
+        let mut p = palette_with_skills();
+        for c in ">skill code".chars() {
+            p.push(c);
+        }
+        let items = p.items();
+        assert_eq!(items[0].label(), "code-review");
     }
 
     #[test]

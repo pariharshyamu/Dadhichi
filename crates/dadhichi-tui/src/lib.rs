@@ -162,7 +162,13 @@ fn render_palette(app: &App, frame: &mut Frame, area: Rect) {
     let popup = centered_rect(60, 60, area);
     frame.render_widget(Clear, popup);
 
-    let block = panel("Command Palette", true);
+    let skill_mode = app.palette.in_skill_mode();
+    let title = if skill_mode {
+        "Skills  (Enter to run)"
+    } else {
+        "Command Palette  (› for skills)"
+    };
+    let block = panel(title, true);
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
@@ -178,16 +184,24 @@ fn render_palette(app: &App, frame: &mut Frame, area: Rect) {
     let selected = app.palette.selected_index();
     let items: Vec<ListItem> = app
         .palette
-        .results()
+        .items()
         .into_iter()
         .enumerate()
-        .map(|(i, m)| {
+        .map(|(i, item)| {
             let style = if i == selected {
                 Style::default().bg(Color::Green).fg(Color::Black)
             } else {
                 Style::default()
             };
-            ListItem::new(Span::styled(m.name, style))
+            let mut spans = vec![Span::styled(item.label().to_string(), style)];
+            if let Some(detail) = item.detail() {
+                spans.push(Span::raw("  "));
+                spans.push(Span::styled(
+                    detail.to_string(),
+                    Style::default().fg(Color::DarkGray),
+                ));
+            }
+            ListItem::new(Line::from(spans))
         })
         .collect();
     frame.render_widget(List::new(items), rows[1]);
@@ -277,5 +291,24 @@ mod tests {
         let text = buffer_text(&terminal);
         assert!(text.contains("Command Palette"), "palette overlay drawn");
         assert!(text.contains("agent.run"), "fuzzy result shown");
+    }
+
+    #[test]
+    fn renders_skill_mode_with_capability_detail() {
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let mut app = demo_app();
+        app.palette.set_skills(vec![dadhichi_ui::SkillEntry {
+            name: "code-review".into(),
+            description: "Review a change".into(),
+            detail: "perms: read_workspace · tools: fs.read".into(),
+        }]);
+        app.toggle_palette();
+        app.palette.push('>'); // enter skill mode
+        terminal.draw(|f| render(&app, f)).unwrap();
+
+        let text = buffer_text(&terminal);
+        assert!(text.contains("Skills"), "skill-mode title drawn");
+        assert!(text.contains("code-review"), "skill listed");
+        assert!(text.contains("read_workspace"), "capability detail shown");
     }
 }

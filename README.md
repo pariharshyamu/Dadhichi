@@ -133,6 +133,70 @@ Keys are read only from the environment — they are never logged (the provider
 plan's `Debug` redacts them) and never written to disk. With no variable set,
 the run stays fully offline on the mock provider.
 
+## Skills
+
+A **skill** is a reusable, permission-scoped capability bundle an agent equips —
+not a single tool, but a recipe that combines an instruction prompt, the
+permissions a run must hold, an allow-list of tools it may reach, and a plan
+template. Crucially, a skill's tool scope is *narrower than* the run's grants:
+even holding `WriteWorkspace`, a skill scoped to `["fs.read"]` cannot touch
+`fs.write`. Tool access is the intersection of the run's grants and the skill's
+allow-list, enforced at one choke point (`ScopedTools`).
+
+```rust
+use dadhichi_skill::{Skill, SkillAgent, SkillRegistry, Permission};
+
+let review = Skill::new("code-review", "Review a change")
+    .with_instructions("You are a meticulous reviewer.")
+    .require(Permission::ReadWorkspace)
+    .allow_tools(["fs.read", "git.diff"]);   // read-only, no matter the grants
+
+let mut skills = SkillRegistry::with_builtins();   // explain, code-review, implement, …
+skills.register(review);
+
+let agent = SkillAgent::new(skills.get("code-review").unwrap());
+// `agent` implements the same Agent trait, so the orchestrator runs it like any other.
+```
+
+Skills are plain data (`Serialize`/`Deserialize`), so besides authoring them in
+code you can drop **JSON manifests** on disk and they're loaded automatically:
+
+```
+~/.dadhichi/skills/*.json        # your personal skills
+<workspace>/.dadhichi/skills/*.json   # project skills, checked into the repo
+$DADHICHI_SKILLS_DIR/*.json      # an explicit override (highest precedence)
+```
+
+A disk skill overrides a built-in of the same name, so you can customise a
+shipped skill by name. A manifest looks like:
+
+```json
+{
+  "name": "house-style",
+  "description": "Apply our house style",
+  "instructions": "Follow the team style guide; prefer clarity over cleverness.",
+  "required_permissions": ["read_workspace", "write_workspace"],
+  "tools": { "mode": "allow", "names": ["fs.read", "fs.write"] },
+  "steps": [{ "description": "read the file" }, { "description": "apply the change" }]
+}
+```
+
+Malformed manifests are reported (as a `skill.load.error` in the console), never
+fatal. See the live demonstration, which also loads a skill from disk:
+
+```bash
+cargo run -p dadhichi-skill --example run_skill
+```
+
+which equips a pure-prompt skill, a tool-scoped skill (invoking `echo` through
+the gate), and shows a write-scoped skill **refused** under a read-only grant.
+In the IDE, the command palette's `>` skill mode is the picker — it lists the
+skills with their permissions and tool scope inline (backed by `skill.list`) and
+runs the chosen one. Under the hood, `skill.run` equips a skill granted exactly
+the permissions it declares, and `skill.reload` re-scans the manifest
+directories and swaps the catalogue live, so a newly authored skill is runnable
+without a restart.
+
 ## Workspace layout
 
 ```
@@ -142,6 +206,7 @@ crates/
 │                        #   OpenAI/Anthropic providers, fallback + cost accounting
 ├── dadhichi-mcp         # MCP layer: tools, permission-gated registry, JSON-RPC
 ├── dadhichi-agent       # agent framework: planning, memory, lifecycle, tools
+├── dadhichi-skill       # skills: permission-scoped capability bundles agents equip
 ├── dadhichi-workspace   # workspace model + incremental symbol index
 ├── dadhichi-parse       # tree-sitter symbol + call-graph extraction (Rust)
 ├── dadhichi-index       # indexing service: file watcher + SQLite + blob cache
@@ -164,9 +229,11 @@ crates/
 
 Launch the live terminal shell with `cargo run -p dadhichi-tui` — Ctrl-P opens
 the command palette, which dispatches real kernel commands (run an agent,
-re-index the workspace) whose progress streams into the panels. Render a
-headless snapshot with `cargo run -p dadhichi-tui --example live` (the wired
-stack) or `--example snapshot` (the static layout).
+re-index the workspace) whose progress streams into the panels. Type `>` in the
+palette to switch to **skill mode**: it lists the equippable skills with their
+required permissions and tool scope inline, and Enter runs the highlighted one.
+Render a headless snapshot with `cargo run -p dadhichi-tui --example live` (the
+wired stack) or `--example snapshot` (the static layout).
 
 Each crate has its own crate-level Rustdoc (`cargo doc --open`) and unit tests.
 

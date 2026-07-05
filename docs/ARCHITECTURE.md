@@ -74,7 +74,8 @@ crates/
 ├── dadhichi-telemetry   # observability   — depends on nothing internal
 ├── dadhichi-wasm        # WASM runtime    — depends on nothing internal
 ├── dadhichi-agent       # agents          — depends on core, ai, mcp, vector
-├── dadhichi-app         # app controller  — depends on core, ui, agent, ai, mcp, index
+├── dadhichi-skill       # skills          — depends on core, ai, mcp, agent
+├── dadhichi-app         # app controller  — depends on core, ui, agent, skill, ai, mcp, index
 ├── dadhichi-plugin      # plugin SDK      — depends on core
 └── dadhichi             # binary          — depends on all of the above
 ```
@@ -213,6 +214,50 @@ signals); and `Workflow`, which decomposes a natural-language request and
 **delegates** each clause to the right specialist. **[design]** richer
 per-step (rather than one-shot) execution and model-driven planning.
 
+### 7a. Skills
+
+A **skill** is a reusable, permission-scoped capability bundle — distinct from a
+tool. Where a tool is one function, a `Skill` is a recipe combining four things:
+instruction prompt, required permissions, a **tool allow-list** (`SkillTools`),
+and a plan template (`SkillStep`s). It is plain data (`Serialize`/`Deserialize`),
+so skills can be authored in code, loaded from a JSON manifest, or shipped
+through the marketplace behind one type.
+
+The defining mechanism is **scoping**: a skill's reachable tools are the
+*intersection* of the run's grants and the skill's allow-list. `ScopedTools`
+wraps the shared `ToolRegistry` and checks the skill's allow-list first, then
+delegates to the registry's existing grant gate — so a skill is always
+*strictly ≤* the capability of the run that carries it. A read-only
+`code-review` skill cannot invoke `fs.write` even inside a run that holds
+`WriteWorkspace`.
+
+`SkillAgent` runs a skill as a first-class `Agent`: it enforces the required
+permissions up front (refusing with a `skill.denied` event if any are missing),
+executes tool steps through `ScopedTools`, consults the model under the skill's
+instructions, then verifies — emitting `skill.equipped`, `skill.tool.invoked`,
+`skill.completed`, etc. `SkillRegistry` catalogues skills and is exposed to the
+UI through three commands: `skill.list` (enumerate skills as `SkillSpec`s for a
+picker), `skill.run` (equip one, granted exactly the permissions it declares),
+and `skill.reload` (re-scan the manifest directories and swap the catalogue
+live). The catalogue sits behind a lock and `skill.run` builds a fresh agent
+from it per dispatch, so a reload — or a newly authored manifest — takes effect
+on the next run without a restart.
+
+Skills are plain data, so besides code authoring they load from **JSON
+manifests** on disk: `~/.dadhichi/skills`, `<workspace>/.dadhichi/skills`, and
+`$DADHICHI_SKILLS_DIR` in increasing precedence (a disk skill overrides a
+built-in of the same name). The loader tolerates malformed manifests —
+collecting them into a `LoadReport` and surfacing each as a `skill.load.error`
+event — rather than aborting.
+
+**[implemented]** `dadhichi-skill`: the `Skill` model, `SkillTools` scope,
+`ScopedTools` enforcement, `SkillRegistry`, the filesystem loader
+(`discover_in`), `SkillAgent`, and a built-in library (`explain`, `code-review`,
+`implement`, `author-tests`, `security-audit`), wired into the binary and the
+`AppController` (which discovers project skills relative to the opened
+workspace). A runnable demo lives at
+`cargo run -p dadhichi-skill --example run_skill`.
+
 ---
 
 ## 8. Plugin SDK
@@ -283,7 +328,10 @@ drives it with three calls: `dispatch` (run a command, as the palette does),
 `pump` (drain bus events into the UI each frame), and `ui`/`ui_mut`. A palette
 selection therefore dispatches a kernel command, which runs an agent, whose
 progress streams straight back into the Agent Console panel — one bus, end to
-end.
+end. The palette is dual-mode: a leading `>` switches it from commands to
+**skills**, listing each with its permission/tool summary (from `skill.list`)
+and running the chosen one via `skill.run` — the same `PaletteAction` seam,
+just a different verb.
 
 **[implemented]** the UI core, the `AppController` wiring, and the live terminal
 frontend, all unit-tested — the TUI renders against ratatui's `TestBackend` so

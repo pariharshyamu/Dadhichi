@@ -30,6 +30,7 @@ use dadhichi_core::Kernel;
 use dadhichi_index::store::SqliteSymbolStore;
 use dadhichi_index::{Indexer, store::SymbolStore};
 use dadhichi_mcp::{EchoTool, GrantSet, Permission, ToolRegistry};
+use dadhichi_skill::{Skill, SkillAgent, SkillRegistry, SkillStep};
 use dadhichi_telemetry::Metrics;
 use dadhichi_wasm::WasmRuntime;
 use dadhichi_workspace::Workspace;
@@ -147,8 +148,8 @@ async fn main() {
     println!("dadhichi ▸ goal: {goal}\n");
 
     let mut ctx = AgentContext::new(
-        router,
-        tools,
+        router.clone(),
+        tools.clone(),
         GrantSet::from_iter([Permission::ReadWorkspace]),
         kernel.bus().clone(),
     );
@@ -249,6 +250,72 @@ async fn main() {
     metrics.incr("agent.runs", 1 + report.steps.len() as u64);
     metrics.incr("symbols.indexed", store.symbol_count().unwrap_or(0) as u64);
     println!("dadhichi ▸   metrics: {}", metrics.snapshot());
+
+    // 4d. Skills — reusable, permission-scoped capability bundles an agent
+    //     equips. A skill bounds what tools a run can reach, independently of
+    //     the grants it carries.
+    println!("\ndadhichi ▸ skills:");
+    // Built-ins plus any user/project manifests on disk (~/.dadhichi/skills,
+    // ./.dadhichi/skills, $DADHICHI_SKILLS_DIR).
+    let (skills, skill_load) = SkillRegistry::discover();
+    println!(
+        "dadhichi ▸   {} skills available: {}",
+        skills.len(),
+        skills.names().join(", ")
+    );
+    if !skill_load.loaded.is_empty() {
+        println!(
+            "dadhichi ▸   loaded {} skill(s) from disk: {}",
+            skill_load.loaded.len(),
+            skill_load.loaded.join(", ")
+        );
+    }
+    for err in &skill_load.errors {
+        eprintln!("dadhichi ▸   skipped malformed skill manifest: {err}");
+    }
+
+    // Equip a skill that is scoped to the `echo` tool and invokes it, then
+    // asks the model to summarise — all through the same permission gate.
+    let echo_skill = Skill::new("echo-demo", "Demonstrate a scoped tool call")
+        .with_instructions("Summarise the tool output for the user.")
+        .allow_tools(["echo"])
+        .step(SkillStep::tool(
+            "echo the greeting",
+            "echo",
+            serde_json::json!({ "value": "hello from a skill" }),
+        ));
+    let skill_agent = SkillAgent::new(echo_skill).with_model(&model_id);
+    let mut skill_ctx = AgentContext::new(
+        router.clone(),
+        tools.clone(),
+        GrantSet::from_iter([Permission::ReadWorkspace]),
+        kernel.bus().clone(),
+    );
+    match skill_agent.run("Greet the user", &mut skill_ctx).await {
+        Ok(outcome) => println!(
+            "dadhichi ▸   skill '{}' → {:?} ({:.0}%)",
+            skill_agent.skill().name,
+            outcome.status,
+            outcome.confidence * 100.0
+        ),
+        Err(err) => eprintln!("dadhichi ▸   skill run failed: {err}"),
+    }
+
+    // The capability contract is enforced: a skill that requires WriteWorkspace
+    // is refused when the run was only granted ReadWorkspace.
+    let write_skill = dadhichi_skill::builtin::implement();
+    let denied = SkillAgent::new(write_skill)
+        .run("edit a file", &mut skill_ctx)
+        .await;
+    println!(
+        "dadhichi ▸   write-skill under read-only grant: {}",
+        if denied.is_err() {
+            "refused (permission enforced)"
+        } else {
+            "allowed"
+        }
+    );
+    drop(skill_ctx);
 
     // 5. Drain the console by dropping the kernel's bus handles.
     drop(ctx);
