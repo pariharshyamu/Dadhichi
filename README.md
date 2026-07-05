@@ -81,6 +81,7 @@ through a plan → act → reflect loop against the offline mock model provider:
 
 ```
 dadhichi ▸ kernel booted
+dadhichi ▸ model provider: offline (mock provider only)
 dadhichi ▸ registered 3 core services
 dadhichi ▸ goal: Explain what makes Dadhichi an agent-native IDE.
 
@@ -96,6 +97,41 @@ dadhichi ▸ answer: [dadhichi-mock] Explain what makes Dadhichi an agent-native
 
 Everything runs **offline** — the default `MockProvider` needs no network — so
 the whole system is reproducible and testable without API keys.
+
+## Use a real model
+
+Dadhichi is model-agnostic. To drive a real provider, just set an environment
+variable before running — the runtime detects it, registers the provider, and
+keeps the offline mock as an automatic fallback:
+
+```bash
+# Anthropic
+ANTHROPIC_API_KEY=sk-ant-...        cargo run -- "Refactor this module"
+
+# OpenAI (or any OpenAI-compatible endpoint via OPENAI_BASE_URL)
+OPENAI_API_KEY=sk-...               cargo run
+OPENAI_API_KEY=... OPENAI_BASE_URL=http://localhost:8000/v1  cargo run   # vLLM, LM Studio, Azure…
+
+# OpenRouter
+OPENROUTER_API_KEY=sk-or-...        cargo run
+
+# Local Ollama (no key)
+OLLAMA_HOST=http://localhost:11434  cargo run
+```
+
+| Variable | Effect |
+| --- | --- |
+| `ANTHROPIC_API_KEY` | Use the Anthropic Messages API |
+| `OPENAI_API_KEY` | Use OpenAI (`OPENAI_BASE_URL` overrides the endpoint) |
+| `OPENROUTER_API_KEY` | Use the OpenRouter aggregator |
+| `OLLAMA_HOST` | Use a local Ollama server (no key) |
+| `DADHICHI_PROVIDER` | Pick the default when several are set (`anthropic`/`openai`/`openrouter`/`ollama`/`mock`) |
+
+At startup the binary prints which provider is active, e.g.
+`dadhichi ▸ model provider: anthropic (default: anthropic, + mock fallback)`.
+Keys are read only from the environment — they are never logged (the provider
+plan's `Debug` redacts them) and never written to disk. With no variable set,
+the run stays fully offline on the mock provider.
 
 ## Workspace layout
 

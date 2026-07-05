@@ -15,7 +15,7 @@
 //! events back into the Agent Console panel — all through the same bus.
 
 use dadhichi_agent::{AgentContext, Orchestrator, SpecialistAgent, agents::ConversationalAgent};
-use dadhichi_ai::{MockProvider, ModelRouter};
+use dadhichi_ai::{ModelRouter, ProviderPlan};
 use dadhichi_core::{Command, Kernel, KernelError, RecvError, Subscription};
 use dadhichi_index::Indexer;
 use dadhichi_index::store::SqliteSymbolStore;
@@ -45,12 +45,12 @@ impl AppController {
         let root = root.into();
         let kernel = Kernel::new();
 
-        // Core services, shared with the command handlers.
-        let router = {
-            let mut r = ModelRouter::new();
-            r.register(Arc::new(MockProvider::default()));
-            Arc::new(r)
-        };
+        // Core services, shared with the command handlers. Providers are
+        // resolved from the environment (ANTHROPIC_API_KEY / OPENAI_API_KEY /
+        // OLLAMA_HOST / …); with none set the offline mock provider is used.
+        let plan = ProviderPlan::from_env();
+        let model_id = plan.default_model();
+        let router = Arc::new(plan.build_router());
         let tools = {
             let mut t = ToolRegistry::new();
             t.register(Arc::new(EchoTool));
@@ -61,7 +61,7 @@ impl AppController {
 
         let orchestrator = {
             let mut orch = Orchestrator::new();
-            orch.register(Arc::new(ConversationalAgent::default()));
+            orch.register(Arc::new(ConversationalAgent::new(&model_id)));
             for agent in [
                 SpecialistAgent::code(),
                 SpecialistAgent::refactor(),
@@ -71,7 +71,7 @@ impl AppController {
                 SpecialistAgent::git(),
                 SpecialistAgent::security(),
             ] {
-                orch.register(Arc::new(agent));
+                orch.register(Arc::new(agent.with_model(&model_id)));
             }
             Arc::new(orch)
         };
