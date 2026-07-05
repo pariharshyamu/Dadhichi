@@ -14,7 +14,9 @@
 //! dispatches a kernel command, which runs an agent, whose progress streams as
 //! events back into the Agent Console panel — all through the same bus.
 
-use dadhichi_agent::{AgentContext, Orchestrator, SpecialistAgent, agents::ConversationalAgent};
+use dadhichi_agent::{
+    Agent, AgentContext, Orchestrator, SpecialistAgent, agents::ConversationalAgent,
+};
 use dadhichi_ai::{ModelRouter, ProviderPlan};
 use dadhichi_core::{Command, Event, Kernel, KernelError, RecvError, Subscription};
 use dadhichi_index::Indexer;
@@ -22,8 +24,12 @@ use dadhichi_index::store::SqliteSymbolStore;
 use dadhichi_mcp::{EchoTool, GrantSet, Permission, ToolRegistry};
 use dadhichi_skill::{SkillAgent, SkillRegistry};
 use dadhichi_ui::App;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use tokio::sync::RwLock;
+
+/// A skill catalogue that can be hot-reloaded from disk behind a shared lock.
+type SharedSkills = Arc<RwLock<SkillRegistry>>;
 
 /// Owns the live IDE state and mediates between the frontend and the kernel.
 pub struct AppController {
@@ -31,7 +37,7 @@ pub struct AppController {
     ui: App,
     events: Subscription,
     store: Arc<SqliteSymbolStore>,
-    skills: Arc<SkillRegistry>,
+    skills: SharedSkills,
 }
 
 impl std::fmt::Debug for AppController {
@@ -63,9 +69,11 @@ impl AppController {
 
         // The skill library: the built-ins plus any user/project skills
         // discovered on disk (~/.dadhichi/skills, <root>/.dadhichi/skills,
-        // $DADHICHI_SKILLS_DIR). Each becomes a `skill:<name>` agent below.
-        let (skills, skill_load) = SkillRegistry::discover_in(&root);
-        let skills = Arc::new(skills);
+        // $DADHICHI_SKILLS_DIR). Held behind a lock so `skill.reload` can swap
+        // it live; `skill.run` builds a fresh agent from it on each dispatch, so
+        // reloaded skills take effect immediately.
+        let (initial_skills, skill_load) = SkillRegistry::discover_in(&root);
+        let skills: SharedSkills = Arc::new(RwLock::new(initial_skills));
 
         let orchestrator = {
             let mut orch = Orchestrator::new();
@@ -81,15 +89,20 @@ impl AppController {
             ] {
                 orch.register(Arc::new(agent.with_model(&model_id)));
             }
-            for name in skills.names() {
-                if let Some(skill) = skills.get(&name) {
-                    orch.register(Arc::new(SkillAgent::new(skill).with_model(&model_id)));
-                }
-            }
             Arc::new(orch)
         };
 
-        register_commands(&kernel, &router, &tools, &orchestrator, &skills, &indexer).await;
+        register_commands(
+            &kernel,
+            &router,
+            &tools,
+            &orchestrator,
+            &skills,
+            &model_id,
+            &root,
+            &indexer,
+        )
+        .await;
 
         // Build the UI and seed the palette from the registered command names.
         let mut ui = App::new();
@@ -132,9 +145,10 @@ impl AppController {
         &self.store
     }
 
-    /// The skill library — for a frontend to list equippable skills (each runs
-    /// via the `skill.run` command or the `skill:<name>` agent).
-    pub fn skills(&self) -> &Arc<SkillRegistry> {
+    /// The shared skill catalogue — for a frontend to list equippable skills.
+    /// It sits behind a lock because `skill.reload` can swap it live; read it
+    /// with `ctrl.skills().read().await`. Skills run via `skill.run`/`skill.list`.
+    pub fn skills(&self) -> &SharedSkills {
         &self.skills
     }
 
@@ -183,12 +197,15 @@ impl AppController {
 
 /// Register the IDE's commands. Each runs real work and emits bus events, so the
 /// UI updates purely by pumping the bus.
+#[allow(clippy::too_many_arguments)]
 async fn register_commands(
     kernel: &Kernel,
     router: &Arc<ModelRouter>,
     tools: &Arc<ToolRegistry>,
     orchestrator: &Arc<Orchestrator>,
-    skills: &Arc<SkillRegistry>,
+    skills: &SharedSkills,
+    model_id: &str,
+    root: &Path,
     indexer: &Indexer,
 ) {
     // agent.run — run an agent against a goal; its progress streams as agent.*.
@@ -241,13 +258,15 @@ async fn register_commands(
             .await;
     }
 
-    // skill.run — equip a skill by name and run it with exactly the
-    // permissions it declares, so its `skill.*` progress streams to the console.
+    // skill.run — equip a skill by name and run it with exactly the permissions
+    // it declares, so its `skill.*` progress streams to the console. The skill
+    // is fetched from the (reloadable) registry and a fresh agent is built per
+    // dispatch, so `skill.reload` takes effect on the very next run.
     {
         let router = router.clone();
         let tools = tools.clone();
-        let orchestrator = orchestrator.clone();
         let skills = skills.clone();
+        let model_id = model_id.to_string();
         let bus = kernel.bus().clone();
         kernel
             .commands()
@@ -256,8 +275,8 @@ async fn register_commands(
                 Arc::new(move |cmd: Command| {
                     let router = router.clone();
                     let tools = tools.clone();
-                    let orchestrator = orchestrator.clone();
                     let skills = skills.clone();
+                    let model_id = model_id.clone();
                     let bus = bus.clone();
                     async move {
                         let skill_name = cmd
@@ -273,14 +292,21 @@ async fn register_commands(
                             .unwrap_or("Explain what a skill is.")
                             .to_string();
 
-                        let skill = skills.get(&skill_name).ok_or_else(|| {
+                        // Snapshot the skill, then drop the lock before running.
+                        let skill = {
+                            let registry = skills.read().await;
+                            registry.get(&skill_name)
+                        }
+                        .ok_or_else(|| {
                             KernelError::command_failed(format!("unknown skill: {skill_name}"))
                         })?;
+
+                        let agent = SkillAgent::new(skill.clone()).with_model(&model_id);
                         // Grant exactly what the skill requires — no more.
                         let mut ctx =
                             AgentContext::new(router, tools, skill.required_grants(), bus);
-                        let outcome = orchestrator
-                            .run(&format!("skill:{skill_name}"), &goal, &mut ctx)
+                        let outcome = agent
+                            .run(&goal, &mut ctx)
                             .await
                             .map_err(KernelError::command_failed)?;
                         Ok(serde_json::json!({
@@ -305,11 +331,56 @@ async fn register_commands(
                 Arc::new(move |_cmd: Command| {
                     let skills = skills.clone();
                     async move {
-                        let specs = serde_json::to_value(skills.list())
+                        let registry = skills.read().await;
+                        let specs = serde_json::to_value(registry.list())
                             .map_err(KernelError::command_failed)?;
                         Ok(serde_json::json!({
-                            "count": skills.len(),
+                            "count": registry.len(),
                             "skills": specs,
+                        }))
+                    }
+                }),
+            )
+            .await;
+    }
+
+    // skill.reload — re-scan the manifest directories and swap the catalogue
+    // live, without restarting. Malformed manifests are reported (not fatal) as
+    // `skill.load.error`, and a `skill.reloaded` event announces the new count.
+    {
+        let skills = skills.clone();
+        let root = root.to_path_buf();
+        let bus = kernel.bus().clone();
+        kernel
+            .commands()
+            .register(
+                "skill.reload",
+                Arc::new(move |_cmd: Command| {
+                    let skills = skills.clone();
+                    let root = root.clone();
+                    let bus = bus.clone();
+                    async move {
+                        let (fresh, report) = SkillRegistry::discover_in(&root);
+                        let count = fresh.len();
+                        *skills.write().await = fresh;
+
+                        for err in &report.errors {
+                            bus.publish(Event::new(
+                                "skill.load.error",
+                                serde_json::json!({ "error": err.to_string() }),
+                            ));
+                        }
+                        bus.publish(Event::new(
+                            "skill.reloaded",
+                            serde_json::json!({ "count": count, "loaded": report.loaded }),
+                        ));
+
+                        let errors: Vec<String> =
+                            report.errors.iter().map(|e| e.to_string()).collect();
+                        Ok(serde_json::json!({
+                            "count": count,
+                            "loaded": report.loaded,
+                            "errors": errors,
                         }))
                     }
                 }),
@@ -447,7 +518,7 @@ mod tests {
     async fn skills_are_registered_and_runnable() {
         let mut ctrl = AppController::new(".").await;
         // The built-in library is available to a frontend.
-        assert!(ctrl.skills().contains("explain"));
+        assert!(ctrl.skills().read().await.contains("explain"));
 
         // Running a skill through the command dispatches its `skill:` agent and
         // streams `skill.*` progress into the console.
@@ -518,7 +589,7 @@ mod tests {
         .unwrap();
 
         let ctrl = AppController::new(root.path()).await;
-        assert!(ctrl.skills().contains("house-style"));
+        assert!(ctrl.skills().read().await.contains("house-style"));
 
         let out = ctrl
             .dispatch(
@@ -529,5 +600,58 @@ mod tests {
             .unwrap();
         assert_eq!(out["skill"], "house-style");
         assert_eq!(out["status"], "Completed");
+    }
+
+    #[tokio::test]
+    async fn skill_reload_picks_up_new_manifests_live() {
+        let root = tempfile::tempdir().unwrap();
+        let skill_dir = root.path().join(".dadhichi").join("skills");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+
+        // Boot with no project skills present.
+        let ctrl = AppController::new(root.path()).await;
+        assert!(!ctrl.skills().read().await.contains("late-arrival"));
+        assert!(
+            ctrl.dispatch("skill.run", serde_json::json!({ "skill": "late-arrival" }))
+                .await
+                .is_err()
+        );
+
+        // Author a new skill after boot, then reload.
+        std::fs::write(
+            skill_dir.join("late-arrival.json"),
+            r#"{"name":"late-arrival","description":"added at runtime"}"#,
+        )
+        .unwrap();
+        let report = ctrl
+            .dispatch("skill.reload", serde_json::json!({}))
+            .await
+            .unwrap();
+        assert_eq!(report["loaded"], serde_json::json!(["late-arrival"]));
+
+        // It is now live: catalogued and runnable without a restart.
+        assert!(ctrl.skills().read().await.contains("late-arrival"));
+        let out = ctrl
+            .dispatch("skill.run", serde_json::json!({ "skill": "late-arrival" }))
+            .await
+            .unwrap();
+        assert_eq!(out["status"], "Completed");
+    }
+
+    #[tokio::test]
+    async fn skill_reload_reports_malformed_manifests() {
+        let root = tempfile::tempdir().unwrap();
+        let skill_dir = root.path().join(".dadhichi").join("skills");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(skill_dir.join("broken.json"), "{ not json").unwrap();
+
+        let ctrl = AppController::new(root.path()).await;
+        let report = ctrl
+            .dispatch("skill.reload", serde_json::json!({}))
+            .await
+            .unwrap();
+        assert_eq!(report["errors"].as_array().unwrap().len(), 1);
+        // The built-ins are still present after a reload with a bad manifest.
+        assert!(report["count"].as_u64().unwrap() >= 5);
     }
 }

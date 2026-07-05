@@ -191,8 +191,10 @@ cargo run -p dadhichi-skill --example run_skill
 which equips a pure-prompt skill, a tool-scoped skill (invoking `echo` through
 the gate), and shows a write-scoped skill **refused** under a read-only grant.
 In the IDE, `skill.list` enumerates the available skills (name, description,
-required permissions, tool scope) for a picker, and `skill.run` equips one — or
-the `skill:<name>` agent — granted exactly the permissions it declares.
+required permissions, tool scope) for a picker, `skill.run` equips one — granted
+exactly the permissions it declares — and `skill.reload` re-scans the manifest
+directories and swaps the catalogue live, so a newly authored skill is runnable
+without a restart.
 
 ## Workspace layout
 

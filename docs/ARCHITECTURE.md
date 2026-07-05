@@ -235,10 +235,13 @@ delegates to the registry's existing grant gate — so a skill is always
 permissions up front (refusing with a `skill.denied` event if any are missing),
 executes tool steps through `ScopedTools`, consults the model under the skill's
 instructions, then verifies — emitting `skill.equipped`, `skill.tool.invoked`,
-`skill.completed`, etc. `SkillRegistry` catalogues skills; each is exposed to
-the orchestrator as a `skill:<name>` agent and to the UI through two commands:
-`skill.list` (enumerate skills as `SkillSpec`s for a picker) and `skill.run`
-(equip one, granted exactly the permissions it declares).
+`skill.completed`, etc. `SkillRegistry` catalogues skills and is exposed to the
+UI through three commands: `skill.list` (enumerate skills as `SkillSpec`s for a
+picker), `skill.run` (equip one, granted exactly the permissions it declares),
+and `skill.reload` (re-scan the manifest directories and swap the catalogue
+live). The catalogue sits behind a lock and `skill.run` builds a fresh agent
+from it per dispatch, so a reload — or a newly authored manifest — takes effect
+on the next run without a restart.
 
 Skills are plain data, so besides code authoring they load from **JSON
 manifests** on disk: `~/.dadhichi/skills`, `<workspace>/.dadhichi/skills`, and
