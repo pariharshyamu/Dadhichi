@@ -30,11 +30,32 @@ async fn main() {
     };
     let bus = EventBus::new();
 
-    let registry = SkillRegistry::with_builtins();
+    let mut registry = SkillRegistry::with_builtins();
     println!(
-        "{} built-in skills: {}\n",
+        "{} built-in skills: {}",
         registry.len(),
         registry.names().join(", ")
+    );
+
+    // Load a user-authored skill from a JSON manifest on disk. In a real
+    // install these live in ~/.dadhichi/skills or ./.dadhichi/skills; here we
+    // write one to a temp directory to keep the example self-contained.
+    let skill_dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        skill_dir.path().join("greeter.json"),
+        r#"{
+            "name": "greeter",
+            "description": "A friendly greeting skill",
+            "instructions": "Greet the user warmly.",
+            "steps": [{ "description": "compose a greeting" }]
+        }"#,
+    )
+    .unwrap();
+    let report = registry.load_dir(skill_dir.path());
+    println!(
+        "loaded {} skill(s) from disk: {}\n",
+        report.loaded.len(),
+        report.loaded.join(", ")
     );
 
     // 1. A pure-prompt skill (no permissions, no tools).
@@ -75,6 +96,17 @@ async fn main() {
         GrantSet::from_iter([Permission::ReadWorkspace]),
         SkillAgent::new(registry.get("implement").unwrap()),
         "Edit a file",
+    )
+    .await;
+
+    // 4. The disk-loaded skill runs exactly like a built-in.
+    run(
+        &router,
+        &tools,
+        &bus,
+        GrantSet::none(),
+        SkillAgent::new(registry.get("greeter").unwrap()),
+        "Say hello",
     )
     .await;
 }

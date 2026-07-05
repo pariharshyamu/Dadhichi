@@ -42,11 +42,13 @@
 
 pub mod agent;
 pub mod builtin;
+pub mod loader;
 pub mod registry;
 pub mod scope;
 pub mod skill;
 
 pub use agent::SkillAgent;
+pub use loader::{LoadError, LoadReport, skill_dirs};
 pub use registry::SkillRegistry;
 pub use scope::{ScopedTools, SkillError};
 pub use skill::{Skill, SkillSpec, SkillStep, SkillTools};

@@ -158,9 +158,31 @@ let agent = SkillAgent::new(skills.get("code-review").unwrap());
 // `agent` implements the same Agent trait, so the orchestrator runs it like any other.
 ```
 
-Skills are plain data (`Serialize`/`Deserialize`), so they can be authored in
-code, loaded from a JSON manifest, or shipped through the marketplace. See the
-live demonstration:
+Skills are plain data (`Serialize`/`Deserialize`), so besides authoring them in
+code you can drop **JSON manifests** on disk and they're loaded automatically:
+
+```
+~/.dadhichi/skills/*.json        # your personal skills
+<workspace>/.dadhichi/skills/*.json   # project skills, checked into the repo
+$DADHICHI_SKILLS_DIR/*.json      # an explicit override (highest precedence)
+```
+
+A disk skill overrides a built-in of the same name, so you can customise a
+shipped skill by name. A manifest looks like:
+
+```json
+{
+  "name": "house-style",
+  "description": "Apply our house style",
+  "instructions": "Follow the team style guide; prefer clarity over cleverness.",
+  "required_permissions": ["read_workspace", "write_workspace"],
+  "tools": { "mode": "allow", "names": ["fs.read", "fs.write"] },
+  "steps": [{ "description": "read the file" }, { "description": "apply the change" }]
+}
+```
+
+Malformed manifests are reported (as a `skill.load.error` in the console), never
+fatal. See the live demonstration, which also loads a skill from disk:
 
 ```bash
 cargo run -p dadhichi-skill --example run_skill

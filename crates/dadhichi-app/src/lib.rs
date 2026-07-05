@@ -16,7 +16,7 @@
 
 use dadhichi_agent::{AgentContext, Orchestrator, SpecialistAgent, agents::ConversationalAgent};
 use dadhichi_ai::{ModelRouter, ProviderPlan};
-use dadhichi_core::{Command, Kernel, KernelError, RecvError, Subscription};
+use dadhichi_core::{Command, Event, Kernel, KernelError, RecvError, Subscription};
 use dadhichi_index::Indexer;
 use dadhichi_index::store::SqliteSymbolStore;
 use dadhichi_mcp::{EchoTool, GrantSet, Permission, ToolRegistry};
@@ -61,9 +61,11 @@ impl AppController {
         let store = Arc::new(SqliteSymbolStore::in_memory().expect("open symbol store"));
         let indexer = Indexer::new(store.clone()).with_event_bus(kernel.bus().clone());
 
-        // The skill library, and a `skill:<name>` agent for each entry so the
-        // orchestrator can run any skill by name.
-        let skills = Arc::new(SkillRegistry::with_builtins());
+        // The skill library: the built-ins plus any user/project skills
+        // discovered on disk (~/.dadhichi/skills, <root>/.dadhichi/skills,
+        // $DADHICHI_SKILLS_DIR). Each becomes a `skill:<name>` agent below.
+        let (skills, skill_load) = SkillRegistry::discover_in(&root);
+        let skills = Arc::new(skills);
 
         let orchestrator = {
             let mut orch = Orchestrator::new();
@@ -95,6 +97,17 @@ impl AppController {
         ui.set_commands(kernel.commands().command_names().await);
 
         let events = kernel.bus().subscribe();
+
+        // Surface any malformed skill manifests on the bus now that a
+        // subscriber exists, so they show up in the console rather than failing
+        // silently. Successful loads are reflected in the palette/skill list.
+        for err in &skill_load.errors {
+            kernel.bus().publish(Event::new(
+                "skill.load.error",
+                serde_json::json!({ "error": err.to_string() }),
+            ));
+        }
+
         Self {
             kernel,
             ui,
@@ -441,5 +454,32 @@ mod tests {
             .dispatch("skill.run", serde_json::json!({ "skill": "nope" }))
             .await;
         assert!(err.is_err());
+    }
+
+    #[tokio::test]
+    async fn project_local_skill_manifest_is_discovered_and_runnable() {
+        // A project skill dropped into <root>/.dadhichi/skills is loaded when
+        // the workspace opens, and is runnable like any built-in.
+        let root = tempfile::tempdir().unwrap();
+        let skill_dir = root.path().join(".dadhichi").join("skills");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("house-style.json"),
+            r#"{"name":"house-style","description":"Apply our house style"}"#,
+        )
+        .unwrap();
+
+        let ctrl = AppController::new(root.path()).await;
+        assert!(ctrl.skills().contains("house-style"));
+
+        let out = ctrl
+            .dispatch(
+                "skill.run",
+                serde_json::json!({ "skill": "house-style", "goal": "tidy up" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(out["skill"], "house-style");
+        assert_eq!(out["status"], "Completed");
     }
 }

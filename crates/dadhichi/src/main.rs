@@ -255,12 +255,24 @@ async fn main() {
     //     equips. A skill bounds what tools a run can reach, independently of
     //     the grants it carries.
     println!("\ndadhichi ▸ skills:");
-    let skills = SkillRegistry::with_builtins();
+    // Built-ins plus any user/project manifests on disk (~/.dadhichi/skills,
+    // ./.dadhichi/skills, $DADHICHI_SKILLS_DIR).
+    let (skills, skill_load) = SkillRegistry::discover();
     println!(
-        "dadhichi ▸   {} built-in skills available: {}",
+        "dadhichi ▸   {} skills available: {}",
         skills.len(),
         skills.names().join(", ")
     );
+    if !skill_load.loaded.is_empty() {
+        println!(
+            "dadhichi ▸   loaded {} skill(s) from disk: {}",
+            skill_load.loaded.len(),
+            skill_load.loaded.join(", ")
+        );
+    }
+    for err in &skill_load.errors {
+        eprintln!("dadhichi ▸   skipped malformed skill manifest: {err}");
+    }
 
     // Equip a skill that is scoped to the `echo` tool and invokes it, then
     // asks the model to summarise — all through the same permission gate.
