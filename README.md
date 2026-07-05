@@ -198,6 +198,35 @@ directories and swaps the catalogue live. The manifest directories are also
 **watched**: editing or dropping a `*.json` skill file reloads the catalogue
 automatically and refreshes the `>` picker, no command or restart needed.
 
+## MCP connectors
+
+Dadhichi is MCP-native. Point it at any MCP server — GitHub, Slack, Figma, a
+filesystem, Postgres — by declaring it in an `mcp.json` (in `~/.dadhichi/` or
+`<workspace>/.dadhichi/`). At boot the servers are launched, their tools are
+discovered, namespaced (`github.create_issue`), stamped with the permissions you
+declare, and registered — so an agent invokes a remote tool exactly like a
+built-in one, through the same permission gate.
+
+```json
+{
+  "servers": {
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": { "GITHUB_PERSONAL_ACCESS_TOKEN": "${env:GITHUB_TOKEN}" },
+      "grants": ["network"]
+    }
+  }
+}
+```
+
+Secrets never live in the config: `${env:NAME}` placeholders are resolved from
+the environment at launch (a vault-backed resolver is the planned extension). If
+a server fails to start it's reported (`mcp.error`) but never fatal. `mcp.list`
+enumerates the configured servers and available tools; `mcp.connect` (re)launches
+them. Only local (stdio) servers are supported today; a WebSocket/HTTP transport
+for hosted SaaS connectors is on the roadmap.
+
 ## Workspace layout
 
 ```

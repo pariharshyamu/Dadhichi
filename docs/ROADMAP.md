@@ -83,6 +83,13 @@ changes. `< 20 ms` latency and the GPU pipeline remain a GPU-shell concern.
 - [x] Live MCP client: transport-generic `McpConnection` (line-delimited
       JSON-RPC, id-correlated) with `connect_stdio`, plus `McpToolBridge` that
       exposes discovered external tools through the permission-gated registry
+- [x] Declarative MCP connectors (`dadhichi-mcp::connector`): an `mcp.json`
+      names servers (command/args/env + permission envelope); `connect_servers`
+      launches each, namespaces + permission-stamps its tools, and registers
+      them into the now interior-mutable `ToolRegistry`. Secrets are `${...}`
+      placeholders resolved at launch. Wired into `AppController` at boot with
+      `mcp.list` / `mcp.connect` commands. Remaining: WebSocket/HTTP transport
+      for hosted servers, and a vault-backed secret resolver
 - [x] DAP debugger service (`dadhichi-dap`): initialize, breakpoints, threads,
       continue, with adapter events republished as `dap.<event>`
 - [x] Workflow automation from natural language: `Workflow::parse` decomposes a

@@ -192,7 +192,7 @@ impl App {
                     self.status = format!("changed: {path}");
                 }
             }
-            t if t.starts_with("agent.") || t.starts_with("skill.") => {
+            t if t.starts_with("agent.") || t.starts_with("skill.") || t.starts_with("mcp.") => {
                 self.chat
                     .push(format!("[{}] {}", t, compact(&event.payload)));
             }

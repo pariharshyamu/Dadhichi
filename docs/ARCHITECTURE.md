@@ -297,17 +297,31 @@ server (exposing its own workspace tools to other agents).
   `ToolSpec` (name, description, JSON-Schema, required permissions).
 - `ToolRegistry` — catalogues tools and is the **single choke point** where
   permissions are enforced against a `GrantSet`; nothing reaches a tool without
-  passing the gate.
+  passing the gate. It is **interior-mutable** (an `RwLock`), so connectors can
+  register a server's tools at runtime through the shared `Arc<ToolRegistry>`
+  every agent already holds.
 - `protocol` — JSON-RPC 2.0 envelope plus `McpClient` trait and capability
   negotiation for bridging external MCP servers behind the same `Tool` trait.
+- `connector` — the **declarative connector layer**. An `McpServersConfig`
+  (loaded from `mcp.json`, à la the skills manifests) names servers by
+  `command`/`args`/`env` plus the `Permission` envelope their tools should
+  carry. `connect_servers` launches each enabled server over stdio, discovers
+  its tools, **namespaces** them (`<server>.<tool>`), **stamps** them with the
+  configured permissions, and registers them. Secrets never sit in the config:
+  `env` values may contain `${...}` placeholders resolved through an injected
+  closure (process env today, a vault tomorrow), so tokens are injected at
+  launch, not committed.
 
-**[implemented]** `dadhichi-mcp`, now including a live `McpConnection` — a
-transport-generic, id-correlated JSON-RPC client with a `connect_stdio`
-constructor — and `McpToolBridge`, which discovers a remote server's tools and
-exposes each through the permission-gated `ToolRegistry` (defaulting external
-tools to the `Network` scope). An agent invokes a GitHub or Docker MCP tool
-exactly as it invokes a built-in one. **[design]** a WebSocket transport and
-auth.
+**[implemented]** `dadhichi-mcp`: a live `McpConnection` — a transport-generic,
+id-correlated JSON-RPC client with `connect_stdio`/`connect_stdio_env` — and
+`McpToolBridge`, which exposes a remote server's tools through the
+permission-gated `ToolRegistry`. The connector layer wires this into the
+`AppController`: servers declared in `mcp.json` are launched at boot (failures
+are non-fatal, surfaced as `mcp.error`), and the `mcp.list` / `mcp.connect`
+commands enumerate and (re)connect them. An agent invokes a GitHub or Slack MCP
+tool exactly as it invokes a built-in one. **[design]** a WebSocket/HTTP
+transport for hosted (non-subprocess) servers, and a vault-backed secret
+resolver.
 
 ---
 

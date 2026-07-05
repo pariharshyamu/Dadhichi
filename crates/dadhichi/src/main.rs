@@ -71,7 +71,7 @@ async fn main() {
     let router = Arc::new(plan.build_router());
 
     let tools = {
-        let mut t = ToolRegistry::new();
+        let t = ToolRegistry::new();
         t.register(Arc::new(EchoTool));
         Arc::new(t)
     };

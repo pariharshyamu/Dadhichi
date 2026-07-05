@@ -21,7 +21,9 @@ use dadhichi_ai::{ModelRouter, ProviderPlan};
 use dadhichi_core::{Command, Event, Kernel, KernelError, RecvError, Subscription};
 use dadhichi_index::Indexer;
 use dadhichi_index::store::SqliteSymbolStore;
-use dadhichi_mcp::{EchoTool, GrantSet, Permission, ToolRegistry};
+use dadhichi_mcp::{
+    EchoTool, GrantSet, McpConnections, McpServersConfig, Permission, ToolRegistry, connect_servers,
+};
 use dadhichi_skill::{
     SharedSkills, SkillAgent, SkillRegistry, SkillSpec, SkillTools, SkillWatchGuard, shared,
     watch_skills,
@@ -39,6 +41,18 @@ pub struct AppController {
     skills: SharedSkills,
     /// Keeps the skill-manifest file watch alive; dropping it stops watching.
     _skill_watch: Option<SkillWatchGuard>,
+    /// Keeps the boot-time MCP server subprocesses alive (their bridged tools
+    /// also hold the connections, so this mainly documents ownership).
+    _mcp: McpConnections,
+}
+
+/// Resolve a `${key}` secret placeholder in an MCP server's env.
+///
+/// Supports `env:NAME` and bare names (both read the process environment).
+/// `vault:NAME` is reserved for a future credential-vault resolver.
+fn resolve_mcp_secret(key: &str) -> Option<String> {
+    let name = key.strip_prefix("env:").unwrap_or(key);
+    std::env::var(name).ok()
 }
 
 impl std::fmt::Debug for AppController {
@@ -61,12 +75,20 @@ impl AppController {
         let model_id = plan.default_model();
         let router = Arc::new(plan.build_router());
         let tools = {
-            let mut t = ToolRegistry::new();
+            let t = ToolRegistry::new();
             t.register(Arc::new(EchoTool));
             Arc::new(t)
         };
         let store = Arc::new(SqliteSymbolStore::in_memory().expect("open symbol store"));
         let indexer = Indexer::new(store.clone()).with_event_bus(kernel.bus().clone());
+
+        // MCP connectors: launch the servers declared in mcp.json and bridge
+        // their tools into the shared registry (the registry is interior-mutable
+        // so this reaches the tools every agent already holds). Secrets in the
+        // config are `${...}` placeholders resolved from the environment.
+        let (mcp_config, mcp_cfg_errors) = McpServersConfig::discover_in(&root);
+        let (mcp_conns, mcp_report) =
+            connect_servers(&mcp_config, &tools, resolve_mcp_secret).await;
 
         // The skill library: the built-ins plus any user/project skills
         // discovered on disk (~/.dadhichi/skills, <root>/.dadhichi/skills,
@@ -122,6 +144,7 @@ impl AppController {
             &tools,
             &orchestrator,
             &skills,
+            &mcp_config,
             &model_id,
             &root,
             &indexer,
@@ -148,6 +171,14 @@ impl AppController {
             ));
         }
 
+        // Report the boot-time MCP connection results to the console.
+        for err in &mcp_cfg_errors {
+            kernel
+                .bus()
+                .publish(Event::new("mcp.error", serde_json::json!({ "error": err })));
+        }
+        publish_mcp_report(kernel.bus(), &mcp_report);
+
         Self {
             kernel,
             ui,
@@ -155,6 +186,7 @@ impl AppController {
             store,
             skills,
             _skill_watch: skill_watch,
+            _mcp: mcp_conns,
         }
     }
 
@@ -293,6 +325,23 @@ fn skill_detail(spec: &SkillSpec) -> String {
     format!("perms: {perms} · tools: {tools}")
 }
 
+/// Publish `mcp.connected` for each connected server and `mcp.error` for each
+/// failure, so a connect pass shows up in the console.
+fn publish_mcp_report(bus: &dadhichi_core::EventBus, report: &dadhichi_mcp::ConnectReport) {
+    for server in &report.connected {
+        bus.publish(Event::new(
+            "mcp.connected",
+            serde_json::json!({ "server": server.name, "tools": server.tools }),
+        ));
+    }
+    for err in &report.errors {
+        bus.publish(Event::new(
+            "mcp.error",
+            serde_json::json!({ "server": err.server, "error": err.message }),
+        ));
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn register_commands(
     kernel: &Kernel,
@@ -300,6 +349,7 @@ async fn register_commands(
     tools: &Arc<ToolRegistry>,
     orchestrator: &Arc<Orchestrator>,
     skills: &SharedSkills,
+    mcp_config: &McpServersConfig,
     model_id: &str,
     root: &Path,
     indexer: &Indexer,
@@ -482,6 +532,73 @@ async fn register_commands(
                             "count": count,
                             "loaded": report.loaded,
                             "errors": errors,
+                        }))
+                    }
+                }),
+            )
+            .await;
+    }
+
+    // mcp.list — the configured MCP servers plus the tools currently registered.
+    {
+        let mcp_config = mcp_config.clone();
+        let tools = tools.clone();
+        kernel
+            .commands()
+            .register(
+                "mcp.list",
+                Arc::new(move |_cmd: Command| {
+                    let mcp_config = mcp_config.clone();
+                    let tools = tools.clone();
+                    async move {
+                        let servers: Vec<serde_json::Value> = mcp_config
+                            .servers
+                            .iter()
+                            .map(|(name, cfg)| {
+                                serde_json::json!({
+                                    "name": name,
+                                    "command": cfg.command,
+                                    "enabled": cfg.enabled,
+                                    "grants": cfg.grants.iter().map(|p| p.to_string()).collect::<Vec<_>>(),
+                                })
+                            })
+                            .collect();
+                        Ok(serde_json::json!({
+                            "servers": servers,
+                            "tools": tools.names(),
+                        }))
+                    }
+                }),
+            )
+            .await;
+    }
+
+    // mcp.connect — (re)launch the configured servers and bridge their tools,
+    // emitting mcp.connected / mcp.error. Idempotent: re-registering a tool of
+    // the same name replaces it.
+    {
+        let mcp_config = mcp_config.clone();
+        let tools = tools.clone();
+        let bus = kernel.bus().clone();
+        kernel
+            .commands()
+            .register(
+                "mcp.connect",
+                Arc::new(move |_cmd: Command| {
+                    let mcp_config = mcp_config.clone();
+                    let tools = tools.clone();
+                    let bus = bus.clone();
+                    async move {
+                        let (conns, report) =
+                            connect_servers(&mcp_config, &tools, resolve_mcp_secret).await;
+                        publish_mcp_report(&bus, &report);
+                        // The bridged tools hold their connections alive; this
+                        // guard can drop here without closing them.
+                        let connected = conns.names();
+                        Ok(serde_json::json!({
+                            "connected": connected,
+                            "tools": report.tool_count(),
+                            "errors": report.errors.len(),
                         }))
                     }
                 }),
@@ -797,19 +914,26 @@ mod tests {
         )
         .unwrap();
 
-        // Poll pump() until the reload event lands (bounded, watchers are async).
-        let mut reloaded = false;
+        // Poll until the catalogue actually contains the new skill, pumping the
+        // bus each tick. We wait on the real condition (not just the first
+        // `skill.reloaded`), because a create-then-write can trigger an early
+        // reload before the file's contents have landed.
+        let mut loaded = false;
         for _ in 0..100 {
-            if ctrl.pump() > 0 && ctrl.ui().chat.iter().any(|l| l.contains("skill.reloaded")) {
-                reloaded = true;
+            ctrl.pump();
+            if ctrl.skills().read().unwrap().contains("hot") {
+                loaded = true;
                 break;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        assert!(reloaded, "watcher did not publish skill.reloaded");
+        assert!(loaded, "watcher did not load the new skill");
+        // A final pump processes the reload event that carried `hot`, refreshing
+        // the palette.
+        ctrl.pump();
+        assert!(ctrl.ui().chat.iter().any(|l| l.contains("skill.reloaded")));
 
-        // The catalogue and the palette's `>` picker both reflect it, live.
-        assert!(ctrl.skills().read().unwrap().contains("hot"));
+        // The palette's `>` picker reflects it, live.
         ctrl.ui_mut().palette.open();
         ctrl.ui_mut().palette.push('>');
         assert!(
@@ -820,5 +944,53 @@ mod tests {
                 .any(|item| item.label() == "hot"),
             "palette skill list not refreshed after watcher reload"
         );
+    }
+
+    #[tokio::test]
+    async fn mcp_config_is_discovered_and_listed() {
+        // A project mcp.json declares a server. Booting parses it and attempts
+        // to connect; the bogus command fails non-fatally, but the server is
+        // still catalogued and surfaced by `mcp.list`.
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join(".dadhichi");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("mcp.json"),
+            r#"{"servers":{"github":{
+                "command":"definitely-not-a-real-binary-xyz",
+                "args":["-y","server"],
+                "grants":["network"]
+            }}}"#,
+        )
+        .unwrap();
+
+        let mut ctrl = AppController::new(root.path()).await;
+
+        // The failed connect surfaced as an mcp.error in the console.
+        assert!(ctrl.pump() > 0);
+        assert!(ctrl.ui().chat.iter().any(|l| l.contains("mcp.error")));
+
+        // mcp.list reflects the configured server and its permission envelope.
+        let out = ctrl
+            .dispatch("mcp.list", serde_json::json!({}))
+            .await
+            .unwrap();
+        let servers = out["servers"].as_array().unwrap();
+        let gh = servers.iter().find(|s| s["name"] == "github").unwrap();
+        assert_eq!(gh["command"], "definitely-not-a-real-binary-xyz");
+        assert_eq!(gh["grants"][0], "network");
+        assert!(gh["enabled"].as_bool().unwrap());
+    }
+
+    #[tokio::test]
+    async fn mcp_list_is_empty_without_config() {
+        let ctrl = AppController::new(".").await;
+        let out = ctrl
+            .dispatch("mcp.list", serde_json::json!({}))
+            .await
+            .unwrap();
+        assert!(out["servers"].as_array().unwrap().is_empty());
+        // The built-in echo tool is always present.
+        assert!(out["tools"].as_array().unwrap().iter().any(|t| t == "echo"));
     }
 }

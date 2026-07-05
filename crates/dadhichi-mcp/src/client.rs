@@ -61,9 +61,21 @@ impl McpConnection {
 
     /// Launch an MCP server subprocess and speak to it over stdio.
     pub async fn connect_stdio(command: &str, args: &[&str]) -> Result<Self, McpError> {
+        let owned: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+        Self::connect_stdio_env(command, &owned, &[]).await
+    }
+
+    /// Launch an MCP server subprocess with an explicit environment (for API
+    /// tokens and the like) and speak to it over stdio.
+    pub async fn connect_stdio_env(
+        command: &str,
+        args: &[String],
+        env: &[(String, String)],
+    ) -> Result<Self, McpError> {
         use std::process::Stdio;
         let mut child = tokio::process::Command::new(command)
             .args(args)
+            .envs(env.iter().map(|(k, v)| (k.clone(), v.clone())))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())

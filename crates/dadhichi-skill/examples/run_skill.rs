@@ -24,7 +24,7 @@ async fn main() {
         Arc::new(r)
     };
     let tools = {
-        let mut t = ToolRegistry::new();
+        let t = ToolRegistry::new();
         t.register(Arc::new(EchoTool));
         Arc::new(t)
     };
