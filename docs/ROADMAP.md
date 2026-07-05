@@ -108,9 +108,10 @@ durable long-term memory (the `VectorStore` trait already abstracts it).
 - [x] Cross-platform packaging: a tag-triggered matrix release
       (`.github/workflows/release.yml`) builds binaries for Linux/macOS/Windows
       (x86_64 + aarch64), archives each with a SHA-256 checksum, and builds
-      `.deb`/`.rpm`/`.app`/`.msi`; checksum-verifying one-line installers
-      (`packaging/install.{sh,ps1}`) and CI-validated packaging assets
-      (`packaging/verify.sh`) round it out. See [`PACKAGING.md`](PACKAGING.md).
+      `.deb`/`.rpm`/`.app`/`.msi` plus a self-updating Homebrew formula;
+      checksum-verifying one-line installers (`packaging/install.{sh,ps1}`) and
+      CI-validated packaging assets (`packaging/verify.sh`) round it out. See
+      [`PACKAGING.md`](PACKAGING.md).
 - [ ] WASM edition (wasm32) and mobile companion — the remaining reach work
 
 The plugin runtime uses `wasmi` (a portable interpreter) rather than

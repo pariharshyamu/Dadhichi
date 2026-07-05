@@ -126,6 +126,11 @@ jobs:
           mkdir -p release
           find artifacts -type f -exec cp {} release/ \;
           ls -la release
+      - name: Render Homebrew formula
+        run: |
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          bash packaging/homebrew/update-formula.sh "$tag"
+          cp packaging/homebrew/dadhichi.rb release/dadhichi.rb
       - name: Publish
         uses: softprops/action-gh-release@v2
         with:

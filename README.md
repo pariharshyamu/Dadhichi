@@ -48,6 +48,13 @@ curl -fsSL https://raw.githubusercontent.com/pariharshyamu/Dadhichi/main/packagi
 irm https://raw.githubusercontent.com/pariharshyamu/Dadhichi/main/packaging/install.ps1 | iex
 ```
 
+Or install via Homebrew:
+
+```bash
+brew tap pariharshyamu/dadhichi https://github.com/pariharshyamu/Dadhichi
+brew install dadhichi          # or: brew install --HEAD dadhichi
+```
+
 Native packages (`.deb`, `.rpm`, macOS `.app`, Windows `.msi`) and per-platform
 tarballs are attached to each [GitHub Release](https://github.com/pariharshyamu/Dadhichi/releases).
 See [`docs/PACKAGING.md`](docs/PACKAGING.md) for the full packaging story.

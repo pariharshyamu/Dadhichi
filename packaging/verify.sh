@@ -27,6 +27,8 @@ for f in \
     macos/Info.plist \
     macos/bundle.sh \
     windows/dadhichi.wxs \
+    homebrew/dadhichi.rb \
+    homebrew/update-formula.sh \
     install.sh \
     install.ps1
 do
@@ -63,10 +65,28 @@ check_ver() { # file, human label
 check_ver "$pkg/linux/dadhichi.metainfo.xml" "metainfo release"
 check_ver "$pkg/macos/Info.plist" "Info.plist"
 check_ver "$pkg/linux/dadhichi.1" "man page"
+check_ver "$pkg/homebrew/dadhichi.rb" "homebrew formula"
+
+# ── 4b. Homebrew formula sanity ──────────────────────────────────────────────
+echo "homebrew formula:"
+formula="$pkg/homebrew/dadhichi.rb"
+for field in "class Dadhichi < Formula" "desc " "homepage " "license " "url " "sha256 " "test do"; do
+    if grep -q "$field" "$formula"; then pass "has $field"; else bad "formula missing $field"; fi
+done
+# The managed block must keep its markers so update-formula.sh can find it.
+if grep -q "# BEGIN stable" "$formula" && grep -q "# END stable" "$formula"; then
+    pass "managed stable block delimited"
+else
+    bad "formula is missing the BEGIN/END stable markers"
+fi
+# Ruby syntax check when a ruby is available (skipped-pass otherwise).
+if command -v ruby >/dev/null 2>&1; then
+    if ruby -c "$formula" >/dev/null 2>&1; then pass "ruby -c parses"; else bad "formula has a Ruby syntax error"; fi
+fi
 
 # ── 5. Shell script syntax ───────────────────────────────────────────────────
 echo "shell syntax:"
-for s in install.sh verify.sh macos/bundle.sh; do
+for s in install.sh verify.sh macos/bundle.sh homebrew/update-formula.sh; do
     shell=sh
     head -n1 "$pkg/$s" | grep -q bash && shell=bash
     if "$shell" -n "$pkg/$s" 2>/dev/null; then pass "$s parses"; else bad "$s has a syntax error"; fi

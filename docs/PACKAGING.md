@@ -13,9 +13,36 @@ release is cut, and how to build each artifact locally.
 | Windows x86_64 | `dadhichi-x86_64-pc-windows-msvc.zip`, `.msi` | `cargo build` + WiX (`packaging/windows/dadhichi.wxs`) |
 | Debian/Ubuntu | `.deb` | `cargo deb` (metadata in `crates/dadhichi/Cargo.toml`) |
 | Fedora/RHEL | `.rpm` | `cargo generate-rpm` (same metadata) |
+| macOS/Linux (Homebrew) | `dadhichi.rb` formula | `cargo install` from source (`packaging/homebrew/`) |
 
 Every archive is published alongside a `.sha256` checksum. The installers verify
 it before installing.
+
+## Homebrew
+
+Dadhichi ships a formula you can install as a tap:
+
+```bash
+brew tap pariharshyamu/dadhichi https://github.com/pariharshyamu/Dadhichi
+brew install dadhichi                 # latest tagged release (builds from source)
+brew install --HEAD dadhichi          # build the tip of the main branch
+```
+
+The formula builds only the `dadhichi` binary from the workspace, installs the
+man page, and self-tests with `dadhichi --version`/`--help`. Its stable
+`url`/`sha256`/`version` block is delimited by `# BEGIN stable` / `# END stable`
+markers and rewritten on each release by `packaging/homebrew/update-formula.sh`
+(the release workflow runs it and attaches the rendered `dadhichi.rb` to the
+release). Until the first tag is cut, use `--HEAD`, which needs no checksum.
+
+To refresh the formula manually after tagging:
+
+```bash
+# Downloads the source tarball and computes its sha256:
+packaging/homebrew/update-formula.sh v0.1.0
+# ...or pass a known checksum to stay offline:
+packaging/homebrew/update-formula.sh v0.1.0 <sha256>
+```
 
 ## One-line install
 
@@ -55,6 +82,9 @@ packaging/
 ├── macos/
 │   ├── Info.plist             # .app bundle manifest
 │   └── bundle.sh              # assembles Dadhichi.app from a built binary
+├── homebrew/
+│   ├── dadhichi.rb            # Homebrew formula (tap)
+│   └── update-formula.sh      # rewrites the formula's stable block on release
 └── windows/
     └── dadhichi.wxs           # WiX v4 MSI definition
 ```
