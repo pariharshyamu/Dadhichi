@@ -22,8 +22,8 @@ use dadhichi_core::{Command, Event, Kernel, KernelError, RecvError, Subscription
 use dadhichi_index::Indexer;
 use dadhichi_index::store::SqliteSymbolStore;
 use dadhichi_mcp::{EchoTool, GrantSet, Permission, ToolRegistry};
-use dadhichi_skill::{SkillAgent, SkillRegistry};
-use dadhichi_ui::App;
+use dadhichi_skill::{SkillAgent, SkillRegistry, SkillSpec, SkillTools};
+use dadhichi_ui::{App, PaletteAction, SkillEntry};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -104,10 +104,12 @@ impl AppController {
         )
         .await;
 
-        // Build the UI and seed the palette from the registered command names.
+        // Build the UI and seed the palette from the registered command names
+        // (default mode) and the skill catalogue (the `>` skill mode).
         let mut ui = App::new();
         ui.open_workspace(&root);
         ui.set_commands(kernel.commands().command_names().await);
+        ui.palette.set_skills(skill_entries(&*skills.read().await));
 
         let events = kernel.bus().subscribe();
 
@@ -167,13 +169,35 @@ impl AppController {
             .await
     }
 
-    /// Accept the highlighted command-palette entry, close the palette, and
-    /// dispatch it. Returns the dispatched command name, if any.
+    /// Accept the highlighted palette entry, close the palette, and dispatch it:
+    /// a command runs directly; a skill (from `>` skill mode) runs via
+    /// `skill.run`. Returns a label for what was dispatched, if anything.
     pub async fn run_palette_selection(&mut self) -> Option<String> {
-        let name = self.ui.palette.accept()?;
+        let action = self.ui.palette.accept()?;
         self.ui.palette.close();
-        let _ = self.dispatch(&name, serde_json::json!({})).await;
-        Some(name)
+        let label = match action {
+            PaletteAction::RunCommand(name) => {
+                let _ = self.dispatch(&name, serde_json::json!({})).await;
+                name
+            }
+            PaletteAction::RunSkill(name) => {
+                let _ = self
+                    .dispatch("skill.run", serde_json::json!({ "skill": name }))
+                    .await;
+                format!("skill.run:{name}")
+            }
+        };
+        // A command may have changed the skill set (e.g. `skill.reload`); keep
+        // the palette's skill list current.
+        self.refresh_skills().await;
+        Some(label)
+    }
+
+    /// Refresh the palette's skill list from the current catalogue. Call after
+    /// anything that may have changed the skills on disk (e.g. `skill.reload`).
+    pub async fn refresh_skills(&mut self) {
+        let entries = skill_entries(&*self.skills.read().await);
+        self.ui.palette.set_skills(entries);
     }
 
     /// Drain all currently-buffered bus events into the UI view-models. Returns
@@ -197,6 +221,39 @@ impl AppController {
 
 /// Register the IDE's commands. Each runs real work and emits bus events, so the
 /// UI updates purely by pumping the bus.
+/// Build the palette's skill rows (name, description, capability summary) from
+/// the catalogue.
+fn skill_entries(registry: &SkillRegistry) -> Vec<SkillEntry> {
+    registry
+        .list()
+        .into_iter()
+        .map(|spec| SkillEntry {
+            detail: skill_detail(&spec),
+            name: spec.name,
+            description: spec.description,
+        })
+        .collect()
+}
+
+/// A one-line, secret-free capability summary for a skill.
+fn skill_detail(spec: &SkillSpec) -> String {
+    let perms = if spec.permissions.is_empty() {
+        "none".to_string()
+    } else {
+        spec.permissions
+            .iter()
+            .map(|p| p.to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let tools = match &spec.tools {
+        SkillTools::None => "none".to_string(),
+        SkillTools::Any => "any".to_string(),
+        SkillTools::Allow(_) => spec.tools.names().join(", "),
+    };
+    format!("perms: {perms} · tools: {tools}")
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn register_commands(
     kernel: &Kernel,
@@ -512,6 +569,27 @@ mod tests {
         let ran = ctrl.run_palette_selection().await;
         assert_eq!(ran.as_deref(), Some("editor.save"));
         assert!(!ctrl.ui().palette.is_open());
+    }
+
+    #[tokio::test]
+    async fn palette_skill_mode_runs_a_skill() {
+        let mut ctrl = AppController::new(".").await;
+        ctrl.ui_mut().palette.open();
+        // `>` switches to skill mode; type to select `code-review`.
+        for c in ">code-review".chars() {
+            ctrl.ui_mut().palette.push(c);
+        }
+        assert!(ctrl.ui().palette.in_skill_mode());
+        // The highlighted row is the skill, carrying its capability summary.
+        let items = ctrl.ui().palette.items();
+        assert_eq!(items[0].label(), "code-review");
+        assert!(items[0].detail().unwrap().contains("read_workspace"));
+
+        // Accepting it runs the skill via `skill.run`, streaming skill.* events.
+        let ran = ctrl.run_palette_selection().await;
+        assert_eq!(ran.as_deref(), Some("skill.run:code-review"));
+        assert!(ctrl.pump() > 0);
+        assert!(ctrl.ui().chat.iter().any(|l| l.contains("skill.")));
     }
 
     #[tokio::test]

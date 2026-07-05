@@ -33,7 +33,7 @@ pub mod problems;
 
 pub use document::Document;
 pub use explorer::Explorer;
-pub use palette::CommandPalette;
+pub use palette::{CommandPalette, PaletteAction, PaletteItem, SkillEntry};
 pub use problems::ProblemsPanel;
 
 use dadhichi_core::Event;

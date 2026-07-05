@@ -190,9 +190,10 @@ cargo run -p dadhichi-skill --example run_skill
 
 which equips a pure-prompt skill, a tool-scoped skill (invoking `echo` through
 the gate), and shows a write-scoped skill **refused** under a read-only grant.
-In the IDE, `skill.list` enumerates the available skills (name, description,
-required permissions, tool scope) for a picker, `skill.run` equips one — granted
-exactly the permissions it declares — and `skill.reload` re-scans the manifest
+In the IDE, the command palette's `>` skill mode is the picker — it lists the
+skills with their permissions and tool scope inline (backed by `skill.list`) and
+runs the chosen one. Under the hood, `skill.run` equips a skill granted exactly
+the permissions it declares, and `skill.reload` re-scans the manifest
 directories and swaps the catalogue live, so a newly authored skill is runnable
 without a restart.
 
@@ -228,9 +229,11 @@ crates/
 
 Launch the live terminal shell with `cargo run -p dadhichi-tui` — Ctrl-P opens
 the command palette, which dispatches real kernel commands (run an agent,
-re-index the workspace) whose progress streams into the panels. Render a
-headless snapshot with `cargo run -p dadhichi-tui --example live` (the wired
-stack) or `--example snapshot` (the static layout).
+re-index the workspace) whose progress streams into the panels. Type `>` in the
+palette to switch to **skill mode**: it lists the equippable skills with their
+required permissions and tool scope inline, and Enter runs the highlighted one.
+Render a headless snapshot with `cargo run -p dadhichi-tui --example live` (the
+wired stack) or `--example snapshot` (the static layout).
 
 Each crate has its own crate-level Rustdoc (`cargo doc --open`) and unit tests.
 

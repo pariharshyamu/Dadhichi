@@ -328,7 +328,10 @@ drives it with three calls: `dispatch` (run a command, as the palette does),
 `pump` (drain bus events into the UI each frame), and `ui`/`ui_mut`. A palette
 selection therefore dispatches a kernel command, which runs an agent, whose
 progress streams straight back into the Agent Console panel — one bus, end to
-end.
+end. The palette is dual-mode: a leading `>` switches it from commands to
+**skills**, listing each with its permission/tool summary (from `skill.list`)
+and running the chosen one via `skill.run` — the same `PaletteAction` seam,
+just a different verb.
 
 **[implemented]** the UI core, the `AppController` wiring, and the live terminal
 frontend, all unit-tested — the TUI renders against ratatui's `TestBackend` so
