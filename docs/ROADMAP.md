@@ -105,9 +105,13 @@ durable long-term memory (the `VectorStore` trait already abstracts it).
       prompt-injection assessment + quarantine
 - [x] Observability (`dadhichi-telemetry`): a metrics registry (counters/gauges)
       with JSON snapshot, and a crash reporter with consent-gated upload
-- [ ] Cross-platform packaging / WASM edition / mobile companion — CI builds a
-      release across Linux/macOS/Windows; installers and the wasm32 edition are
-      the remaining reach work
+- [x] Cross-platform packaging: a tag-triggered matrix release
+      (`.github/workflows/release.yml`) builds binaries for Linux/macOS/Windows
+      (x86_64 + aarch64), archives each with a SHA-256 checksum, and builds
+      `.deb`/`.rpm`/`.app`/`.msi`; checksum-verifying one-line installers
+      (`packaging/install.{sh,ps1}`) and CI-validated packaging assets
+      (`packaging/verify.sh`) round it out. See [`PACKAGING.md`](PACKAGING.md).
+- [ ] WASM edition (wasm32) and mobile companion — the remaining reach work
 
 The plugin runtime uses `wasmi` (a portable interpreter) rather than
 `wasmtime`/WASI for a fast, dependency-light build; the JIT + full WASI slot in

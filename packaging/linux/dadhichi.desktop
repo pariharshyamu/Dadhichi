@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Version=1.5
+Name=Dadhichi
+GenericName=Agentic IDE
+Comment=A modern, AI-first, agent-native IDE written in Rust
+Exec=dadhichi %F
+Icon=dadhichi
+Terminal=true
+Categories=Development;IDE;TextEditor;
+Keywords=IDE;editor;rust;ai;agent;llm;mcp;
+MimeType=text/plain;text/x-rust;inode/directory;
+StartupNotify=false

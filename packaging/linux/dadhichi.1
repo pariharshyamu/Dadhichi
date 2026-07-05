@@ -1,0 +1,48 @@
+.TH DADHICHI 1 "2026-07-05" "dadhichi 0.1.0" "Dadhichi Manual"
+.SH NAME
+dadhichi \- a modern, AI-first, agent-native IDE written in Rust
+.SH SYNOPSIS
+.B dadhichi
+.RI [ OPTIONS ]
+.RI [ GOAL ]
+.SH DESCRIPTION
+.B dadhichi
+boots the Dadhichi microkernel, registers the core services (AI model router,
+MCP tool registry, workspace index), attaches the Agent Console to the event
+bus, and drives an autonomous agent through a plan \(-> act \(-> reflect loop.
+.PP
+By default it runs entirely offline using a built-in mock model provider, so no
+API keys or network access are required.
+.SH ARGUMENTS
+.TP
+.I GOAL
+A natural-language goal for the built-in agent to plan and execute. When
+omitted, a demonstration goal is used.
+.SH OPTIONS
+.TP
+.BR \-h ", " \-\-help
+Print help text and exit.
+.TP
+.BR \-V ", " \-\-version
+Print version information and exit.
+.SH ENVIRONMENT
+.TP
+.B RUST_LOG
+Tracing filter (for example
+.IR info " or " dadhichi=debug ).
+Defaults to
+.IR warn .
+.SH EXAMPLES
+.TP
+Run the built-in demonstration:
+.B dadhichi
+.TP
+Run the agent against your own goal:
+.B dadhichi "Explain what makes Dadhichi agent-native."
+.SH EXIT STATUS
+.B dadhichi
+exits 0 on success and non-zero if the agent run fails.
+.SH SEE ALSO
+Project home: https://github.com/pariharshyamu/Dadhichi
+.SH AUTHOR
+Dadhichi contributors.

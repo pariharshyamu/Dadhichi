@@ -24,6 +24,8 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
       - name: Test
         run: cargo test --all-features --workspace
+      - name: Verify packaging assets
+        run: bash packaging/verify.sh
 
   # Release build across all target platforms (packaging inputs).
   build:

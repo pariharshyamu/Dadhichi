@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.github.pariharshyamu.Dadhichi</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>Apache-2.0</project_license>
+  <name>Dadhichi</name>
+  <summary>A modern, AI-first, agent-native IDE written in Rust</summary>
+  <description>
+    <p>
+      Dadhichi is not another code editor with a chat sidebar. It is a
+      development environment designed from the kernel up around autonomous AI
+      agents working alongside humans — model-agnostic, offline-first,
+      MCP-native, and extensible through sandboxed WASM plugins.
+    </p>
+    <p>Highlights:</p>
+    <ul>
+      <li>A microkernel with an event bus, command layer, and service registry</li>
+      <li>A model-agnostic AI runtime with fallback routing and prompt caching</li>
+      <li>Autonomous agents that plan, act, reflect, and verify</li>
+      <li>A permission-gated MCP tool layer and incremental workspace index</li>
+      <li>Sandboxed, fuel-metered WASM plugins from a signed marketplace</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">dadhichi.desktop</launchable>
+  <url type="homepage">https://github.com/pariharshyamu/Dadhichi</url>
+  <url type="bugtracker">https://github.com/pariharshyamu/Dadhichi/issues</url>
+  <developer id="com.github.pariharshyamu">
+    <name>Dadhichi contributors</name>
+  </developer>
+  <provides>
+    <binary>dadhichi</binary>
+  </provides>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.1.0" date="2026-07-05">
+      <description>
+        <p>Foundational runtime: microkernel, AI runtime, agents, index,
+        UI shell, WASM plugins, and cross-platform packaging.</p>
+      </description>
+    </release>
+  </releases>
+</component>

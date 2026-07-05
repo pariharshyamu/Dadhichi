@@ -33,6 +33,25 @@ secret scan, audit log, injection defense), and observability. See
 autonomous agentic IDE, and [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for
 the complete system design.
 
+## Install
+
+One-line installers detect your OS/architecture, download the matching release
+archive, verify its SHA-256 checksum, and install the `dadhichi` binary:
+
+```bash
+# Linux / macOS
+curl -fsSL https://raw.githubusercontent.com/pariharshyamu/Dadhichi/main/packaging/install.sh | sh
+```
+
+```powershell
+# Windows (PowerShell)
+irm https://raw.githubusercontent.com/pariharshyamu/Dadhichi/main/packaging/install.ps1 | iex
+```
+
+Native packages (`.deb`, `.rpm`, macOS `.app`, Windows `.msi`) and per-platform
+tarballs are attached to each [GitHub Release](https://github.com/pariharshyamu/Dadhichi/releases).
+See [`docs/PACKAGING.md`](docs/PACKAGING.md) for the full packaging story.
+
 ## Quick start
 
 ```bash

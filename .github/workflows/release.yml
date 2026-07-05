@@ -1,0 +1,135 @@
+name: Release
+
+# Cut a cross-platform release whenever a semver tag is pushed (e.g. v0.1.0),
+# or on demand from the Actions tab.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to build (e.g. v0.1.0)"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  BIN_NAME: dadhichi
+
+jobs:
+  # ── Build a self-contained binary archive per platform ─────────────────────
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest,  target: x86_64-unknown-linux-gnu,  ext: tar.gz }
+          - { os: ubuntu-latest,  target: aarch64-unknown-linux-gnu, ext: tar.gz, cross: true }
+          - { os: macos-latest,   target: x86_64-apple-darwin,       ext: tar.gz }
+          - { os: macos-latest,   target: aarch64-apple-darwin,      ext: tar.gz }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc,    ext: zip }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install stable --profile minimal --target ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install cross linker (aarch64 Linux)
+        if: matrix.cross
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+
+      - name: Build release binary
+        run: cargo build --release --locked --target ${{ matrix.target }} --bin dadhichi
+
+      - name: Package (Unix)
+        if: matrix.ext == 'tar.gz'
+        shell: bash
+        run: |
+          staging="${BIN_NAME}-${{ matrix.target }}"
+          mkdir -p "$staging"
+          cp "target/${{ matrix.target }}/release/${BIN_NAME}" "$staging/"
+          cp README.md LICENSE "$staging/"
+          cp packaging/linux/dadhichi.1 "$staging/" 2>/dev/null || true
+          tar -czf "${staging}.tar.gz" "$staging"
+          shasum -a 256 "${staging}.tar.gz" > "${staging}.tar.gz.sha256"
+
+      - name: Package (Windows)
+        if: matrix.ext == 'zip'
+        shell: bash
+        run: |
+          staging="${BIN_NAME}-${{ matrix.target }}"
+          mkdir -p "$staging"
+          cp "target/${{ matrix.target }}/release/${BIN_NAME}.exe" "$staging/"
+          cp README.md LICENSE "$staging/"
+          7z a "${staging}.zip" "$staging" >/dev/null
+          certutil -hashfile "${staging}.zip" SHA256 | sed -n 2p | tr -d ' \r' > "${staging}.zip.sha256"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            ${{ env.BIN_NAME }}-${{ matrix.target }}.${{ matrix.ext }}
+            ${{ env.BIN_NAME }}-${{ matrix.target }}.${{ matrix.ext }}.sha256
+
+  # ── Build Linux .deb and .rpm from the x86_64 binary ───────────────────────
+  linux-packages:
+    name: deb + rpm
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        run: rustup toolchain install stable --profile minimal
+      - uses: Swatinem/rust-cache@v2
+      - name: Install packagers
+        run: cargo install cargo-deb cargo-generate-rpm --locked
+      - name: Build release binary
+        run: cargo build --release --locked --bin dadhichi
+      - name: Build .deb
+        run: cargo deb -p dadhichi --no-build --output dist/
+      - name: Build .rpm
+        run: |
+          mkdir -p dist
+          cargo generate-rpm -p crates/dadhichi --output dist/
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-packages
+          path: dist/*
+
+  # ── Collect everything into a GitHub Release ───────────────────────────────
+  release:
+    name: publish release
+    needs: [build, linux-packages]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify packaging assets
+        run: bash packaging/verify.sh
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Flatten
+        run: |
+          mkdir -p release
+          find artifacts -type f -exec cp {} release/ \;
+          ls -la release
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          name: ${{ github.event.inputs.tag || github.ref_name }}
+          generate_release_notes: true
+          files: release/*
