@@ -20,6 +20,7 @@ use dadhichi_core::{Command, Kernel, KernelError, RecvError, Subscription};
 use dadhichi_index::Indexer;
 use dadhichi_index::store::SqliteSymbolStore;
 use dadhichi_mcp::{EchoTool, GrantSet, Permission, ToolRegistry};
+use dadhichi_skill::{SkillAgent, SkillRegistry};
 use dadhichi_ui::App;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -30,6 +31,7 @@ pub struct AppController {
     ui: App,
     events: Subscription,
     store: Arc<SqliteSymbolStore>,
+    skills: Arc<SkillRegistry>,
 }
 
 impl std::fmt::Debug for AppController {
@@ -59,6 +61,10 @@ impl AppController {
         let store = Arc::new(SqliteSymbolStore::in_memory().expect("open symbol store"));
         let indexer = Indexer::new(store.clone()).with_event_bus(kernel.bus().clone());
 
+        // The skill library, and a `skill:<name>` agent for each entry so the
+        // orchestrator can run any skill by name.
+        let skills = Arc::new(SkillRegistry::with_builtins());
+
         let orchestrator = {
             let mut orch = Orchestrator::new();
             orch.register(Arc::new(ConversationalAgent::new(&model_id)));
@@ -73,10 +79,15 @@ impl AppController {
             ] {
                 orch.register(Arc::new(agent.with_model(&model_id)));
             }
+            for name in skills.names() {
+                if let Some(skill) = skills.get(&name) {
+                    orch.register(Arc::new(SkillAgent::new(skill).with_model(&model_id)));
+                }
+            }
             Arc::new(orch)
         };
 
-        register_commands(&kernel, &router, &tools, &orchestrator, &indexer).await;
+        register_commands(&kernel, &router, &tools, &orchestrator, &skills, &indexer).await;
 
         // Build the UI and seed the palette from the registered command names.
         let mut ui = App::new();
@@ -89,6 +100,7 @@ impl AppController {
             ui,
             events,
             store,
+            skills,
         }
     }
 
@@ -105,6 +117,12 @@ impl AppController {
     /// The symbol store, for code-intelligence queries.
     pub fn store(&self) -> &Arc<SqliteSymbolStore> {
         &self.store
+    }
+
+    /// The skill library — for a frontend to list equippable skills (each runs
+    /// via the `skill.run` command or the `skill:<name>` agent).
+    pub fn skills(&self) -> &Arc<SkillRegistry> {
+        &self.skills
     }
 
     /// Dispatch a command by name (with optional JSON args) through the kernel.
@@ -157,6 +175,7 @@ async fn register_commands(
     router: &Arc<ModelRouter>,
     tools: &Arc<ToolRegistry>,
     orchestrator: &Arc<Orchestrator>,
+    skills: &Arc<SkillRegistry>,
     indexer: &Indexer,
 ) {
     // agent.run — run an agent against a goal; its progress streams as agent.*.
@@ -200,6 +219,59 @@ async fn register_commands(
                             .map_err(KernelError::command_failed)?;
                         Ok(serde_json::json!({
                             "agent": agent,
+                            "status": format!("{:?}", outcome.status),
+                            "confidence": outcome.confidence,
+                        }))
+                    }
+                }),
+            )
+            .await;
+    }
+
+    // skill.run — equip a skill by name and run it with exactly the
+    // permissions it declares, so its `skill.*` progress streams to the console.
+    {
+        let router = router.clone();
+        let tools = tools.clone();
+        let orchestrator = orchestrator.clone();
+        let skills = skills.clone();
+        let bus = kernel.bus().clone();
+        kernel
+            .commands()
+            .register(
+                "skill.run",
+                Arc::new(move |cmd: Command| {
+                    let router = router.clone();
+                    let tools = tools.clone();
+                    let orchestrator = orchestrator.clone();
+                    let skills = skills.clone();
+                    let bus = bus.clone();
+                    async move {
+                        let skill_name = cmd
+                            .args
+                            .get("skill")
+                            .and_then(|s| s.as_str())
+                            .unwrap_or("explain")
+                            .to_string();
+                        let goal = cmd
+                            .args
+                            .get("goal")
+                            .and_then(|g| g.as_str())
+                            .unwrap_or("Explain what a skill is.")
+                            .to_string();
+
+                        let skill = skills.get(&skill_name).ok_or_else(|| {
+                            KernelError::command_failed(format!("unknown skill: {skill_name}"))
+                        })?;
+                        // Grant exactly what the skill requires — no more.
+                        let mut ctx =
+                            AgentContext::new(router, tools, skill.required_grants(), bus);
+                        let outcome = orchestrator
+                            .run(&format!("skill:{skill_name}"), &goal, &mut ctx)
+                            .await
+                            .map_err(KernelError::command_failed)?;
+                        Ok(serde_json::json!({
+                            "skill": skill_name,
                             "status": format!("{:?}", outcome.status),
                             "confidence": outcome.confidence,
                         }))
@@ -333,5 +405,41 @@ mod tests {
         let ran = ctrl.run_palette_selection().await;
         assert_eq!(ran.as_deref(), Some("editor.save"));
         assert!(!ctrl.ui().palette.is_open());
+    }
+
+    #[tokio::test]
+    async fn skills_are_registered_and_runnable() {
+        let mut ctrl = AppController::new(".").await;
+        // The built-in library is available to a frontend.
+        assert!(ctrl.skills().contains("explain"));
+
+        // Running a skill through the command dispatches its `skill:` agent and
+        // streams `skill.*` progress into the console.
+        let out = ctrl
+            .dispatch(
+                "skill.run",
+                serde_json::json!({ "skill": "explain", "goal": "what is a kernel" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(out["skill"], "explain");
+        assert_eq!(out["status"], "Completed");
+
+        let applied = ctrl.pump();
+        assert!(applied > 0);
+        assert!(
+            ctrl.ui().chat.iter().any(|line| line.contains("skill.")),
+            "chat: {:?}",
+            ctrl.ui().chat
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_skill_is_rejected() {
+        let ctrl = AppController::new(".").await;
+        let err = ctrl
+            .dispatch("skill.run", serde_json::json!({ "skill": "nope" }))
+            .await;
+        assert!(err.is_err());
     }
 }

@@ -87,6 +87,12 @@ changes. `< 20 ms` latency and the GPU pipeline remain a GPU-shell concern.
       continue, with adapter events republished as `dap.<event>`
 - [x] Workflow automation from natural language: `Workflow::parse` decomposes a
       request and delegates each clause to the right specialist
+- [x] Skills (`dadhichi-skill`): reusable, permission-scoped capability bundles
+      (instructions + required grants + a tool allow-list + a plan template).
+      `ScopedTools` enforces that a skill's reachable tools are the intersection
+      of the run's grants and the skill's allow-list; `SkillAgent` runs one as a
+      first-class agent; a built-in library ships and is wired into the binary
+      and `AppController` (`skill.run`)
 
 Deferred to a later pass: a WebSocket MCP transport, and the LanceDB backend for
 durable long-term memory (the `VectorStore` trait already abstracts it).

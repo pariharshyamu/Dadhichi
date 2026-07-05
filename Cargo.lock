@@ -363,6 +363,7 @@ dependencies = [
  "dadhichi-mcp",
  "dadhichi-plugin",
  "dadhichi-security",
+ "dadhichi-skill",
  "dadhichi-telemetry",
  "dadhichi-wasm",
  "dadhichi-workspace",
@@ -414,6 +415,7 @@ dependencies = [
  "dadhichi-core",
  "dadhichi-index",
  "dadhichi-mcp",
+ "dadhichi-skill",
  "dadhichi-ui",
  "serde_json",
  "tempfile",
@@ -545,6 +547,21 @@ dependencies = [
  "serde_json",
  "sha2",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "dadhichi-skill"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "dadhichi-agent",
+ "dadhichi-ai",
+ "dadhichi-core",
+ "dadhichi-mcp",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]

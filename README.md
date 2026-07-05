@@ -133,6 +133,44 @@ Keys are read only from the environment — they are never logged (the provider
 plan's `Debug` redacts them) and never written to disk. With no variable set,
 the run stays fully offline on the mock provider.
 
+## Skills
+
+A **skill** is a reusable, permission-scoped capability bundle an agent equips —
+not a single tool, but a recipe that combines an instruction prompt, the
+permissions a run must hold, an allow-list of tools it may reach, and a plan
+template. Crucially, a skill's tool scope is *narrower than* the run's grants:
+even holding `WriteWorkspace`, a skill scoped to `["fs.read"]` cannot touch
+`fs.write`. Tool access is the intersection of the run's grants and the skill's
+allow-list, enforced at one choke point (`ScopedTools`).
+
+```rust
+use dadhichi_skill::{Skill, SkillAgent, SkillRegistry, Permission};
+
+let review = Skill::new("code-review", "Review a change")
+    .with_instructions("You are a meticulous reviewer.")
+    .require(Permission::ReadWorkspace)
+    .allow_tools(["fs.read", "git.diff"]);   // read-only, no matter the grants
+
+let mut skills = SkillRegistry::with_builtins();   // explain, code-review, implement, …
+skills.register(review);
+
+let agent = SkillAgent::new(skills.get("code-review").unwrap());
+// `agent` implements the same Agent trait, so the orchestrator runs it like any other.
+```
+
+Skills are plain data (`Serialize`/`Deserialize`), so they can be authored in
+code, loaded from a JSON manifest, or shipped through the marketplace. See the
+live demonstration:
+
+```bash
+cargo run -p dadhichi-skill --example run_skill
+```
+
+which equips a pure-prompt skill, a tool-scoped skill (invoking `echo` through
+the gate), and shows a write-scoped skill **refused** under a read-only grant.
+In the IDE, skills run via the `skill.run` command (or the `skill:<name>`
+agent), granted exactly the permissions they declare.
+
 ## Workspace layout
 
 ```
@@ -142,6 +180,7 @@ crates/
 │                        #   OpenAI/Anthropic providers, fallback + cost accounting
 ├── dadhichi-mcp         # MCP layer: tools, permission-gated registry, JSON-RPC
 ├── dadhichi-agent       # agent framework: planning, memory, lifecycle, tools
+├── dadhichi-skill       # skills: permission-scoped capability bundles agents equip
 ├── dadhichi-workspace   # workspace model + incremental symbol index
 ├── dadhichi-parse       # tree-sitter symbol + call-graph extraction (Rust)
 ├── dadhichi-index       # indexing service: file watcher + SQLite + blob cache

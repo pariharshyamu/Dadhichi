@@ -192,7 +192,7 @@ impl App {
                     self.status = format!("changed: {path}");
                 }
             }
-            t if t.starts_with("agent.") => {
+            t if t.starts_with("agent.") || t.starts_with("skill.") => {
                 self.chat
                     .push(format!("[{}] {}", t, compact(&event.payload)));
             }
@@ -247,6 +247,17 @@ mod tests {
         ));
         assert_eq!(app.chat.len(), 1);
         assert!(app.chat[0].contains("running"));
+    }
+
+    #[test]
+    fn skill_events_land_in_chat() {
+        let mut app = App::new();
+        app.apply_event(&Event::new(
+            "skill.equipped",
+            serde_json::json!({ "skill": "code-review" }),
+        ));
+        assert_eq!(app.chat.len(), 1);
+        assert!(app.chat[0].contains("code-review"));
     }
 
     #[test]

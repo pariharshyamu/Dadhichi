@@ -4,6 +4,7 @@ members = [
     "crates/dadhichi-core",
     "crates/dadhichi-ai",
     "crates/dadhichi-agent",
+    "crates/dadhichi-skill",
     "crates/dadhichi-mcp",
     "crates/dadhichi-workspace",
     "crates/dadhichi-parse",
@@ -59,6 +60,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 dadhichi-core = { path = "crates/dadhichi-core" }
 dadhichi-ai = { path = "crates/dadhichi-ai" }
 dadhichi-agent = { path = "crates/dadhichi-agent" }
+dadhichi-skill = { path = "crates/dadhichi-skill" }
 dadhichi-mcp = { path = "crates/dadhichi-mcp" }
 dadhichi-workspace = { path = "crates/dadhichi-workspace" }
 dadhichi-parse = { path = "crates/dadhichi-parse" }

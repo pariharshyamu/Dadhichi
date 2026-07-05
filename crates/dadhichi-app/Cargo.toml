@@ -15,6 +15,7 @@ workspace = true
 dadhichi-core.workspace = true
 dadhichi-ui.workspace = true
 dadhichi-agent.workspace = true
+dadhichi-skill.workspace = true
 dadhichi-ai.workspace = true
 dadhichi-mcp.workspace = true
 dadhichi-index.workspace = true
