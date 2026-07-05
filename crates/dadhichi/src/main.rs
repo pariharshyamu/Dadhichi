@@ -16,6 +16,7 @@
 
 mod cli;
 mod console;
+mod vault;
 
 use std::sync::Arc;
 
@@ -49,6 +50,10 @@ async fn main() {
             println!("{}", cli::help_text());
             return;
         }
+        cli::Command::Vault(cmd) => {
+            vault::run(cmd);
+            return;
+        }
         cli::Command::Run { goal } => goal,
     };
 
@@ -71,7 +76,7 @@ async fn main() {
     let router = Arc::new(plan.build_router());
 
     let tools = {
-        let mut t = ToolRegistry::new();
+        let t = ToolRegistry::new();
         t.register(Arc::new(EchoTool));
         Arc::new(t)
     };

@@ -11,7 +11,7 @@
 //! use std::sync::Arc;
 //!
 //! # async fn demo() {
-//! let mut registry = ToolRegistry::new();
+//! let registry = ToolRegistry::new();
 //! registry.register(Arc::new(EchoTool));
 //!
 //! let out = registry
@@ -24,14 +24,20 @@
 
 pub mod bridge;
 pub mod client;
+pub mod connector;
 pub mod protocol;
 pub mod registry;
 pub mod tool;
 
 pub use bridge::McpToolBridge;
 pub use client::McpConnection;
+pub use connector::{
+    ConnectReport, ConnectedServer, McpConnections, McpServerConfig, McpServersConfig, ServerError,
+    connect_servers, resolve_env,
+};
 pub use protocol::{
-    McpClient, McpError, RpcErrorObject, RpcRequest, RpcResponse, ServerCapabilities,
+    McpClient, McpError, PromptArgument, PromptSpec, ResourceSpec, RpcErrorObject, RpcRequest,
+    RpcResponse, ServerCapabilities,
 };
 pub use registry::{GrantSet, ToolRegistry};
 pub use tool::{EchoTool, Permission, Tool, ToolError, ToolResult, ToolSpec};
@@ -61,7 +67,7 @@ mod tests {
 
     #[tokio::test]
     async fn permission_denied_without_grant() {
-        let mut registry = ToolRegistry::new();
+        let registry = ToolRegistry::new();
         registry.register(Arc::new(WriterTool));
 
         let err = registry
@@ -73,7 +79,7 @@ mod tests {
 
     #[tokio::test]
     async fn permission_granted_allows_invocation() {
-        let mut registry = ToolRegistry::new();
+        let registry = ToolRegistry::new();
         registry.register(Arc::new(WriterTool));
 
         let grants = GrantSet::from_iter([Permission::WriteWorkspace]);
@@ -86,7 +92,7 @@ mod tests {
 
     #[test]
     fn registry_lists_tools_sorted() {
-        let mut registry = ToolRegistry::new();
+        let registry = ToolRegistry::new();
         registry.register(Arc::new(EchoTool));
         registry.register(Arc::new(WriterTool));
         let names: Vec<_> = registry.list().into_iter().map(|s| s.name).collect();

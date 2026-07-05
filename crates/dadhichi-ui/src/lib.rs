@@ -33,7 +33,7 @@ pub mod problems;
 
 pub use document::Document;
 pub use explorer::Explorer;
-pub use palette::{CommandPalette, PaletteAction, PaletteItem, SkillEntry};
+pub use palette::{CommandPalette, McpEntry, PaletteAction, PaletteItem, SkillEntry};
 pub use problems::ProblemsPanel;
 
 use dadhichi_core::Event;
@@ -192,7 +192,7 @@ impl App {
                     self.status = format!("changed: {path}");
                 }
             }
-            t if t.starts_with("agent.") || t.starts_with("skill.") => {
+            t if t.starts_with("agent.") || t.starts_with("skill.") || t.starts_with("mcp.") => {
                 self.chat
                     .push(format!("[{}] {}", t, compact(&event.payload)));
             }

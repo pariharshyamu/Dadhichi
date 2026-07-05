@@ -248,12 +248,18 @@ manifests** on disk: `~/.dadhichi/skills`, `<workspace>/.dadhichi/skills`, and
 `$DADHICHI_SKILLS_DIR` in increasing precedence (a disk skill overrides a
 built-in of the same name). The loader tolerates malformed manifests —
 collecting them into a `LoadReport` and surfacing each as a `skill.load.error`
-event — rather than aborting.
+event — rather than aborting. Those directories are also **watched**
+(`watch_skills`, built on `notify`): a manifest change reloads the catalogue
+off-thread, swaps it under the lock, and publishes `skill.reloaded`, which
+`pump` turns into a palette refresh — the edit-a-file-and-it's-live loop, no
+command required. The catalogue is shared behind a `std::sync::RwLock` (not an
+async lock) precisely so the watcher thread and the sync `pump` can touch it.
 
 **[implemented]** `dadhichi-skill`: the `Skill` model, `SkillTools` scope,
 `ScopedTools` enforcement, `SkillRegistry`, the filesystem loader
-(`discover_in`), `SkillAgent`, and a built-in library (`explain`, `code-review`,
-`implement`, `author-tests`, `security-audit`), wired into the binary and the
+(`discover_in`) and watcher (`watch_skills`), `SkillAgent`, and a built-in
+library (`explain`, `code-review`, `implement`, `author-tests`,
+`security-audit`), wired into the binary and the
 `AppController` (which discovers project skills relative to the opened
 workspace). A runnable demo lives at
 `cargo run -p dadhichi-skill --example run_skill`.
@@ -291,17 +297,59 @@ server (exposing its own workspace tools to other agents).
   `ToolSpec` (name, description, JSON-Schema, required permissions).
 - `ToolRegistry` — catalogues tools and is the **single choke point** where
   permissions are enforced against a `GrantSet`; nothing reaches a tool without
-  passing the gate.
+  passing the gate. It is **interior-mutable** (an `RwLock`), so connectors can
+  register a server's tools at runtime through the shared `Arc<ToolRegistry>`
+  every agent already holds.
 - `protocol` — JSON-RPC 2.0 envelope plus `McpClient` trait and capability
   negotiation for bridging external MCP servers behind the same `Tool` trait.
+- `connector` — the **declarative connector layer**. An `McpServersConfig`
+  (loaded from `mcp.json`, à la the skills manifests) names servers by
+  `command`/`args`/`env` (a local subprocess) **or** a `url` + `headers` (a
+  hosted endpoint), plus the `Permission` envelope their tools should carry.
+  `connect_servers` connects each enabled server, discovers its tools,
+  **namespaces** them (`<server>.<tool>`), **stamps** them with the configured
+  permissions, and registers them. Secrets never sit in the config: `env` and
+  `headers` values may contain `${...}` placeholders resolved through an injected
+  closure, so tokens are injected at connect time, not committed.
+- **Secret resolution** (`dadhichi-security::SecretResolver`). The injected
+  closure resolves `env:NAME` from the process environment and `vault:NAME` from
+  the ChaCha20-Poly1305 credential [`Vault`], unlocked once at boot with
+  `$DADHICHI_VAULT_PASSPHRASE`. A missing or undecryptable secret resolves to
+  `None`, so the dependent server is refused rather than launched with a blank
+  credential. The running IDE only *reads* the vault; the `dadhichi vault
+  set|list|remove` CLI populates it in a separate short-lived process (secret
+  read from stdin, file written owner-only), so the long-running IDE never holds
+  the ability to rewrite credentials.
+- **Transports.** `McpConnection` is a facade over a pluggable `Transport`, so
+  every high-level call (`handshake`, `list_tools`, `call_tool`) funnels through
+  one id-correlated `request` primitive regardless of wire. Three ship: **stdio**
+  (a subprocess or, in tests, an in-memory pipe over a line-delimited stream);
+  **Streamable HTTP** (`http(s)://` — POST JSON-RPC, accepting a JSON *or* an SSE
+  `text/event-stream` reply, carrying the server's `Mcp-Session-Id` across
+  calls); and **WebSocket** (`ws(s)://` — a persistent bidirectional socket). The
+  two networked transports live behind the `remote` feature so a default build
+  stays offline; the app binary enables it.
+- **Lifecycle.** `McpConnections` tracks each live server together with the tool
+  names it registered. `mcp.disconnect { server }` drops the connection and
+  unregisters exactly those tools (which, once the bridges are gone, closes the
+  subprocess/socket); `mcp.connect { server? }` connects one or all. The shared
+  connection set lives behind a mutex so the commands and the palette read and
+  mutate the same state.
+- **Beyond tools.** `McpConnection` also speaks `resources/list` / `resources/read`
+  (readable context an agent can pull in) and `prompts/list` / `prompts/get`
+  (server-authored templates), surfaced as the `mcp.resources` /
+  `mcp.resource.read` / `mcp.prompts` / `mcp.prompt.get` commands.
 
-**[implemented]** `dadhichi-mcp`, now including a live `McpConnection` — a
-transport-generic, id-correlated JSON-RPC client with a `connect_stdio`
-constructor — and `McpToolBridge`, which discovers a remote server's tools and
-exposes each through the permission-gated `ToolRegistry` (defaulting external
-tools to the `Network` scope). An agent invokes a GitHub or Docker MCP tool
-exactly as it invokes a built-in one. **[design]** a WebSocket transport and
-auth.
+**[implemented]** `dadhichi-mcp`: a live `McpConnection` with `connect_stdio` /
+`connect_stdio_env` / `connect_url`, and `McpToolBridge`, which exposes a remote
+server's tools through the permission-gated `ToolRegistry`. The connector layer
+wires this into the `AppController`: servers declared in `mcp.json` (stdio or
+hosted) are connected at boot (failures are non-fatal, surfaced as `mcp.error`),
+and the `mcp.list` / `mcp.connect` / `mcp.disconnect` commands enumerate (with
+transport, connected state, and tool count) and toggle them — also from an `@`
+palette mode that refreshes live. An agent invokes a GitHub, Slack, or Linear MCP
+tool exactly as it invokes a built-in one, and can additionally read its
+resources and instantiate its prompts.
 
 ---
 

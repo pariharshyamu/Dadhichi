@@ -262,7 +262,7 @@ mod tests {
 
     #[tokio::test]
     async fn scoped_tool_step_is_invoked() {
-        let mut tools = ToolRegistry::new();
+        let tools = ToolRegistry::new();
         tools.register(Arc::new(EchoTool));
         let skill = Skill::new("echoer", "Echo something")
             .allow_tools(["echo"])
@@ -281,7 +281,7 @@ mod tests {
 
     #[tokio::test]
     async fn tool_step_outside_scope_is_denied() {
-        let mut tools = ToolRegistry::new();
+        let tools = ToolRegistry::new();
         tools.register(Arc::new(EchoTool));
         // The step calls `echo`, but the scope forbids it.
         let skill = Skill::new("blocked", "Try a forbidden tool").step(SkillStep::tool(

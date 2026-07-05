@@ -99,7 +99,7 @@ mod tests {
     }
 
     fn registry() -> ToolRegistry {
-        let mut r = ToolRegistry::new();
+        let r = ToolRegistry::new();
         r.register(Arc::new(EchoTool));
         r.register(Arc::new(WriteTool));
         r

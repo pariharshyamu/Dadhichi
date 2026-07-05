@@ -2,7 +2,7 @@
 
 use crate::tool::{Permission, Tool, ToolError, ToolResult, ToolSpec};
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 /// A set of permissions granted to a caller (an agent, a plugin, the user).
 #[derive(Debug, Clone, Default)]
@@ -42,15 +42,20 @@ impl FromIterator<Permission> for GrantSet {
 }
 
 /// Catalogues tools and enforces permissions at the call boundary.
-#[derive(Clone, Default)]
+///
+/// The catalogue is **interior-mutable** (an `RwLock`), so tools can be
+/// registered or removed at runtime through a shared `Arc<ToolRegistry>` — this
+/// is what lets MCP connectors bridge in a server's tools after boot without
+/// rebuilding the registry every agent already holds.
+#[derive(Default)]
 pub struct ToolRegistry {
-    tools: HashMap<String, Arc<dyn Tool>>,
+    tools: RwLock<HashMap<String, Arc<dyn Tool>>>,
 }
 
 impl std::fmt::Debug for ToolRegistry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ToolRegistry")
-            .field("tools", &self.tools.keys().collect::<Vec<_>>())
+            .field("tools", &self.names())
             .finish()
     }
 }
@@ -61,16 +66,35 @@ impl ToolRegistry {
         Self::default()
     }
 
-    /// Register `tool` under its declared name.
-    pub fn register(&mut self, tool: Arc<dyn Tool>) -> &mut Self {
-        self.tools.insert(tool.spec().name, tool);
+    /// Register `tool` under its declared name (replacing any existing tool of
+    /// that name). Takes `&self`, so tools can be added through a shared handle.
+    pub fn register(&self, tool: Arc<dyn Tool>) -> &Self {
+        let name = tool.spec().name;
+        self.write().insert(name, tool);
         self
+    }
+
+    /// Remove the tool named `name`, returning whether one was present.
+    pub fn unregister(&self, name: &str) -> bool {
+        self.write().remove(name).is_some()
+    }
+
+    /// Whether a tool named `name` is registered.
+    pub fn contains(&self, name: &str) -> bool {
+        self.read().contains_key(name)
+    }
+
+    /// The registered tool names, sorted.
+    pub fn names(&self) -> Vec<String> {
+        let mut names: Vec<_> = self.read().keys().cloned().collect();
+        names.sort();
+        names
     }
 
     /// The specs of every registered tool — this is what an MCP `tools/list`
     /// response or a model's tool-choice prompt is built from.
     pub fn list(&self) -> Vec<ToolSpec> {
-        let mut specs: Vec<_> = self.tools.values().map(|t| t.spec()).collect();
+        let mut specs: Vec<_> = self.read().values().map(|t| t.spec()).collect();
         specs.sort_by(|a, b| a.name.cmp(&b.name));
         specs
     }
@@ -85,9 +109,11 @@ impl ToolRegistry {
         args: serde_json::Value,
         grants: &GrantSet,
     ) -> ToolResult {
+        // Resolve and clone the tool handle, then drop the lock before awaiting.
         let tool = self
-            .tools
+            .read()
             .get(name)
+            .cloned()
             .ok_or_else(|| ToolError::Execution(format!("unknown tool: {name}")))?;
 
         let spec = tool.spec();
@@ -96,5 +122,13 @@ impl ToolRegistry {
         }
 
         tool.invoke(args).await
+    }
+
+    fn read(&self) -> std::sync::RwLockReadGuard<'_, HashMap<String, Arc<dyn Tool>>> {
+        self.tools.read().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn write(&self) -> std::sync::RwLockWriteGuard<'_, HashMap<String, Arc<dyn Tool>>> {
+        self.tools.write().unwrap_or_else(|e| e.into_inner())
     }
 }

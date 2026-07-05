@@ -11,6 +11,12 @@ description = "Model Context Protocol client/server and tool registry for Dadhic
 [lints]
 workspace = true
 
+[features]
+# Networked MCP transports (Streamable HTTP + WebSocket) for hosted servers.
+# Off by default so a base build stays offline and dependency-light; the app
+# binary enables it. stdio connectors work without this feature.
+remote = ["dep:reqwest", "dep:tokio-tungstenite", "dep:futures", "tokio/net"]
+
 [dependencies]
 tokio = { workspace = true, features = ["process"] }
 async-trait.workspace = true
@@ -18,6 +24,9 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-webpki-roots"], optional = true }
+futures = { workspace = true, optional = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["test-util"] }
+tokio = { workspace = true, features = ["test-util", "net"] }

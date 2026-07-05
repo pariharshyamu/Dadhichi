@@ -93,7 +93,7 @@ mod tests {
         let bridges = McpToolBridge::discover(connection).await.unwrap();
         assert_eq!(bridges.len(), 1);
 
-        let mut registry = ToolRegistry::new();
+        let registry = ToolRegistry::new();
         registry.register(Arc::new(bridges.into_iter().next().unwrap()));
 
         // The bridged tool requires Network permission (set by discovery).

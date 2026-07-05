@@ -46,12 +46,14 @@ pub mod loader;
 pub mod registry;
 pub mod scope;
 pub mod skill;
+pub mod watcher;
 
 pub use agent::SkillAgent;
 pub use loader::{LoadError, LoadReport, skill_dirs};
 pub use registry::SkillRegistry;
 pub use scope::{ScopedTools, SkillError};
 pub use skill::{Skill, SkillSpec, SkillStep, SkillTools};
+pub use watcher::{SharedSkills, SkillWatchError, SkillWatchGuard, shared, watch_skills};
 
 // Re-exported for convenience so callers can build skills without also
 // importing `dadhichi-mcp` directly.

@@ -83,6 +83,35 @@ changes. `< 20 ms` latency and the GPU pipeline remain a GPU-shell concern.
 - [x] Live MCP client: transport-generic `McpConnection` (line-delimited
       JSON-RPC, id-correlated) with `connect_stdio`, plus `McpToolBridge` that
       exposes discovered external tools through the permission-gated registry
+- [x] Declarative MCP connectors (`dadhichi-mcp::connector`): an `mcp.json`
+      names servers (command/args/env + permission envelope); `connect_servers`
+      launches each, namespaces + permission-stamps its tools, and registers
+      them into the now interior-mutable `ToolRegistry`. Secrets are `${...}`
+      placeholders resolved at launch. Wired into `AppController` at boot with
+      `mcp.list` / `mcp.connect` commands
+- [x] Networked MCP transports (`dadhichi-mcp`, `remote` feature): `McpConnection`
+      is now a facade over a pluggable transport, so a server declared with a
+      `url` is reached over **Streamable HTTP** (`http(s)://`, JSON or SSE reply,
+      `Mcp-Session-Id` carried across calls) or **WebSocket** (`ws(s)://`) instead
+      of a stdio subprocess — with `${...}`-resolved `headers` (e.g. a bearer
+      token) for hosted servers like Linear/Slack
+- [x] Vault-backed secret resolver (`dadhichi-security::SecretResolver`): `${...}`
+      references in `mcp.json` resolve as `env:NAME` from the environment or
+      `vault:NAME` from the ChaCha20-Poly1305 credential vault, so tokens need
+      never sit in plaintext env vars. The running IDE only reads the vault; a
+      `dadhichi vault set|list|remove` CLI (secret value read from stdin, file
+      written `0600`) populates it out-of-process
+- [x] MCP connection lifecycle: `McpConnections` tracks each server's tools;
+      `mcp.disconnect { server }` drops the connection and unregisters exactly
+      those tools, `mcp.connect { server? }` connects one or all, and `mcp.list`
+      reports connected state + tool counts. An `@` palette mode browses the
+      servers and toggles each (connect a disconnected one, disconnect a
+      connected one), refreshing live on `mcp.connected`/`mcp.disconnected`
+- [x] MCP resources & prompts: `McpConnection` also speaks `resources/list`,
+      `resources/read`, `prompts/list`, and `prompts/get`, surfaced as the
+      `mcp.resources` / `mcp.resource.read` / `mcp.prompts` / `mcp.prompt.get`
+      commands — so an agent can read a server's context resources and
+      instantiate its prompt templates, not just call its tools
 - [x] DAP debugger service (`dadhichi-dap`): initialize, breakpoints, threads,
       continue, with adapter events republished as `dap.<event>`
 - [x] Workflow automation from natural language: `Workflow::parse` decomposes a
@@ -91,10 +120,11 @@ changes. `< 20 ms` latency and the GPU pipeline remain a GPU-shell concern.
       (instructions + required grants + a tool allow-list + a plan template).
       `ScopedTools` enforces that a skill's reachable tools are the intersection
       of the run's grants and the skill's allow-list; `SkillAgent` runs one as a
-      first-class agent. A built-in library plus a filesystem loader
+      first-class agent. A built-in library plus a filesystem loader and watcher
       (`~/.dadhichi/skills`, `<workspace>/.dadhichi/skills`) ships, wired into
-      the binary and `AppController` via `skill.list` / `skill.run` /
-      `skill.reload` (hot-reload without a restart)
+      the binary and `AppController` via a `>` palette picker and the
+      `skill.list` / `skill.run` / `skill.reload` commands — editing a manifest
+      on disk hot-reloads the catalogue and refreshes the picker live
 
 Deferred to a later pass: a WebSocket MCP transport, and the LanceDB backend for
 durable long-term memory (the `VectorStore` trait already abstracts it).

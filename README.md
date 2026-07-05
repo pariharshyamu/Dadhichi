@@ -194,8 +194,73 @@ In the IDE, the command palette's `>` skill mode is the picker — it lists the
 skills with their permissions and tool scope inline (backed by `skill.list`) and
 runs the chosen one. Under the hood, `skill.run` equips a skill granted exactly
 the permissions it declares, and `skill.reload` re-scans the manifest
-directories and swaps the catalogue live, so a newly authored skill is runnable
-without a restart.
+directories and swaps the catalogue live. The manifest directories are also
+**watched**: editing or dropping a `*.json` skill file reloads the catalogue
+automatically and refreshes the `>` picker, no command or restart needed.
+
+## MCP connectors
+
+Dadhichi is MCP-native. Point it at any MCP server — GitHub, Slack, Figma, a
+filesystem, Postgres — by declaring it in an `mcp.json` (in `~/.dadhichi/` or
+`<workspace>/.dadhichi/`). At boot the servers are launched, their tools are
+discovered, namespaced (`github.create_issue`), stamped with the permissions you
+declare, and registered — so an agent invokes a remote tool exactly like a
+built-in one, through the same permission gate.
+
+A server is either a **local subprocess** (`command`) or a **hosted endpoint**
+(`url`) — Dadhichi picks the transport from the URL scheme: `http(s)://` for
+Streamable HTTP (JSON or SSE, with the `Mcp-Session-Id` carried across calls),
+`ws(s)://` for WebSocket. Hosted servers take `headers` (e.g. an `Authorization`
+bearer token), which support the same `${...}` secret placeholders as `env`.
+
+```json
+{
+  "servers": {
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": { "GITHUB_PERSONAL_ACCESS_TOKEN": "${env:GITHUB_TOKEN}" },
+      "grants": ["network"]
+    },
+    "linear": {
+      "url": "https://mcp.linear.app/mcp",
+      "headers": { "Authorization": "Bearer ${env:LINEAR_TOKEN}" },
+      "grants": ["network"]
+    }
+  }
+}
+```
+
+Secrets never live in the config. A `${...}` placeholder resolves either as
+`env:NAME` (from the environment) or `vault:NAME` (from an encrypted
+ChaCha20-Poly1305 credential vault), so tokens need never sit in plaintext env
+vars. Populate the vault out-of-process — the running IDE only reads it:
+
+```sh
+export DADHICHI_VAULT_PASSPHRASE='…'          # unlocks ~/.dadhichi/vault.json
+printf %s "$GITHUB_TOKEN" | dadhichi vault set github_token
+dadhichi vault list                            # names only; values stay encrypted
+```
+
+```json
+"env": { "GITHUB_PERSONAL_ACCESS_TOKEN": "${vault:github_token}" }
+```
+
+An unresolved secret refuses that server rather than launching it blank. If a
+server fails to start it's reported (`mcp.error`) but never fatal. The networked
+transports live behind the crate's `remote` feature (enabled in the app binary);
+a pure-offline build keeps only the stdio path.
+
+Manage connections at runtime. `mcp.list` shows every configured server with its
+transport, connected state, and tool count; `mcp.connect { server? }` connects one
+or all; `mcp.disconnect { server }` drops a connection and unregisters exactly its
+tools. The `@` palette mode browses the servers and toggles each — connecting a
+disconnected one, disconnecting a connected one — and refreshes live.
+
+Tools aren't the only capability. A server's readable **resources** and prompt
+**templates** are bridged too: `mcp.resources` / `mcp.resource.read` pull in
+context, and `mcp.prompts` / `mcp.prompt.get` instantiate server-authored prompts —
+so an agent can read a server's data and reuse its prompts, not just call its tools.
 
 ## Workspace layout
 

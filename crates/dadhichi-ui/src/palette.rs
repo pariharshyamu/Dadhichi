@@ -10,15 +10,24 @@
 //! equippable skills (each with a capability summary), and accepting one runs
 //! it. `>` alone lists every skill; `>fs` filters them; the optional keyword
 //! `>skill fs` reads naturally and works too.
+//!
+//! A leading `@` switches to **MCP mode**: the list becomes the configured MCP
+//! servers (each with its transport, tool count, and connected state), and
+//! accepting one toggles it — connecting a disconnected server or disconnecting a
+//! connected one.
 
 /// The sigil that switches the palette into skill-browsing mode.
 pub const SKILL_SIGIL: char = '>';
 
-/// A fuzzy-searchable command-and-skill palette.
+/// The sigil that switches the palette into MCP-server mode.
+pub const MCP_SIGIL: char = '@';
+
+/// A fuzzy-searchable command-, skill-, and MCP-server palette.
 #[derive(Debug, Default)]
 pub struct CommandPalette {
     commands: Vec<String>,
     skills: Vec<SkillEntry>,
+    mcp_servers: Vec<McpEntry>,
     query: String,
     selected: usize,
     open: bool,
@@ -44,28 +53,44 @@ pub struct SkillEntry {
     pub detail: String,
 }
 
-/// A single row shown in the palette — a command or a skill.
+/// An MCP server shown in the palette's MCP mode.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct McpEntry {
+    /// The configured server name (dispatched to `mcp.connect`/`mcp.disconnect`).
+    pub name: String,
+    /// A compact status line, e.g. `http · 3 tools · connected`.
+    pub detail: String,
+    /// Whether the server is currently connected — decides the toggle action.
+    pub connected: bool,
+}
+
+/// A single row shown in the palette — a command, a skill, or an MCP server.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PaletteItem {
     /// A kernel command; the payload is its name.
     Command(String),
     /// A skill to equip and run.
     Skill(SkillEntry),
+    /// An MCP server to connect or disconnect.
+    Mcp(McpEntry),
 }
 
 impl PaletteItem {
-    /// The primary label (command name or skill name).
+    /// The primary label (command name, skill name, or server name).
     pub fn label(&self) -> &str {
         match self {
             PaletteItem::Command(name) => name,
             PaletteItem::Skill(entry) => &entry.name,
+            PaletteItem::Mcp(entry) => &entry.name,
         }
     }
 
-    /// The secondary detail line, if any (skills carry a capability summary).
+    /// The secondary detail line, if any (skills carry a capability summary;
+    /// servers carry a status line).
     pub fn detail(&self) -> Option<&str> {
         match self {
             PaletteItem::Skill(entry) => Some(&entry.detail),
+            PaletteItem::Mcp(entry) => Some(&entry.detail),
             PaletteItem::Command(_) => None,
         }
     }
@@ -78,6 +103,10 @@ pub enum PaletteAction {
     RunCommand(String),
     /// Run the named skill (dispatch `skill.run { skill: <name> }`).
     RunSkill(String),
+    /// Connect the named MCP server (dispatch `mcp.connect { server: <name> }`).
+    ConnectMcp(String),
+    /// Disconnect the named MCP server (dispatch `mcp.disconnect { server: <name> }`).
+    DisconnectMcp(String),
 }
 
 impl CommandPalette {
@@ -98,9 +127,20 @@ impl CommandPalette {
         self.clamp_selection();
     }
 
+    /// Replace the set of MCP servers shown in MCP mode.
+    pub fn set_mcp_servers(&mut self, servers: Vec<McpEntry>) {
+        self.mcp_servers = servers;
+        self.clamp_selection();
+    }
+
     /// Whether the current query has switched the palette into skill mode.
     pub fn in_skill_mode(&self) -> bool {
         self.query.starts_with(SKILL_SIGIL)
+    }
+
+    /// Whether the current query has switched the palette into MCP mode.
+    pub fn in_mcp_mode(&self) -> bool {
+        self.query.starts_with(MCP_SIGIL)
     }
 
     /// Whether the palette is currently shown.
@@ -161,7 +201,12 @@ impl CommandPalette {
     /// The rows to display for the current query — commands, or skills when in
     /// skill mode — already ranked and filtered.
     pub fn items(&self) -> Vec<PaletteItem> {
-        if self.in_skill_mode() {
+        if self.in_mcp_mode() {
+            self.mcp_matches()
+                .into_iter()
+                .map(PaletteItem::Mcp)
+                .collect()
+        } else if self.in_skill_mode() {
             self.skill_matches()
                 .into_iter()
                 .map(PaletteItem::Skill)
@@ -174,11 +219,16 @@ impl CommandPalette {
         }
     }
 
-    /// Accept the highlighted row, returning the action to perform.
+    /// Accept the highlighted row, returning the action to perform. Accepting an
+    /// MCP server toggles it: connect if disconnected, disconnect if connected.
     pub fn accept(&self) -> Option<PaletteAction> {
         match self.items().into_iter().nth(self.selected)? {
             PaletteItem::Command(name) => Some(PaletteAction::RunCommand(name)),
             PaletteItem::Skill(entry) => Some(PaletteAction::RunSkill(entry.name)),
+            PaletteItem::Mcp(entry) if entry.connected => {
+                Some(PaletteAction::DisconnectMcp(entry.name))
+            }
+            PaletteItem::Mcp(entry) => Some(PaletteAction::ConnectMcp(entry.name)),
         }
     }
 
@@ -206,6 +256,29 @@ impl CommandPalette {
                 let by_desc = fuzzy_score(filter, &entry.description);
                 by_name.or(by_desc).map(|score| (score, entry))
             })
+            .collect();
+        scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.name.len().cmp(&b.1.name.len())));
+        scored.into_iter().map(|(_, entry)| entry.clone()).collect()
+    }
+
+    /// The query text used to filter MCP servers — the part after the `@` sigil
+    /// and an optional `mcp` keyword.
+    fn mcp_filter(&self) -> &str {
+        let rest = self.query.strip_prefix(MCP_SIGIL).unwrap_or(&self.query);
+        rest.strip_prefix("mcp").unwrap_or(rest).trim_start()
+    }
+
+    /// MCP servers ranked against the MCP filter (by name). An empty filter
+    /// returns every server in configured order.
+    fn mcp_matches(&self) -> Vec<McpEntry> {
+        let filter = self.mcp_filter();
+        if filter.is_empty() {
+            return self.mcp_servers.clone();
+        }
+        let mut scored: Vec<(i32, &McpEntry)> = self
+            .mcp_servers
+            .iter()
+            .filter_map(|entry| fuzzy_score(filter, &entry.name).map(|score| (score, entry)))
             .collect();
         scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.name.len().cmp(&b.1.name.len())));
         scored.into_iter().map(|(_, entry)| entry.clone()).collect()
@@ -381,6 +454,68 @@ mod tests {
         }
         let items = p.items();
         assert_eq!(items[0].label(), "code-review");
+    }
+
+    fn palette_with_mcp() -> CommandPalette {
+        let mut p = palette();
+        p.set_mcp_servers(vec![
+            McpEntry {
+                name: "github".into(),
+                detail: "stdio · 3 tools · connected".into(),
+                connected: true,
+            },
+            McpEntry {
+                name: "linear".into(),
+                detail: "http · offline".into(),
+                connected: false,
+            },
+        ]);
+        p
+    }
+
+    #[test]
+    fn at_sigil_switches_to_mcp_mode() {
+        let mut p = palette_with_mcp();
+        assert!(!p.in_mcp_mode());
+        p.push('@');
+        assert!(p.in_mcp_mode());
+        assert!(!p.in_skill_mode());
+        let items = p.items();
+        assert_eq!(items.len(), 2);
+        assert!(matches!(items[0], PaletteItem::Mcp(_)));
+        assert_eq!(items[0].label(), "github");
+        assert!(items[0].detail().unwrap().contains("connected"));
+    }
+
+    #[test]
+    fn accepting_a_connected_server_disconnects_and_vice_versa() {
+        let mut p = palette_with_mcp();
+        for c in "@github".chars() {
+            p.push(c);
+        }
+        assert_eq!(
+            p.accept(),
+            Some(PaletteAction::DisconnectMcp("github".into()))
+        );
+
+        let mut p = palette_with_mcp();
+        for c in "@linear".chars() {
+            p.push(c);
+        }
+        let items = p.items();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].label(), "linear");
+        assert_eq!(p.accept(), Some(PaletteAction::ConnectMcp("linear".into())));
+    }
+
+    #[test]
+    fn optional_mcp_keyword_is_stripped() {
+        let mut p = palette_with_mcp();
+        for c in "@mcp lin".chars() {
+            p.push(c);
+        }
+        let items = p.items();
+        assert_eq!(items[0].label(), "linear");
     }
 
     #[test]
