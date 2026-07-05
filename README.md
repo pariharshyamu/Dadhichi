@@ -302,11 +302,17 @@ crates/
 └── dadhichi             # runtime binary: wires the kernel + Agent Console
 ```
 
-Launch the live terminal shell with `cargo run -p dadhichi-tui` — Ctrl-P opens
-the command palette, which dispatches real kernel commands (run an agent,
-re-index the workspace) whose progress streams into the panels. Type `>` in the
-palette to switch to **skill mode**: it lists the equippable skills with their
-required permissions and tool scope inline, and Enter runs the highlighted one.
+Launch the live terminal shell with `cargo run -p dadhichi-tui` (or the
+installed `dadhichi-tui`). It opens focused on the **Agent Console**: type a
+goal on the input line at the bottom and press **Enter** to run the
+conversational agent against it — its planning/running/token/completion events
+stream into the console above as it works. **Ctrl-P** opens the command palette,
+which dispatches real kernel commands (run a specific agent, re-index the
+workspace) whose progress streams into the panels. Type `>` in the palette to
+switch to **skill mode**: it lists the equippable skills with their required
+permissions and tool scope inline, and Enter runs the highlighted one; `@`
+switches to **MCP mode** to connect/disconnect servers. **Tab** cycles focus
+between panes, **Ctrl-Q** quits.
 Render a headless snapshot with `cargo run -p dadhichi-tui --example live` (the
 wired stack) or `--example snapshot` (the static layout).
 

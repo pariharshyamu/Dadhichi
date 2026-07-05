@@ -40,6 +40,10 @@ fn main() {
         serde_json::json!({ "status": "completed", "confidence": 0.9 }),
     ));
     app.status = "on branch claude/agentic-ide-rust-ctgpcx".into();
+    // A goal mid-typing, to show the console's input line.
+    for c in "add a retry to the http client".chars() {
+        app.prompt_push(c);
+    }
 
     let (w, h) = (100u16, 26u16);
     let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();

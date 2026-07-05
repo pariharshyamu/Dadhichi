@@ -275,6 +275,19 @@ impl AppController {
             .await
     }
 
+    /// Run the conversational agent against a free-text `goal` typed into the
+    /// agent console. Progress streams back as `agent.*` events that `pump` folds
+    /// into the console transcript, exactly like a palette-launched run — the only
+    /// difference is the goal comes from the user instead of a canned default.
+    pub async fn run_agent_goal(&self, goal: &str) {
+        let _ = self
+            .dispatch(
+                "agent.run",
+                serde_json::json!({ "goal": goal, "agent": "conversational-agent" }),
+            )
+            .await;
+    }
+
     /// Accept the highlighted palette entry, close the palette, and dispatch it:
     /// a command runs directly; a skill (from `>` skill mode) runs via
     /// `skill.run`. Returns a label for what was dispatched, if anything.
