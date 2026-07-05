@@ -248,12 +248,18 @@ manifests** on disk: `~/.dadhichi/skills`, `<workspace>/.dadhichi/skills`, and
 `$DADHICHI_SKILLS_DIR` in increasing precedence (a disk skill overrides a
 built-in of the same name). The loader tolerates malformed manifests —
 collecting them into a `LoadReport` and surfacing each as a `skill.load.error`
-event — rather than aborting.
+event — rather than aborting. Those directories are also **watched**
+(`watch_skills`, built on `notify`): a manifest change reloads the catalogue
+off-thread, swaps it under the lock, and publishes `skill.reloaded`, which
+`pump` turns into a palette refresh — the edit-a-file-and-it's-live loop, no
+command required. The catalogue is shared behind a `std::sync::RwLock` (not an
+async lock) precisely so the watcher thread and the sync `pump` can touch it.
 
 **[implemented]** `dadhichi-skill`: the `Skill` model, `SkillTools` scope,
 `ScopedTools` enforcement, `SkillRegistry`, the filesystem loader
-(`discover_in`), `SkillAgent`, and a built-in library (`explain`, `code-review`,
-`implement`, `author-tests`, `security-audit`), wired into the binary and the
+(`discover_in`) and watcher (`watch_skills`), `SkillAgent`, and a built-in
+library (`explain`, `code-review`, `implement`, `author-tests`,
+`security-audit`), wired into the binary and the
 `AppController` (which discovers project skills relative to the opened
 workspace). A runnable demo lives at
 `cargo run -p dadhichi-skill --example run_skill`.

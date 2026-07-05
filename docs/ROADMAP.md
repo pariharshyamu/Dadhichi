@@ -91,10 +91,11 @@ changes. `< 20 ms` latency and the GPU pipeline remain a GPU-shell concern.
       (instructions + required grants + a tool allow-list + a plan template).
       `ScopedTools` enforces that a skill's reachable tools are the intersection
       of the run's grants and the skill's allow-list; `SkillAgent` runs one as a
-      first-class agent. A built-in library plus a filesystem loader
+      first-class agent. A built-in library plus a filesystem loader and watcher
       (`~/.dadhichi/skills`, `<workspace>/.dadhichi/skills`) ships, wired into
-      the binary and `AppController` via `skill.list` / `skill.run` /
-      `skill.reload` (hot-reload without a restart)
+      the binary and `AppController` via a `>` palette picker and the
+      `skill.list` / `skill.run` / `skill.reload` commands — editing a manifest
+      on disk hot-reloads the catalogue and refreshes the picker live
 
 Deferred to a later pass: a WebSocket MCP transport, and the LanceDB backend for
 durable long-term memory (the `VectorStore` trait already abstracts it).

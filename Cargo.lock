@@ -558,6 +558,7 @@ dependencies = [
  "dadhichi-ai",
  "dadhichi-core",
  "dadhichi-mcp",
+ "notify",
  "serde",
  "serde_json",
  "tempfile",

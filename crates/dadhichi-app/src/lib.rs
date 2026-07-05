@@ -22,14 +22,13 @@ use dadhichi_core::{Command, Event, Kernel, KernelError, RecvError, Subscription
 use dadhichi_index::Indexer;
 use dadhichi_index::store::SqliteSymbolStore;
 use dadhichi_mcp::{EchoTool, GrantSet, Permission, ToolRegistry};
-use dadhichi_skill::{SkillAgent, SkillRegistry, SkillSpec, SkillTools};
+use dadhichi_skill::{
+    SharedSkills, SkillAgent, SkillRegistry, SkillSpec, SkillTools, SkillWatchGuard, shared,
+    watch_skills,
+};
 use dadhichi_ui::{App, PaletteAction, SkillEntry};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::sync::RwLock;
-
-/// A skill catalogue that can be hot-reloaded from disk behind a shared lock.
-type SharedSkills = Arc<RwLock<SkillRegistry>>;
 
 /// Owns the live IDE state and mediates between the frontend and the kernel.
 pub struct AppController {
@@ -38,6 +37,8 @@ pub struct AppController {
     events: Subscription,
     store: Arc<SqliteSymbolStore>,
     skills: SharedSkills,
+    /// Keeps the skill-manifest file watch alive; dropping it stops watching.
+    _skill_watch: Option<SkillWatchGuard>,
 }
 
 impl std::fmt::Debug for AppController {
@@ -69,11 +70,34 @@ impl AppController {
 
         // The skill library: the built-ins plus any user/project skills
         // discovered on disk (~/.dadhichi/skills, <root>/.dadhichi/skills,
-        // $DADHICHI_SKILLS_DIR). Held behind a lock so `skill.reload` can swap
-        // it live; `skill.run` builds a fresh agent from it on each dispatch, so
-        // reloaded skills take effect immediately.
+        // $DADHICHI_SKILLS_DIR). Held behind a lock so it can be swapped live;
+        // `skill.run` builds a fresh agent from it on each dispatch, so reloaded
+        // skills take effect immediately.
         let (initial_skills, skill_load) = SkillRegistry::discover_in(&root);
-        let skills: SharedSkills = Arc::new(RwLock::new(initial_skills));
+        let skills: SharedSkills = shared(initial_skills);
+
+        // Watch the manifest directories: when a skill file changes on disk, the
+        // catalogue is reloaded and a `skill.reloaded` event is published (which
+        // `pump` turns into a palette refresh). Failure to start the watch is
+        // non-fatal — manual `skill.reload` still works.
+        let skill_watch = {
+            let bus = kernel.bus().clone();
+            let skills_cb = skills.clone();
+            watch_skills(skills.clone(), &root, move |report| {
+                for err in &report.errors {
+                    bus.publish(Event::new(
+                        "skill.load.error",
+                        serde_json::json!({ "error": err.to_string() }),
+                    ));
+                }
+                let count = skills_cb.read().map(|r| r.len()).unwrap_or(0);
+                bus.publish(Event::new(
+                    "skill.reloaded",
+                    serde_json::json!({ "count": count, "loaded": report.loaded }),
+                ));
+            })
+            .ok()
+        };
 
         let orchestrator = {
             let mut orch = Orchestrator::new();
@@ -109,7 +133,8 @@ impl AppController {
         let mut ui = App::new();
         ui.open_workspace(&root);
         ui.set_commands(kernel.commands().command_names().await);
-        ui.palette.set_skills(skill_entries(&*skills.read().await));
+        ui.palette
+            .set_skills(skill_entries(&skills.read().expect("skills lock")));
 
         let events = kernel.bus().subscribe();
 
@@ -129,6 +154,7 @@ impl AppController {
             events,
             store,
             skills,
+            _skill_watch: skill_watch,
         }
     }
 
@@ -149,7 +175,7 @@ impl AppController {
 
     /// The shared skill catalogue — for a frontend to list equippable skills.
     /// It sits behind a lock because `skill.reload` can swap it live; read it
-    /// with `ctrl.skills().read().await`. Skills run via `skill.run`/`skill.list`.
+    /// with `ctrl.skills().read().unwrap()`. Skills run via `skill.run`/`skill.list`.
     pub fn skills(&self) -> &SharedSkills {
         &self.skills
     }
@@ -189,24 +215,34 @@ impl AppController {
         };
         // A command may have changed the skill set (e.g. `skill.reload`); keep
         // the palette's skill list current.
-        self.refresh_skills().await;
+        self.refresh_skills();
         Some(label)
     }
 
     /// Refresh the palette's skill list from the current catalogue. Call after
-    /// anything that may have changed the skills on disk (e.g. `skill.reload`).
-    pub async fn refresh_skills(&mut self) {
-        let entries = skill_entries(&*self.skills.read().await);
-        self.ui.palette.set_skills(entries);
+    /// anything that may have changed the skills (a `skill.reload`, or the file
+    /// watcher firing).
+    pub fn refresh_skills(&mut self) {
+        if let Ok(registry) = self.skills.read() {
+            let entries = skill_entries(&registry);
+            self.ui.palette.set_skills(entries);
+        }
     }
 
     /// Drain all currently-buffered bus events into the UI view-models. Returns
     /// how many were applied. Call once per frame — it never blocks.
     pub fn pump(&mut self) -> usize {
         let mut applied = 0;
+        let mut skills_changed = false;
         loop {
             match self.events.try_recv() {
                 Ok(Some(event)) => {
+                    // The file watcher reloads the catalogue off-thread and
+                    // announces it here; refresh the palette's skill list so the
+                    // `>` picker reflects the change without a keystroke.
+                    if event.topic.as_str() == "skill.reloaded" {
+                        skills_changed = true;
+                    }
                     self.ui.apply_event(&event);
                     applied += 1;
                 }
@@ -214,6 +250,9 @@ impl AppController {
                 Err(RecvError::Lagged(_)) => continue,
                 Err(RecvError::Closed) => break,
             }
+        }
+        if skills_changed {
+            self.refresh_skills();
         }
         applied
     }
@@ -350,13 +389,13 @@ async fn register_commands(
                             .to_string();
 
                         // Snapshot the skill, then drop the lock before running.
-                        let skill = {
-                            let registry = skills.read().await;
-                            registry.get(&skill_name)
-                        }
-                        .ok_or_else(|| {
-                            KernelError::command_failed(format!("unknown skill: {skill_name}"))
-                        })?;
+                        let skill = skills
+                            .read()
+                            .ok()
+                            .and_then(|registry| registry.get(&skill_name))
+                            .ok_or_else(|| {
+                                KernelError::command_failed(format!("unknown skill: {skill_name}"))
+                            })?;
 
                         let agent = SkillAgent::new(skill.clone()).with_model(&model_id);
                         // Grant exactly what the skill requires — no more.
@@ -388,7 +427,9 @@ async fn register_commands(
                 Arc::new(move |_cmd: Command| {
                     let skills = skills.clone();
                     async move {
-                        let registry = skills.read().await;
+                        let registry = skills
+                            .read()
+                            .map_err(|_| KernelError::command_failed("skills lock poisoned"))?;
                         let specs = serde_json::to_value(registry.list())
                             .map_err(KernelError::command_failed)?;
                         Ok(serde_json::json!({
@@ -419,7 +460,10 @@ async fn register_commands(
                     async move {
                         let (fresh, report) = SkillRegistry::discover_in(&root);
                         let count = fresh.len();
-                        *skills.write().await = fresh;
+                        *skills
+                            .write()
+                            .map_err(|_| KernelError::command_failed("skills lock poisoned"))? =
+                            fresh;
 
                         for err in &report.errors {
                             bus.publish(Event::new(
@@ -596,7 +640,7 @@ mod tests {
     async fn skills_are_registered_and_runnable() {
         let mut ctrl = AppController::new(".").await;
         // The built-in library is available to a frontend.
-        assert!(ctrl.skills().read().await.contains("explain"));
+        assert!(ctrl.skills().read().unwrap().contains("explain"));
 
         // Running a skill through the command dispatches its `skill:` agent and
         // streams `skill.*` progress into the console.
@@ -667,7 +711,7 @@ mod tests {
         .unwrap();
 
         let ctrl = AppController::new(root.path()).await;
-        assert!(ctrl.skills().read().await.contains("house-style"));
+        assert!(ctrl.skills().read().unwrap().contains("house-style"));
 
         let out = ctrl
             .dispatch(
@@ -688,7 +732,7 @@ mod tests {
 
         // Boot with no project skills present.
         let ctrl = AppController::new(root.path()).await;
-        assert!(!ctrl.skills().read().await.contains("late-arrival"));
+        assert!(!ctrl.skills().read().unwrap().contains("late-arrival"));
         assert!(
             ctrl.dispatch("skill.run", serde_json::json!({ "skill": "late-arrival" }))
                 .await
@@ -708,7 +752,7 @@ mod tests {
         assert_eq!(report["loaded"], serde_json::json!(["late-arrival"]));
 
         // It is now live: catalogued and runnable without a restart.
-        assert!(ctrl.skills().read().await.contains("late-arrival"));
+        assert!(ctrl.skills().read().unwrap().contains("late-arrival"));
         let out = ctrl
             .dispatch("skill.run", serde_json::json!({ "skill": "late-arrival" }))
             .await
@@ -731,5 +775,50 @@ mod tests {
         assert_eq!(report["errors"].as_array().unwrap().len(), 1);
         // The built-ins are still present after a reload with a bad manifest.
         assert!(report["count"].as_u64().unwrap() >= 5);
+    }
+
+    #[tokio::test]
+    async fn file_watcher_hot_reloads_and_refreshes_the_palette() {
+        use std::time::Duration;
+
+        let root = tempfile::tempdir().unwrap();
+        let skill_dir = root.path().join(".dadhichi").join("skills");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+
+        // Boot with the watcher armed over an (empty) project skills dir.
+        let mut ctrl = AppController::new(root.path()).await;
+        assert!(!ctrl.skills().read().unwrap().contains("hot"));
+
+        // Author a manifest on disk — no command dispatched. The watcher should
+        // notice, reload the catalogue, and publish `skill.reloaded`.
+        std::fs::write(
+            skill_dir.join("hot.json"),
+            r#"{"name":"hot","description":"appeared on disk"}"#,
+        )
+        .unwrap();
+
+        // Poll pump() until the reload event lands (bounded, watchers are async).
+        let mut reloaded = false;
+        for _ in 0..100 {
+            if ctrl.pump() > 0 && ctrl.ui().chat.iter().any(|l| l.contains("skill.reloaded")) {
+                reloaded = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(reloaded, "watcher did not publish skill.reloaded");
+
+        // The catalogue and the palette's `>` picker both reflect it, live.
+        assert!(ctrl.skills().read().unwrap().contains("hot"));
+        ctrl.ui_mut().palette.open();
+        ctrl.ui_mut().palette.push('>');
+        assert!(
+            ctrl.ui()
+                .palette
+                .items()
+                .iter()
+                .any(|item| item.label() == "hot"),
+            "palette skill list not refreshed after watcher reload"
+        );
     }
 }

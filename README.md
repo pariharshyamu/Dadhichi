@@ -194,8 +194,9 @@ In the IDE, the command palette's `>` skill mode is the picker — it lists the
 skills with their permissions and tool scope inline (backed by `skill.list`) and
 runs the chosen one. Under the hood, `skill.run` equips a skill granted exactly
 the permissions it declares, and `skill.reload` re-scans the manifest
-directories and swaps the catalogue live, so a newly authored skill is runnable
-without a restart.
+directories and swaps the catalogue live. The manifest directories are also
+**watched**: editing or dropping a `*.json` skill file reloads the catalogue
+automatically and refreshes the `>` picker, no command or restart needed.
 
 ## Workspace layout
 
