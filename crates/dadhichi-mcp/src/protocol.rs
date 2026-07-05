@@ -89,6 +89,50 @@ pub struct ServerCapabilities {
     pub prompts: bool,
 }
 
+/// A readable resource an MCP server exposes (`resources/list`) — a file,
+/// database row, API response, or any addressable context an agent can read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResourceSpec {
+    /// The resource URI, passed back to `resources/read`.
+    pub uri: String,
+    /// A human-readable name.
+    #[serde(default)]
+    pub name: String,
+    /// What the resource is.
+    #[serde(default)]
+    pub description: String,
+    /// The MIME type of its contents, if the server declares one.
+    #[serde(default, rename = "mimeType", skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+}
+
+/// One argument a prompt template accepts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PromptArgument {
+    /// The argument name.
+    pub name: String,
+    /// What the argument is for.
+    #[serde(default)]
+    pub description: String,
+    /// Whether the server requires it.
+    #[serde(default)]
+    pub required: bool,
+}
+
+/// A prompt template an MCP server exposes (`prompts/list`) — a reusable,
+/// server-authored message template an agent can instantiate with arguments.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PromptSpec {
+    /// The prompt name, passed back to `prompts/get`.
+    pub name: String,
+    /// What the prompt does.
+    #[serde(default)]
+    pub description: String,
+    /// The arguments it accepts.
+    #[serde(default)]
+    pub arguments: Vec<PromptArgument>,
+}
+
 /// A client that speaks MCP to a remote server over some transport.
 #[async_trait]
 pub trait McpClient: Send + Sync {

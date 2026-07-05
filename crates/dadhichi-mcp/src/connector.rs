@@ -169,22 +169,78 @@ impl ConnectReport {
     }
 }
 
-/// Live MCP connections. Keep this alive for as long as the bridged tools should
-/// remain usable — dropping it closes the server subprocesses.
+/// One live server: its connection and the names of the tools it registered
+/// (kept so a disconnect can unregister exactly those tools).
+#[derive(Debug)]
+struct ConnectionHandle {
+    connection: Arc<McpConnection>,
+    tools: Vec<String>,
+}
+
+/// Live MCP connections, keyed by server name. Keep this alive for as long as the
+/// bridged tools should remain usable — dropping it (together with unregistering
+/// the tools) closes the server subprocesses and sockets.
 #[derive(Debug, Default)]
 pub struct McpConnections {
-    connections: BTreeMap<String, Arc<McpConnection>>,
+    servers: BTreeMap<String, ConnectionHandle>,
 }
 
 impl McpConnections {
-    /// The names of the currently-connected servers.
+    /// The names of the currently-connected servers, sorted.
     pub fn names(&self) -> Vec<String> {
-        self.connections.keys().cloned().collect()
+        self.servers.keys().cloned().collect()
     }
 
     /// Whether a server with `name` is connected.
     pub fn contains(&self, name: &str) -> bool {
-        self.connections.contains_key(name)
+        self.servers.contains_key(name)
+    }
+
+    /// The number of connected servers.
+    pub fn len(&self) -> usize {
+        self.servers.len()
+    }
+
+    /// Whether no servers are connected.
+    pub fn is_empty(&self) -> bool {
+        self.servers.is_empty()
+    }
+
+    /// The tool names a connected server contributed (empty if not connected).
+    pub fn tools_of(&self, name: &str) -> &[String] {
+        self.servers
+            .get(name)
+            .map(|h| h.tools.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// The live connection for `name`, e.g. to list its resources or prompts.
+    pub fn connection(&self, name: &str) -> Option<Arc<McpConnection>> {
+        self.servers.get(name).map(|h| h.connection.clone())
+    }
+
+    /// Record a connected server and the tools it registered, replacing any prior
+    /// handle of the same name.
+    fn insert(&mut self, name: String, connection: Arc<McpConnection>, tools: Vec<String>) {
+        self.servers
+            .insert(name, ConnectionHandle { connection, tools });
+    }
+
+    /// Fold another connection set into this one (later servers win by name).
+    pub fn merge(&mut self, other: McpConnections) {
+        self.servers.extend(other.servers);
+    }
+
+    /// Disconnect `name`: unregister the tools it contributed from `registry` and
+    /// drop its connection (which, once the bridges are gone, closes the
+    /// subprocess/socket). Returns the number of tools removed, or `None` if no
+    /// such server was connected.
+    pub fn disconnect(&mut self, name: &str, registry: &ToolRegistry) -> Option<usize> {
+        let handle = self.servers.remove(name)?;
+        for tool in &handle.tools {
+            registry.unregister(tool);
+        }
+        Some(handle.tools.len())
     }
 }
 
@@ -245,7 +301,7 @@ where
     for (name, server) in config.enabled() {
         match connect_one(name, server, registry, &resolve).await {
             Ok((conn, tools)) => {
-                connections.connections.insert(name.clone(), conn);
+                connections.insert(name.clone(), conn, tools.clone());
                 report.connected.push(ConnectedServer {
                     name: name.clone(),
                     tools,
@@ -543,6 +599,43 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(out["issue"], 7);
+    }
+
+    #[tokio::test]
+    async fn disconnect_unregisters_tools_and_is_idempotent() {
+        let (client_side, server_side) = tokio::io::duplex(8192);
+        let (c_read, c_write) = tokio::io::split(client_side);
+        let (s_read, s_write) = tokio::io::split(server_side);
+        tokio::spawn(mock_server(s_read, s_write));
+        let conn = Arc::new(McpConnection::new(c_read, c_write));
+
+        let server = McpServerConfig {
+            command: "unused".into(),
+            args: vec![],
+            env: BTreeMap::new(),
+            url: None,
+            headers: BTreeMap::new(),
+            grants: vec![Permission::Network],
+            enabled: true,
+        };
+        let registry = ToolRegistry::new();
+        let tools = bridge_tools("github", &server, &registry, &conn)
+            .await
+            .unwrap();
+
+        let mut conns = McpConnections::default();
+        conns.insert("github".into(), conn, tools);
+        assert!(conns.contains("github"));
+        assert_eq!(conns.tools_of("github"), ["github.create_issue"]);
+        assert!(registry.contains("github.create_issue"));
+
+        // Disconnecting removes the server and unregisters exactly its tools.
+        assert_eq!(conns.disconnect("github", &registry), Some(1));
+        assert!(!conns.contains("github"));
+        assert!(!registry.contains("github.create_issue"));
+
+        // A second disconnect is a no-op.
+        assert_eq!(conns.disconnect("github", &registry), None);
     }
 
     // ── End-to-end over a real remote transport (loopback WebSocket) ──────────

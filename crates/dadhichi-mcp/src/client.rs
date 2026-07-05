@@ -17,7 +17,9 @@
 //! The two networked transports live behind the `remote` feature so a default
 //! build stays offline and dependency-light.
 
-use crate::protocol::{McpClient, McpError, RpcRequest, RpcResponse, ServerCapabilities};
+use crate::protocol::{
+    McpClient, McpError, PromptSpec, ResourceSpec, RpcRequest, RpcResponse, ServerCapabilities,
+};
 use crate::tool::{Permission, ToolSpec};
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -194,6 +196,58 @@ impl McpConnection {
         )
         .await
     }
+
+    /// List the readable resources the server exposes (`resources/list`).
+    pub async fn list_resources(&self) -> Result<Vec<ResourceSpec>, McpError> {
+        let result = self
+            .request("resources/list", serde_json::json!({}))
+            .await?;
+        decode_array(&result, "resources")
+    }
+
+    /// Read a resource's contents by URI (`resources/read`). The returned value
+    /// is the server's `contents` array (text and/or blobs).
+    pub async fn read_resource(&self, uri: &str) -> Result<serde_json::Value, McpError> {
+        self.request("resources/read", serde_json::json!({ "uri": uri }))
+            .await
+    }
+
+    /// List the prompt templates the server exposes (`prompts/list`).
+    pub async fn list_prompts(&self) -> Result<Vec<PromptSpec>, McpError> {
+        let result = self.request("prompts/list", serde_json::json!({})).await?;
+        decode_array(&result, "prompts")
+    }
+
+    /// Instantiate a prompt template with `arguments` (`prompts/get`). The
+    /// returned value is the server's rendered `messages` (plus any description).
+    pub async fn get_prompt(
+        &self,
+        name: &str,
+        arguments: serde_json::Value,
+    ) -> Result<serde_json::Value, McpError> {
+        self.request(
+            "prompts/get",
+            serde_json::json!({ "name": name, "arguments": arguments }),
+        )
+        .await
+    }
+}
+
+/// Decode the `key` array of an MCP list response into typed specs, skipping any
+/// entry that doesn't deserialize rather than failing the whole call.
+fn decode_array<T: serde::de::DeserializeOwned>(
+    result: &serde_json::Value,
+    key: &str,
+) -> Result<Vec<T>, McpError> {
+    let items = result
+        .get(key)
+        .and_then(|t| t.as_array())
+        .cloned()
+        .unwrap_or_default();
+    Ok(items
+        .into_iter()
+        .filter_map(|v| serde_json::from_value(v).ok())
+        .collect())
 }
 
 #[async_trait]
@@ -644,11 +698,26 @@ mod tests {
     /// The canned result a mock server returns for each MCP method.
     fn reply_for(method: &str) -> serde_json::Value {
         match method {
-            "initialize" => serde_json::json!({ "capabilities": { "tools": {} } }),
+            "initialize" => serde_json::json!({
+                "capabilities": { "tools": {}, "resources": {}, "prompts": {} }
+            }),
             "tools/list" => serde_json::json!({
                 "tools": [{ "name": "search", "description": "web search", "inputSchema": { "type": "object" } }]
             }),
             "tools/call" => serde_json::json!({ "content": [{ "type": "text", "text": "ok" }] }),
+            "resources/list" => serde_json::json!({
+                "resources": [{ "uri": "file:///readme.md", "name": "readme", "mimeType": "text/markdown" }]
+            }),
+            "resources/read" => serde_json::json!({
+                "contents": [{ "uri": "file:///readme.md", "text": "# Hello" }]
+            }),
+            "prompts/list" => serde_json::json!({
+                "prompts": [{ "name": "summarize", "description": "Summarize text",
+                    "arguments": [{ "name": "text", "required": true }] }]
+            }),
+            "prompts/get" => serde_json::json!({
+                "messages": [{ "role": "user", "content": { "type": "text", "text": "summarize: hi" } }]
+            }),
             _ => serde_json::Value::Null,
         }
     }
@@ -666,7 +735,8 @@ mod tests {
         let conn = connect();
         let caps = conn.handshake().await.unwrap();
         assert!(caps.tools);
-        assert!(!caps.resources);
+        assert!(caps.resources);
+        assert!(caps.prompts);
     }
 
     #[tokio::test]
@@ -681,6 +751,34 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result["content"][0]["text"], "ok");
+    }
+
+    #[tokio::test]
+    async fn lists_and_reads_resources() {
+        let conn = connect();
+        let resources = conn.list_resources().await.unwrap();
+        assert_eq!(resources.len(), 1);
+        assert_eq!(resources[0].uri, "file:///readme.md");
+        assert_eq!(resources[0].mime_type.as_deref(), Some("text/markdown"));
+
+        let read = conn.read_resource("file:///readme.md").await.unwrap();
+        assert_eq!(read["contents"][0]["text"], "# Hello");
+    }
+
+    #[tokio::test]
+    async fn lists_and_gets_prompts() {
+        let conn = connect();
+        let prompts = conn.list_prompts().await.unwrap();
+        assert_eq!(prompts.len(), 1);
+        assert_eq!(prompts[0].name, "summarize");
+        assert_eq!(prompts[0].arguments[0].name, "text");
+        assert!(prompts[0].arguments[0].required);
+
+        let got = conn
+            .get_prompt("summarize", serde_json::json!({ "text": "hi" }))
+            .await
+            .unwrap();
+        assert_eq!(got["messages"][0]["role"], "user");
     }
 
     #[test]

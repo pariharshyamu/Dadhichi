@@ -36,7 +36,8 @@ pub use connector::{
     connect_servers, resolve_env,
 };
 pub use protocol::{
-    McpClient, McpError, RpcErrorObject, RpcRequest, RpcResponse, ServerCapabilities,
+    McpClient, McpError, PromptArgument, PromptSpec, ResourceSpec, RpcErrorObject, RpcRequest,
+    RpcResponse, ServerCapabilities,
 };
 pub use registry::{GrantSet, ToolRegistry};
 pub use tool::{EchoTool, Permission, Tool, ToolError, ToolResult, ToolSpec};

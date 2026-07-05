@@ -329,15 +329,27 @@ server (exposing its own workspace tools to other agents).
   calls); and **WebSocket** (`ws(s)://` — a persistent bidirectional socket). The
   two networked transports live behind the `remote` feature so a default build
   stays offline; the app binary enables it.
+- **Lifecycle.** `McpConnections` tracks each live server together with the tool
+  names it registered. `mcp.disconnect { server }` drops the connection and
+  unregisters exactly those tools (which, once the bridges are gone, closes the
+  subprocess/socket); `mcp.connect { server? }` connects one or all. The shared
+  connection set lives behind a mutex so the commands and the palette read and
+  mutate the same state.
+- **Beyond tools.** `McpConnection` also speaks `resources/list` / `resources/read`
+  (readable context an agent can pull in) and `prompts/list` / `prompts/get`
+  (server-authored templates), surfaced as the `mcp.resources` /
+  `mcp.resource.read` / `mcp.prompts` / `mcp.prompt.get` commands.
 
 **[implemented]** `dadhichi-mcp`: a live `McpConnection` with `connect_stdio` /
 `connect_stdio_env` / `connect_url`, and `McpToolBridge`, which exposes a remote
 server's tools through the permission-gated `ToolRegistry`. The connector layer
 wires this into the `AppController`: servers declared in `mcp.json` (stdio or
 hosted) are connected at boot (failures are non-fatal, surfaced as `mcp.error`),
-and the `mcp.list` / `mcp.connect` commands enumerate (with transport) and
-(re)connect them. An agent invokes a GitHub, Slack, or Linear MCP tool exactly as
-it invokes a built-in one. **[design]** a vault-backed secret resolver.
+and the `mcp.list` / `mcp.connect` / `mcp.disconnect` commands enumerate (with
+transport, connected state, and tool count) and toggle them — also from an `@`
+palette mode that refreshes live. An agent invokes a GitHub, Slack, or Linear MCP
+tool exactly as it invokes a built-in one, and can additionally read its
+resources and instantiate its prompts.
 
 ---
 

@@ -22,16 +22,17 @@ use dadhichi_core::{Command, Event, Kernel, KernelError, RecvError, Subscription
 use dadhichi_index::Indexer;
 use dadhichi_index::store::SqliteSymbolStore;
 use dadhichi_mcp::{
-    EchoTool, GrantSet, McpConnections, McpServersConfig, Permission, ToolRegistry, connect_servers,
+    EchoTool, GrantSet, McpConnection, McpConnections, McpServersConfig, Permission, ToolRegistry,
+    connect_servers,
 };
 use dadhichi_security::{SecretResolver, Vault, VaultData};
 use dadhichi_skill::{
     SharedSkills, SkillAgent, SkillRegistry, SkillSpec, SkillTools, SkillWatchGuard, shared,
     watch_skills,
 };
-use dadhichi_ui::{App, PaletteAction, SkillEntry};
+use dadhichi_ui::{App, McpEntry, PaletteAction, SkillEntry};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// Owns the live IDE state and mediates between the frontend and the kernel.
 pub struct AppController {
@@ -42,9 +43,13 @@ pub struct AppController {
     skills: SharedSkills,
     /// Keeps the skill-manifest file watch alive; dropping it stops watching.
     _skill_watch: Option<SkillWatchGuard>,
-    /// Keeps the boot-time MCP server subprocesses alive (their bridged tools
-    /// also hold the connections, so this mainly documents ownership).
-    _mcp: McpConnections,
+    /// The declared MCP servers, for the `@` palette and `mcp.list`.
+    mcp_config: McpServersConfig,
+    /// The live MCP connections, shared with the `mcp.*` command handlers so
+    /// `mcp.connect`/`mcp.disconnect` can mutate the same set the palette reads.
+    /// Holds each connection alive; disconnecting drops it and unregisters its
+    /// tools.
+    mcp: Arc<Mutex<McpConnections>>,
 }
 
 /// Build the resolver for `${...}` secrets in `mcp.json`: `env:NAME` (and bare
@@ -125,6 +130,7 @@ impl AppController {
         let secrets = mcp_secret_resolver();
         let (mcp_conns, mcp_report) =
             connect_servers(&mcp_config, &tools, |key| secrets.resolve(key)).await;
+        let mcp = Arc::new(Mutex::new(mcp_conns));
 
         // The skill library: the built-ins plus any user/project skills
         // discovered on disk (~/.dadhichi/skills, <root>/.dadhichi/skills,
@@ -181,6 +187,7 @@ impl AppController {
             &orchestrator,
             &skills,
             &mcp_config,
+            &mcp,
             &secrets,
             &model_id,
             &root,
@@ -189,12 +196,15 @@ impl AppController {
         .await;
 
         // Build the UI and seed the palette from the registered command names
-        // (default mode) and the skill catalogue (the `>` skill mode).
+        // (default mode), the skill catalogue (the `>` skill mode), and the MCP
+        // servers with their live connection state (the `@` mode).
         let mut ui = App::new();
         ui.open_workspace(&root);
         ui.set_commands(kernel.commands().command_names().await);
         ui.palette
             .set_skills(skill_entries(&skills.read().expect("skills lock")));
+        ui.palette
+            .set_mcp_servers(mcp_entries(&mcp_config, &mcp.lock().expect("mcp lock")));
 
         let events = kernel.bus().subscribe();
 
@@ -223,7 +233,8 @@ impl AppController {
             store,
             skills,
             _skill_watch: skill_watch,
-            _mcp: mcp_conns,
+            mcp_config,
+            mcp,
         }
     }
 
@@ -281,10 +292,23 @@ impl AppController {
                     .await;
                 format!("skill.run:{name}")
             }
+            PaletteAction::ConnectMcp(name) => {
+                let _ = self
+                    .dispatch("mcp.connect", serde_json::json!({ "server": name }))
+                    .await;
+                format!("mcp.connect:{name}")
+            }
+            PaletteAction::DisconnectMcp(name) => {
+                let _ = self
+                    .dispatch("mcp.disconnect", serde_json::json!({ "server": name }))
+                    .await;
+                format!("mcp.disconnect:{name}")
+            }
         };
-        // A command may have changed the skill set (e.g. `skill.reload`); keep
-        // the palette's skill list current.
+        // A command may have changed the skill set (e.g. `skill.reload`) or the
+        // connection state; keep both palette lists current.
         self.refresh_skills();
+        self.refresh_mcp();
         Some(label)
     }
 
@@ -298,19 +322,33 @@ impl AppController {
         }
     }
 
+    /// Refresh the palette's MCP-server list (names, transport, tool count, and
+    /// connected state). Call after a connect/disconnect.
+    pub fn refresh_mcp(&mut self) {
+        if let Ok(connections) = self.mcp.lock() {
+            let entries = mcp_entries(&self.mcp_config, &connections);
+            self.ui.palette.set_mcp_servers(entries);
+        }
+    }
+
     /// Drain all currently-buffered bus events into the UI view-models. Returns
     /// how many were applied. Call once per frame — it never blocks.
     pub fn pump(&mut self) -> usize {
         let mut applied = 0;
         let mut skills_changed = false;
+        let mut mcp_changed = false;
         loop {
             match self.events.try_recv() {
                 Ok(Some(event)) => {
-                    // The file watcher reloads the catalogue off-thread and
-                    // announces it here; refresh the palette's skill list so the
-                    // `>` picker reflects the change without a keystroke.
-                    if event.topic.as_str() == "skill.reloaded" {
-                        skills_changed = true;
+                    match event.topic.as_str() {
+                        // The file watcher reloads the catalogue off-thread and
+                        // announces it here; refresh the palette's skill list so
+                        // the `>` picker reflects the change without a keystroke.
+                        "skill.reloaded" => skills_changed = true,
+                        // A connect/disconnect (including from another surface)
+                        // changed the `@` server list.
+                        "mcp.connected" | "mcp.disconnected" | "mcp.error" => mcp_changed = true,
+                        _ => {}
                     }
                     self.ui.apply_event(&event);
                     applied += 1;
@@ -322,6 +360,9 @@ impl AppController {
         }
         if skills_changed {
             self.refresh_skills();
+        }
+        if mcp_changed {
+            self.refresh_mcp();
         }
         applied
     }
@@ -379,6 +420,228 @@ fn publish_mcp_report(bus: &dadhichi_core::EventBus, report: &dadhichi_mcp::Conn
     }
 }
 
+/// Build the palette's MCP-server rows: every configured server with its
+/// transport, tool count, and connected state.
+fn mcp_entries(config: &McpServersConfig, connections: &McpConnections) -> Vec<McpEntry> {
+    config
+        .servers
+        .iter()
+        .map(|(name, cfg)| {
+            let connected = connections.contains(name);
+            let detail = if connected {
+                let n = connections.tools_of(name).len();
+                let plural = if n == 1 { "" } else { "s" };
+                format!("{} · {n} tool{plural} · connected", cfg.transport())
+            } else if !cfg.enabled {
+                format!("{} · disabled", cfg.transport())
+            } else {
+                format!("{} · offline", cfg.transport())
+            };
+            McpEntry {
+                name: name.clone(),
+                detail,
+                connected,
+            }
+        })
+        .collect()
+}
+
+/// Connect the servers in `config` (optionally just `only`), merging the results
+/// into the shared `mcp` set and publishing a report on `bus`. Returns the JSON
+/// summary the `mcp.connect` command replies with.
+async fn connect_and_merge(
+    config: &McpServersConfig,
+    only: Option<&str>,
+    tools: &Arc<ToolRegistry>,
+    mcp: &Arc<Mutex<McpConnections>>,
+    secrets: &Arc<SecretResolver>,
+    bus: &dadhichi_core::EventBus,
+) -> serde_json::Value {
+    // For a targeted connect, narrow to that one server and force it enabled so
+    // an explicit request overrides a `"enabled": false` in the config.
+    let scoped = match only {
+        Some(name) => {
+            let mut one = McpServersConfig::default();
+            if let Some(cfg) = config.servers.get(name) {
+                let mut cfg = cfg.clone();
+                cfg.enabled = true;
+                one.servers.insert(name.to_string(), cfg);
+            }
+            one
+        }
+        None => config.clone(),
+    };
+
+    let (fresh, report) = connect_servers(&scoped, tools, |key| secrets.resolve(key)).await;
+    publish_mcp_report(bus, &report);
+    let connected = fresh.names();
+    if let Ok(mut guard) = mcp.lock() {
+        guard.merge(fresh);
+    }
+    serde_json::json!({
+        "connected": connected,
+        "tools": report.tool_count(),
+        "errors": report.errors.len(),
+    })
+}
+
+/// A snapshot of the currently-connected servers as `(name, connection)` pairs.
+/// Taken under the lock and returned owned, so the RPCs that follow never hold
+/// the mutex across an `.await`.
+fn snapshot_connections(
+    mcp: &Arc<Mutex<McpConnections>>,
+) -> Result<Vec<(String, Arc<McpConnection>)>, KernelError> {
+    let guard = mcp
+        .lock()
+        .map_err(|_| KernelError::command_failed("mcp connections lock poisoned"))?;
+    Ok(guard
+        .names()
+        .into_iter()
+        .filter_map(|name| guard.connection(&name).map(|conn| (name, conn)))
+        .collect())
+}
+
+/// The live connection for `server`, or a command error if it isn't connected.
+fn connection_of(
+    mcp: &Arc<Mutex<McpConnections>>,
+    server: &str,
+) -> Result<Arc<McpConnection>, KernelError> {
+    mcp.lock()
+        .map_err(|_| KernelError::command_failed("mcp connections lock poisoned"))?
+        .connection(server)
+        .ok_or_else(|| KernelError::command_failed(format!("server not connected: {server}")))
+}
+
+/// Register `mcp.resources`, `mcp.resource.read`, `mcp.prompts`, and
+/// `mcp.prompt.get`, which surface the readable resources and prompt templates
+/// the connected servers expose.
+async fn register_mcp_capability_commands(kernel: &Kernel, mcp: &Arc<Mutex<McpConnections>>) {
+    // mcp.resources — list every connected server's resources, namespaced.
+    {
+        let mcp = mcp.clone();
+        kernel
+            .commands()
+            .register(
+                "mcp.resources",
+                Arc::new(move |_cmd: Command| {
+                    let mcp = mcp.clone();
+                    async move {
+                        let servers = snapshot_connections(&mcp)?;
+                        let mut resources = Vec::new();
+                        for (server, conn) in servers {
+                            if let Ok(list) = conn.list_resources().await {
+                                for r in list {
+                                    resources.push(serde_json::json!({
+                                        "server": server,
+                                        "uri": r.uri,
+                                        "name": r.name,
+                                        "description": r.description,
+                                        "mimeType": r.mime_type,
+                                    }));
+                                }
+                            }
+                        }
+                        Ok(serde_json::json!({ "resources": resources }))
+                    }
+                }),
+            )
+            .await;
+    }
+
+    // mcp.resource.read — read one resource: { server, uri }.
+    {
+        let mcp = mcp.clone();
+        kernel
+            .commands()
+            .register(
+                "mcp.resource.read",
+                Arc::new(move |cmd: Command| {
+                    let mcp = mcp.clone();
+                    async move {
+                        let server = str_arg(&cmd, "server")?;
+                        let uri = str_arg(&cmd, "uri")?;
+                        let conn = connection_of(&mcp, &server)?;
+                        let contents = conn
+                            .read_resource(&uri)
+                            .await
+                            .map_err(KernelError::command_failed)?;
+                        Ok(serde_json::json!({ "server": server, "uri": uri, "contents": contents }))
+                    }
+                }),
+            )
+            .await;
+    }
+
+    // mcp.prompts — list every connected server's prompt templates, namespaced.
+    {
+        let mcp = mcp.clone();
+        kernel
+            .commands()
+            .register(
+                "mcp.prompts",
+                Arc::new(move |_cmd: Command| {
+                    let mcp = mcp.clone();
+                    async move {
+                        let servers = snapshot_connections(&mcp)?;
+                        let mut prompts = Vec::new();
+                        for (server, conn) in servers {
+                            if let Ok(list) = conn.list_prompts().await {
+                                for p in list {
+                                    prompts.push(serde_json::json!({
+                                        "server": server,
+                                        "name": p.name,
+                                        "description": p.description,
+                                        "arguments": p.arguments.iter().map(|a| a.name.clone()).collect::<Vec<_>>(),
+                                    }));
+                                }
+                            }
+                        }
+                        Ok(serde_json::json!({ "prompts": prompts }))
+                    }
+                }),
+            )
+            .await;
+    }
+
+    // mcp.prompt.get — instantiate a prompt: { server, name, args? }.
+    {
+        let mcp = mcp.clone();
+        kernel
+            .commands()
+            .register(
+                "mcp.prompt.get",
+                Arc::new(move |cmd: Command| {
+                    let mcp = mcp.clone();
+                    async move {
+                        let server = str_arg(&cmd, "server")?;
+                        let name = str_arg(&cmd, "name")?;
+                        let args = cmd
+                            .args
+                            .get("args")
+                            .cloned()
+                            .unwrap_or_else(|| serde_json::json!({}));
+                        let conn = connection_of(&mcp, &server)?;
+                        let result = conn
+                            .get_prompt(&name, args)
+                            .await
+                            .map_err(KernelError::command_failed)?;
+                        Ok(serde_json::json!({ "server": server, "name": name, "prompt": result }))
+                    }
+                }),
+            )
+            .await;
+    }
+}
+
+/// Extract a required string argument, or a command error naming it.
+fn str_arg(cmd: &Command, key: &str) -> Result<String, KernelError> {
+    cmd.args
+        .get(key)
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| KernelError::command_failed(format!("missing `{key}` argument")))
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn register_commands(
     kernel: &Kernel,
@@ -387,6 +650,7 @@ async fn register_commands(
     orchestrator: &Arc<Orchestrator>,
     skills: &SharedSkills,
     mcp_config: &McpServersConfig,
+    mcp: &Arc<Mutex<McpConnections>>,
     secrets: &Arc<SecretResolver>,
     model_id: &str,
     root: &Path,
@@ -577,9 +841,11 @@ async fn register_commands(
             .await;
     }
 
-    // mcp.list — the configured MCP servers plus the tools currently registered.
+    // mcp.list — the configured MCP servers (with transport, connected state, and
+    // tool count) plus the tools currently registered.
     {
         let mcp_config = mcp_config.clone();
+        let mcp = mcp.clone();
         let tools = tools.clone();
         kernel
             .commands()
@@ -587,8 +853,12 @@ async fn register_commands(
                 "mcp.list",
                 Arc::new(move |_cmd: Command| {
                     let mcp_config = mcp_config.clone();
+                    let mcp = mcp.clone();
                     let tools = tools.clone();
                     async move {
+                        let connections = mcp.lock().map_err(|_| {
+                            KernelError::command_failed("mcp connections lock poisoned")
+                        })?;
                         let servers: Vec<serde_json::Value> = mcp_config
                             .servers
                             .iter()
@@ -599,6 +869,8 @@ async fn register_commands(
                                     "command": cfg.command,
                                     "url": cfg.url,
                                     "enabled": cfg.enabled,
+                                    "connected": connections.contains(name),
+                                    "tool_count": connections.tools_of(name).len(),
                                     "grants": cfg.grants.iter().map(|p| p.to_string()).collect::<Vec<_>>(),
                                 })
                             })
@@ -613,11 +885,12 @@ async fn register_commands(
             .await;
     }
 
-    // mcp.connect — (re)launch the configured servers and bridge their tools,
-    // emitting mcp.connected / mcp.error. Idempotent: re-registering a tool of
-    // the same name replaces it.
+    // mcp.connect — connect the configured servers and bridge their tools,
+    // emitting mcp.connected / mcp.error. With `{ "server": name }`, connects just
+    // that one. Idempotent: re-registering a tool of the same name replaces it.
     {
         let mcp_config = mcp_config.clone();
+        let mcp = mcp.clone();
         let tools = tools.clone();
         let secrets = secrets.clone();
         let bus = kernel.bus().clone();
@@ -625,28 +898,73 @@ async fn register_commands(
             .commands()
             .register(
                 "mcp.connect",
-                Arc::new(move |_cmd: Command| {
+                Arc::new(move |cmd: Command| {
                     let mcp_config = mcp_config.clone();
+                    let mcp = mcp.clone();
                     let tools = tools.clone();
                     let secrets = secrets.clone();
                     let bus = bus.clone();
                     async move {
-                        let (conns, report) =
-                            connect_servers(&mcp_config, &tools, |key| secrets.resolve(key)).await;
-                        publish_mcp_report(&bus, &report);
-                        // The bridged tools hold their connections alive; this
-                        // guard can drop here without closing them.
-                        let connected = conns.names();
+                        let only = cmd.args.get("server").and_then(|s| s.as_str());
+                        Ok(
+                            connect_and_merge(&mcp_config, only, &tools, &mcp, &secrets, &bus)
+                                .await,
+                        )
+                    }
+                }),
+            )
+            .await;
+    }
+
+    // mcp.disconnect — drop a server's connection and unregister its tools,
+    // emitting mcp.disconnected. Requires `{ "server": name }`.
+    {
+        let mcp = mcp.clone();
+        let tools = tools.clone();
+        let bus = kernel.bus().clone();
+        kernel
+            .commands()
+            .register(
+                "mcp.disconnect",
+                Arc::new(move |cmd: Command| {
+                    let mcp = mcp.clone();
+                    let tools = tools.clone();
+                    let bus = bus.clone();
+                    async move {
+                        let server = cmd
+                            .args
+                            .get("server")
+                            .and_then(|s| s.as_str())
+                            .ok_or_else(|| {
+                                KernelError::command_failed("mcp.disconnect needs a `server`")
+                            })?
+                            .to_string();
+                        let removed = mcp
+                            .lock()
+                            .map_err(|_| {
+                                KernelError::command_failed("mcp connections lock poisoned")
+                            })?
+                            .disconnect(&server, &tools);
+                        if let Some(count) = removed {
+                            bus.publish(Event::new(
+                                "mcp.disconnected",
+                                serde_json::json!({ "server": server, "tools": count }),
+                            ));
+                        }
                         Ok(serde_json::json!({
-                            "connected": connected,
-                            "tools": report.tool_count(),
-                            "errors": report.errors.len(),
+                            "server": server,
+                            "disconnected": removed.is_some(),
+                            "tools_removed": removed.unwrap_or(0),
                         }))
                     }
                 }),
             )
             .await;
     }
+
+    // mcp.resources / mcp.prompts — enumerate the readable resources and prompt
+    // templates the connected servers expose, namespaced by server.
+    register_mcp_capability_commands(kernel, mcp).await;
 
     // workspace.reindex — (re)index a path, emitting symbols.updated per file.
     {
@@ -1132,5 +1450,204 @@ mod tests {
         assert!(conns.names().is_empty());
         assert_eq!(report.errors.len(), 1);
         assert!(report.errors[0].message.contains("gh_token"));
+    }
+
+    #[tokio::test]
+    async fn mcp_disconnect_of_unknown_server_is_a_noop() {
+        let ctrl = AppController::new(".").await;
+        let out = ctrl
+            .dispatch("mcp.disconnect", serde_json::json!({ "server": "ghost" }))
+            .await
+            .unwrap();
+        assert_eq!(out["disconnected"], false);
+        assert_eq!(out["tools_removed"], 0);
+    }
+
+    #[tokio::test]
+    async fn at_palette_lists_configured_servers_even_when_offline() {
+        // A configured server whose (bogus) command fails to launch still shows
+        // in the `@` palette, marked disconnected.
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join(".dadhichi");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("mcp.json"),
+            r#"{"servers":{"github":{"command":"definitely-not-a-real-binary-xyz"}}}"#,
+        )
+        .unwrap();
+
+        let mut ctrl = AppController::new(root.path()).await;
+        ctrl.ui_mut().palette.open();
+        ctrl.ui_mut().palette.push('@');
+        let items = ctrl.ui().palette.items();
+        let gh = items.iter().find(|i| i.label() == "github").unwrap();
+        assert!(gh.detail().unwrap().contains("offline"));
+    }
+
+    /// A loopback WebSocket MCP server exposing one tool, one resource, and one
+    /// prompt — enough to drive the whole app-level lifecycle offline.
+    async fn spawn_mock_mcp_server() -> String {
+        use futures::{SinkExt, StreamExt};
+        use tokio::net::TcpListener;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+                    while let Some(Ok(Message::Text(text))) = ws.next().await {
+                        let req: serde_json::Value = serde_json::from_str(text.as_str()).unwrap();
+                        let id = req.get("id").cloned().unwrap();
+                        let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
+                        let result = match method {
+                            "initialize" => serde_json::json!({
+                                "capabilities": { "tools": {}, "resources": {}, "prompts": {} }
+                            }),
+                            "tools/list" => serde_json::json!({
+                                "tools": [{ "name": "send_message", "description": "post", "inputSchema": {} }]
+                            }),
+                            "resources/list" => serde_json::json!({
+                                "resources": [{ "uri": "slack://general", "name": "general" }]
+                            }),
+                            "resources/read" => serde_json::json!({
+                                "contents": [{ "uri": "slack://general", "text": "hello" }]
+                            }),
+                            "prompts/list" => serde_json::json!({
+                                "prompts": [{ "name": "standup", "description": "daily" }]
+                            }),
+                            "prompts/get" => serde_json::json!({
+                                "messages": [{ "role": "user", "content": { "type": "text", "text": "x" } }]
+                            }),
+                            _ => serde_json::Value::Null,
+                        };
+                        let resp =
+                            serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result });
+                        ws.send(Message::text(resp.to_string())).await.unwrap();
+                    }
+                });
+            }
+        });
+        format!("ws://{addr}")
+    }
+
+    #[tokio::test]
+    async fn mcp_connection_lifecycle_end_to_end() {
+        let url = spawn_mock_mcp_server().await;
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join(".dadhichi");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("mcp.json"),
+            format!(r#"{{"servers":{{"slack":{{"url":"{url}","grants":["network"]}}}}}}"#),
+        )
+        .unwrap();
+
+        let mut ctrl = AppController::new(root.path()).await;
+
+        // Connected at boot: mcp.list reports it, with its bridged tool.
+        let list = ctrl
+            .dispatch("mcp.list", serde_json::json!({}))
+            .await
+            .unwrap();
+        let slack = find_server(&list, "slack");
+        assert_eq!(slack["connected"], true);
+        assert_eq!(slack["tool_count"], 1);
+        assert_eq!(slack["transport"], "websocket");
+        assert!(has_tool(&list, "slack.send_message"));
+
+        // The `@` palette shows it connected.
+        ctrl.ui_mut().palette.open();
+        ctrl.ui_mut().palette.push('@');
+        let entry = ctrl
+            .ui()
+            .palette
+            .items()
+            .into_iter()
+            .find(|i| i.label() == "slack")
+            .unwrap();
+        assert!(entry.detail().unwrap().contains("connected"));
+        ctrl.ui_mut().palette.close();
+
+        // Resources and prompts are reachable through the bridged connection.
+        let resources = ctrl
+            .dispatch("mcp.resources", serde_json::json!({}))
+            .await
+            .unwrap();
+        assert_eq!(resources["resources"][0]["uri"], "slack://general");
+        let read = ctrl
+            .dispatch(
+                "mcp.resource.read",
+                serde_json::json!({ "server": "slack", "uri": "slack://general" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(read["contents"]["contents"][0]["text"], "hello");
+
+        let prompts = ctrl
+            .dispatch("mcp.prompts", serde_json::json!({}))
+            .await
+            .unwrap();
+        assert_eq!(prompts["prompts"][0]["name"], "standup");
+        let got = ctrl
+            .dispatch(
+                "mcp.prompt.get",
+                serde_json::json!({ "server": "slack", "name": "standup" }),
+            )
+            .await
+            .unwrap();
+        assert!(got["prompt"]["messages"].is_array());
+
+        // Disconnect: the connection drops and its tool is unregistered.
+        let dis = ctrl
+            .dispatch("mcp.disconnect", serde_json::json!({ "server": "slack" }))
+            .await
+            .unwrap();
+        assert_eq!(dis["disconnected"], true);
+        assert_eq!(dis["tools_removed"], 1);
+
+        let list2 = ctrl
+            .dispatch("mcp.list", serde_json::json!({}))
+            .await
+            .unwrap();
+        assert_eq!(find_server(&list2, "slack")["connected"], false);
+        assert!(!has_tool(&list2, "slack.send_message"));
+
+        // A prompt call now fails cleanly — the server is no longer connected.
+        let err = ctrl
+            .dispatch(
+                "mcp.prompt.get",
+                serde_json::json!({ "server": "slack", "name": "standup" }),
+            )
+            .await;
+        assert!(err.is_err());
+
+        // Reconnect just that server via the targeted command.
+        let re = ctrl
+            .dispatch("mcp.connect", serde_json::json!({ "server": "slack" }))
+            .await
+            .unwrap();
+        assert_eq!(re["connected"], serde_json::json!(["slack"]));
+        assert!(has_tool(
+            &ctrl
+                .dispatch("mcp.list", serde_json::json!({}))
+                .await
+                .unwrap(),
+            "slack.send_message"
+        ));
+    }
+
+    fn find_server<'a>(list: &'a serde_json::Value, name: &str) -> &'a serde_json::Value {
+        list["servers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["name"] == name)
+            .unwrap()
+    }
+
+    fn has_tool(list: &serde_json::Value, tool: &str) -> bool {
+        list["tools"].as_array().unwrap().iter().any(|t| t == tool)
     }
 }

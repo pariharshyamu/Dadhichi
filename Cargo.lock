@@ -425,9 +425,11 @@ dependencies = [
  "dadhichi-security",
  "dadhichi-skill",
  "dadhichi-ui",
+ "futures",
  "serde_json",
  "tempfile",
  "tokio",
+ "tokio-tungstenite",
 ]
 
 [[package]]

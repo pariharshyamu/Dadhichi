@@ -247,11 +247,20 @@ dadhichi vault list                            # names only; values stay encrypt
 ```
 
 An unresolved secret refuses that server rather than launching it blank. If a
-server fails to start it's reported (`mcp.error`) but never fatal. `mcp.list`
-enumerates the configured servers (with their transport) and available tools;
-`mcp.connect` (re)launches them. The networked transports live behind the crate's
-`remote` feature (enabled in the app binary); a pure-offline build keeps only the
-stdio path.
+server fails to start it's reported (`mcp.error`) but never fatal. The networked
+transports live behind the crate's `remote` feature (enabled in the app binary);
+a pure-offline build keeps only the stdio path.
+
+Manage connections at runtime. `mcp.list` shows every configured server with its
+transport, connected state, and tool count; `mcp.connect { server? }` connects one
+or all; `mcp.disconnect { server }` drops a connection and unregisters exactly its
+tools. The `@` palette mode browses the servers and toggles each — connecting a
+disconnected one, disconnecting a connected one — and refreshes live.
+
+Tools aren't the only capability. A server's readable **resources** and prompt
+**templates** are bridged too: `mcp.resources` / `mcp.resource.read` pull in
+context, and `mcp.prompts` / `mcp.prompt.get` instantiate server-authored prompts —
+so an agent can read a server's data and reuse its prompts, not just call its tools.
 
 ## Workspace layout
 

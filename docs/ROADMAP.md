@@ -101,6 +101,17 @@ changes. `< 20 ms` latency and the GPU pipeline remain a GPU-shell concern.
       never sit in plaintext env vars. The running IDE only reads the vault; a
       `dadhichi vault set|list|remove` CLI (secret value read from stdin, file
       written `0600`) populates it out-of-process
+- [x] MCP connection lifecycle: `McpConnections` tracks each server's tools;
+      `mcp.disconnect { server }` drops the connection and unregisters exactly
+      those tools, `mcp.connect { server? }` connects one or all, and `mcp.list`
+      reports connected state + tool counts. An `@` palette mode browses the
+      servers and toggles each (connect a disconnected one, disconnect a
+      connected one), refreshing live on `mcp.connected`/`mcp.disconnected`
+- [x] MCP resources & prompts: `McpConnection` also speaks `resources/list`,
+      `resources/read`, `prompts/list`, and `prompts/get`, surfaced as the
+      `mcp.resources` / `mcp.resource.read` / `mcp.prompts` / `mcp.prompt.get`
+      commands — so an agent can read a server's context resources and
+      instantiate its prompt templates, not just call its tools
 - [x] DAP debugger service (`dadhichi-dap`): initialize, breakpoints, threads,
       continue, with adapter events republished as `dap.<event>`
 - [x] Workflow automation from natural language: `Workflow::parse` decomposes a
