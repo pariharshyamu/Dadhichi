@@ -10,16 +10,20 @@
 //!   tamper-evident.
 //! - [`injection`] — [`assess`](injection::assess) scores untrusted content for
 //!   prompt-injection and [`quarantine`](injection::quarantine) fences it.
+//! - [`resolver`] — a [`SecretResolver`] that turns `env:` / `vault:` references
+//!   into concrete secrets, so credentials stay out of config files.
 //!
 //! Together these back the permission prompts, credential handling, and
 //! untrusted-content guards the agents and plugins rely on.
 
 pub mod audit;
 pub mod injection;
+pub mod resolver;
 pub mod secrets;
 pub mod vault;
 
 pub use audit::{AuditEntry, AuditLog};
 pub use injection::{Assessment, assess, quarantine};
+pub use resolver::SecretResolver;
 pub use secrets::{Finding, contains_secret, scan};
 pub use vault::{Vault, VaultData, VaultError};

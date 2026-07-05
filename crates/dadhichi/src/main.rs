@@ -16,6 +16,7 @@
 
 mod cli;
 mod console;
+mod vault;
 
 use std::sync::Arc;
 
@@ -47,6 +48,10 @@ async fn main() {
         }
         cli::Command::Help => {
             println!("{}", cli::help_text());
+            return;
+        }
+        cli::Command::Vault(cmd) => {
+            vault::run(cmd);
             return;
         }
         cli::Command::Run { goal } => goal,

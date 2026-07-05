@@ -19,8 +19,45 @@ pub enum Command {
     Version,
     /// Print usage help and exit.
     Help,
+    /// Manage the encrypted credential vault, then exit.
+    Vault(VaultCommand),
     /// Boot the kernel and run the agent against `goal`.
     Run { goal: Option<String> },
+}
+
+/// A `dadhichi vault …` subcommand. Populates the encrypted store the MCP
+/// connectors read `${vault:NAME}` secrets from, so tokens never sit in
+/// plaintext environment variables or config files.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VaultCommand {
+    /// Store a secret under `name` (its value is read from stdin).
+    Set { name: String },
+    /// List the stored secret names (values stay encrypted).
+    List,
+    /// Remove the secret under `name`.
+    Remove { name: String },
+    /// Print vault usage.
+    Help,
+}
+
+/// Parse the tokens following `vault` into a [`VaultCommand`].
+fn parse_vault(args: &[String]) -> VaultCommand {
+    let named = |args: &[String]| match args.first() {
+        Some(name) if !name.is_empty() => Some(name.clone()),
+        _ => None,
+    };
+    match args.first().map(String::as_str) {
+        Some("set") => match named(&args[1..]) {
+            Some(name) => VaultCommand::Set { name },
+            None => VaultCommand::Help,
+        },
+        Some("remove" | "rm") => match named(&args[1..]) {
+            Some(name) => VaultCommand::Remove { name },
+            None => VaultCommand::Help,
+        },
+        Some("list" | "ls") => VaultCommand::List,
+        _ => VaultCommand::Help,
+    }
 }
 
 /// The one-line version string, e.g. `dadhichi 0.1.0`.
@@ -35,6 +72,7 @@ pub fn help_text() -> String {
 
 USAGE:
     {name} [OPTIONS] [GOAL]
+    {name} vault <set NAME | list | remove NAME>
 
 ARGS:
     <GOAL>    Natural-language goal for the built-in agent to plan and execute.
@@ -44,8 +82,19 @@ OPTIONS:
     -h, --help       Print this help text and exit.
     -V, --version    Print version information and exit.
 
+SUBCOMMANDS:
+    vault set NAME       Store a secret under NAME (value read from stdin).
+    vault list           List stored secret names (values stay encrypted).
+    vault remove NAME    Delete the secret under NAME.
+                         MCP servers in mcp.json reference these as
+                         `${{vault:NAME}}`, keeping tokens out of plaintext env.
+
 ENVIRONMENT:
     RUST_LOG              Tracing filter (e.g. `info`, `dadhichi=debug`). Defaults to `warn`.
+
+    Credential vault:
+    DADHICHI_VAULT_PASSPHRASE  Master passphrase that unlocks the vault.
+    DADHICHI_VAULT             Vault file path (default: ~/.dadhichi/vault.json).
 
     Model providers (set any to use a real model; none = offline mock):
     ANTHROPIC_API_KEY    Use the Anthropic Messages API.
@@ -73,11 +122,17 @@ where
     I: IntoIterator<Item = S>,
     S: Into<String>,
 {
+    let args: Vec<String> = args.into_iter().map(Into::into).collect();
+
+    // The `vault` subcommand claims the whole invocation.
+    if args.first().map(String::as_str) == Some("vault") {
+        return Command::Vault(parse_vault(&args[1..]));
+    }
+
     let mut goal: Option<String> = None;
     let mut options_done = false;
 
-    for raw in args {
-        let arg: String = raw.into();
+    for arg in args {
         if !options_done {
             match arg.as_str() {
                 "-h" | "--help" => return Command::Help,
@@ -154,5 +209,49 @@ mod tests {
         let text = help_text();
         assert!(text.contains("USAGE:"));
         assert!(text.contains(VERSION));
+        assert!(text.contains("vault set NAME"));
+    }
+
+    #[test]
+    fn vault_set_captures_the_name() {
+        assert_eq!(
+            parse(["vault", "set", "github"]),
+            Command::Vault(VaultCommand::Set {
+                name: "github".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn vault_list_and_remove_parse() {
+        assert_eq!(parse(["vault", "list"]), Command::Vault(VaultCommand::List));
+        assert_eq!(parse(["vault", "ls"]), Command::Vault(VaultCommand::List));
+        assert_eq!(
+            parse(["vault", "rm", "openai"]),
+            Command::Vault(VaultCommand::Remove {
+                name: "openai".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn vault_without_a_subcommand_or_name_is_help() {
+        assert_eq!(parse(["vault"]), Command::Vault(VaultCommand::Help));
+        assert_eq!(parse(["vault", "set"]), Command::Vault(VaultCommand::Help));
+        assert_eq!(
+            parse(["vault", "bogus"]),
+            Command::Vault(VaultCommand::Help)
+        );
+    }
+
+    #[test]
+    fn a_goal_named_vault_still_works_after_double_dash() {
+        // `--` forces goal parsing, so a literal goal can start with "vault".
+        assert_eq!(
+            parse(["--", "vault the crypt"]),
+            Command::Run {
+                goal: Some("vault the crypt".to_string())
+            }
+        );
     }
 }

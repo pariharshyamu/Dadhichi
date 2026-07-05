@@ -310,8 +310,16 @@ server (exposing its own workspace tools to other agents).
   **namespaces** them (`<server>.<tool>`), **stamps** them with the configured
   permissions, and registers them. Secrets never sit in the config: `env` and
   `headers` values may contain `${...}` placeholders resolved through an injected
-  closure (process env today, a vault tomorrow), so tokens are injected at
-  connect time, not committed.
+  closure, so tokens are injected at connect time, not committed.
+- **Secret resolution** (`dadhichi-security::SecretResolver`). The injected
+  closure resolves `env:NAME` from the process environment and `vault:NAME` from
+  the ChaCha20-Poly1305 credential [`Vault`], unlocked once at boot with
+  `$DADHICHI_VAULT_PASSPHRASE`. A missing or undecryptable secret resolves to
+  `None`, so the dependent server is refused rather than launched with a blank
+  credential. The running IDE only *reads* the vault; the `dadhichi vault
+  set|list|remove` CLI populates it in a separate short-lived process (secret
+  read from stdin, file written owner-only), so the long-running IDE never holds
+  the ability to rewrite credentials.
 - **Transports.** `McpConnection` is a facade over a pluggable `Transport`, so
   every high-level call (`handshake`, `list_tools`, `call_tool`) funnels through
   one id-correlated `request` primitive regardless of wire. Three ship: **stdio**

@@ -94,8 +94,13 @@ changes. `< 20 ms` latency and the GPU pipeline remain a GPU-shell concern.
       `url` is reached over **Streamable HTTP** (`http(s)://`, JSON or SSE reply,
       `Mcp-Session-Id` carried across calls) or **WebSocket** (`ws(s)://`) instead
       of a stdio subprocess — with `${...}`-resolved `headers` (e.g. a bearer
-      token) for hosted servers like Linear/Slack. Remaining: a vault-backed
-      secret resolver
+      token) for hosted servers like Linear/Slack
+- [x] Vault-backed secret resolver (`dadhichi-security::SecretResolver`): `${...}`
+      references in `mcp.json` resolve as `env:NAME` from the environment or
+      `vault:NAME` from the ChaCha20-Poly1305 credential vault, so tokens need
+      never sit in plaintext env vars. The running IDE only reads the vault; a
+      `dadhichi vault set|list|remove` CLI (secret value read from stdin, file
+      written `0600`) populates it out-of-process
 - [x] DAP debugger service (`dadhichi-dap`): initialize, breakpoints, threads,
       continue, with adapter events republished as `dap.<event>`
 - [x] Workflow automation from natural language: `Workflow::parse` decomposes a

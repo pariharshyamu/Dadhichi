@@ -24,6 +24,7 @@ use dadhichi_index::store::SqliteSymbolStore;
 use dadhichi_mcp::{
     EchoTool, GrantSet, McpConnections, McpServersConfig, Permission, ToolRegistry, connect_servers,
 };
+use dadhichi_security::{SecretResolver, Vault, VaultData};
 use dadhichi_skill::{
     SharedSkills, SkillAgent, SkillRegistry, SkillSpec, SkillTools, SkillWatchGuard, shared,
     watch_skills,
@@ -46,13 +47,46 @@ pub struct AppController {
     _mcp: McpConnections,
 }
 
-/// Resolve a `${key}` secret placeholder in an MCP server's env.
+/// Build the resolver for `${...}` secrets in `mcp.json`: `env:NAME` (and bare
+/// names) from the process environment, and `vault:NAME` from the encrypted
+/// credential vault.
 ///
-/// Supports `env:NAME` and bare names (both read the process environment).
-/// `vault:NAME` is reserved for a future credential-vault resolver.
-fn resolve_mcp_secret(key: &str) -> Option<String> {
-    let name = key.strip_prefix("env:").unwrap_or(key);
-    std::env::var(name).ok()
+/// The vault lives at `$DADHICHI_VAULT` (default `~/.dadhichi/vault.json`) and is
+/// unlocked with `$DADHICHI_VAULT_PASSPHRASE`. Without a passphrase, or if the
+/// file is absent, only `env:` references resolve — so tokens never have to sit
+/// in plaintext environment variables once the vault is set up.
+fn mcp_secret_resolver() -> Arc<SecretResolver> {
+    let passphrase = std::env::var("DADHICHI_VAULT_PASSPHRASE")
+        .ok()
+        .filter(|p| !p.is_empty());
+    let resolver = match (vault_path(), passphrase) {
+        (Some(path), Some(pass)) => match load_vault(&path, &pass) {
+            Some(vault) => SecretResolver::with_vault(vault),
+            None => SecretResolver::new(),
+        },
+        _ => SecretResolver::new(),
+    };
+    Arc::new(resolver)
+}
+
+/// The credential-vault path: `$DADHICHI_VAULT`, else `~/.dadhichi/vault.json`.
+fn vault_path() -> Option<PathBuf> {
+    let nonempty = |v: std::ffi::OsString| (!v.is_empty()).then_some(v);
+    if let Some(explicit) = std::env::var_os("DADHICHI_VAULT").and_then(nonempty) {
+        return Some(PathBuf::from(explicit));
+    }
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .and_then(nonempty)?;
+    Some(PathBuf::from(home).join(".dadhichi").join("vault.json"))
+}
+
+/// Load and unlock the vault persisted at `path`. Returns `None` if the file is
+/// absent or unparsable; a wrong passphrase is only detected later, on decrypt.
+fn load_vault(path: &Path, passphrase: &str) -> Option<Vault> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let data: VaultData = serde_json::from_str(&text).ok()?;
+    Some(Vault::with_data(passphrase, data))
 }
 
 impl std::fmt::Debug for AppController {
@@ -85,10 +119,12 @@ impl AppController {
         // MCP connectors: launch the servers declared in mcp.json and bridge
         // their tools into the shared registry (the registry is interior-mutable
         // so this reaches the tools every agent already holds). Secrets in the
-        // config are `${...}` placeholders resolved from the environment.
+        // config are `${...}` placeholders resolved from the environment or the
+        // encrypted credential vault.
         let (mcp_config, mcp_cfg_errors) = McpServersConfig::discover_in(&root);
+        let secrets = mcp_secret_resolver();
         let (mcp_conns, mcp_report) =
-            connect_servers(&mcp_config, &tools, resolve_mcp_secret).await;
+            connect_servers(&mcp_config, &tools, |key| secrets.resolve(key)).await;
 
         // The skill library: the built-ins plus any user/project skills
         // discovered on disk (~/.dadhichi/skills, <root>/.dadhichi/skills,
@@ -145,6 +181,7 @@ impl AppController {
             &orchestrator,
             &skills,
             &mcp_config,
+            &secrets,
             &model_id,
             &root,
             &indexer,
@@ -350,6 +387,7 @@ async fn register_commands(
     orchestrator: &Arc<Orchestrator>,
     skills: &SharedSkills,
     mcp_config: &McpServersConfig,
+    secrets: &Arc<SecretResolver>,
     model_id: &str,
     root: &Path,
     indexer: &Indexer,
@@ -581,6 +619,7 @@ async fn register_commands(
     {
         let mcp_config = mcp_config.clone();
         let tools = tools.clone();
+        let secrets = secrets.clone();
         let bus = kernel.bus().clone();
         kernel
             .commands()
@@ -589,10 +628,11 @@ async fn register_commands(
                 Arc::new(move |_cmd: Command| {
                     let mcp_config = mcp_config.clone();
                     let tools = tools.clone();
+                    let secrets = secrets.clone();
                     let bus = bus.clone();
                     async move {
                         let (conns, report) =
-                            connect_servers(&mcp_config, &tools, resolve_mcp_secret).await;
+                            connect_servers(&mcp_config, &tools, |key| secrets.resolve(key)).await;
                         publish_mcp_report(&bus, &report);
                         // The bridged tools hold their connections alive; this
                         // guard can drop here without closing them.
@@ -1023,5 +1063,74 @@ mod tests {
         assert!(out["servers"].as_array().unwrap().is_empty());
         // The built-in echo tool is always present.
         assert!(out["tools"].as_array().unwrap().iter().any(|t| t == "echo"));
+    }
+
+    #[test]
+    fn vault_file_round_trips_through_load_vault() {
+        // Persist an encrypted vault, then reopen it via the app loader.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vault.json");
+        let mut vault = Vault::new("s3cret-pass");
+        vault.put("github_token", "ghp_from_vault").unwrap();
+        std::fs::write(&path, serde_json::to_string(vault.data()).unwrap()).unwrap();
+
+        let resolver = SecretResolver::with_vault(load_vault(&path, "s3cret-pass").unwrap());
+        assert_eq!(
+            resolver.resolve("vault:github_token").as_deref(),
+            Some("ghp_from_vault")
+        );
+
+        // A missing file yields no vault (env-only resolution).
+        assert!(load_vault(&dir.path().join("absent.json"), "x").is_none());
+    }
+
+    #[tokio::test]
+    async fn vault_secret_is_injected_into_a_connector() {
+        // A ${vault:...} reference in mcp.json is resolved from the vault before
+        // the server is launched. The command is bogus so the launch fails — but
+        // crucially NOT with an "unresolved secret" error, proving the token was
+        // injected.
+        let mut vault = Vault::new("pw");
+        vault.put("gh_token", "ghp_secret").unwrap();
+        let resolver = SecretResolver::with_vault(vault);
+
+        let cfg = McpServersConfig::from_json(
+            r#"{"servers":{"github":{
+                "command":"definitely-not-a-real-binary-xyz",
+                "env":{"GITHUB_TOKEN":"${vault:gh_token}"},
+                "grants":["network"]
+            }}}"#,
+        )
+        .unwrap();
+        let registry = ToolRegistry::new();
+        let (_conns, report) = connect_servers(&cfg, &registry, |key| resolver.resolve(key)).await;
+
+        assert_eq!(report.errors.len(), 1);
+        assert!(
+            !report.errors[0].message.contains("unresolved"),
+            "vault secret was not resolved: {}",
+            report.errors[0].message
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_vault_secret_fails_the_connector_cleanly() {
+        // With no vault, a ${vault:...} reference cannot resolve: the server is
+        // rejected before launch with an unresolved-secret error, never run with
+        // a blank credential.
+        let resolver = SecretResolver::new();
+        let cfg = McpServersConfig::from_json(
+            r#"{"servers":{"github":{
+                "command":"echo",
+                "env":{"GITHUB_TOKEN":"${vault:gh_token}"}
+            }}}"#,
+        )
+        .unwrap();
+        let registry = ToolRegistry::new();
+        let (conns, report) = connect_servers(&cfg, &registry, |key| resolver.resolve(key)).await;
+
+        assert!(conns.names().is_empty());
+        assert_eq!(report.errors.len(), 1);
+        assert!(report.errors[0].message.contains("gh_token"));
     }
 }

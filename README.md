@@ -231,9 +231,23 @@ bearer token), which support the same `${...}` secret placeholders as `env`.
 }
 ```
 
-Secrets never live in the config: `${env:NAME}` placeholders are resolved from
-the environment at launch (a vault-backed resolver is the planned extension). If
-a server fails to start it's reported (`mcp.error`) but never fatal. `mcp.list`
+Secrets never live in the config. A `${...}` placeholder resolves either as
+`env:NAME` (from the environment) or `vault:NAME` (from an encrypted
+ChaCha20-Poly1305 credential vault), so tokens need never sit in plaintext env
+vars. Populate the vault out-of-process — the running IDE only reads it:
+
+```sh
+export DADHICHI_VAULT_PASSPHRASE='…'          # unlocks ~/.dadhichi/vault.json
+printf %s "$GITHUB_TOKEN" | dadhichi vault set github_token
+dadhichi vault list                            # names only; values stay encrypted
+```
+
+```json
+"env": { "GITHUB_PERSONAL_ACCESS_TOKEN": "${vault:github_token}" }
+```
+
+An unresolved secret refuses that server rather than launching it blank. If a
+server fails to start it's reported (`mcp.error`) but never fatal. `mcp.list`
 enumerates the configured servers (with their transport) and available tools;
 `mcp.connect` (re)launches them. The networked transports live behind the crate's
 `remote` feature (enabled in the app binary); a pure-offline build keeps only the
