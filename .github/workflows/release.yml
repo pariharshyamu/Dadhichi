@@ -138,6 +138,11 @@ jobs:
           find artifacts -type f -exec cp {} release/ \;
           ls -la release
       - name: Render Homebrew formula
+        # The formula's sha256 is of the tag's source tarball, which only exists
+        # once the release is published — so on a workflow_dispatch run (no tag
+        # yet) this can't render. It's a convenience asset; never let it block
+        # the release of the binaries.
+        continue-on-error: true
         run: |
           tag="${{ github.event.inputs.tag || github.ref_name }}"
           bash packaging/homebrew/update-formula.sh "$tag"
