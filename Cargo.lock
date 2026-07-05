@@ -406,6 +406,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "dadhichi-app"
+version = "0.1.0"
+dependencies = [
+ "dadhichi-agent",
+ "dadhichi-ai",
+ "dadhichi-core",
+ "dadhichi-index",
+ "dadhichi-mcp",
+ "dadhichi-ui",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "dadhichi-cache"
 version = "0.1.0"
 dependencies = [
@@ -553,11 +568,13 @@ name = "dadhichi-tui"
 version = "0.1.0"
 dependencies = [
  "crossterm",
+ "dadhichi-app",
  "dadhichi-core",
  "dadhichi-git",
  "dadhichi-ui",
  "ratatui",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]

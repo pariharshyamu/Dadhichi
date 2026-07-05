@@ -14,6 +14,7 @@
 //! dadhichi "your goal here"    # run the agent against your own goal
 //! ```
 
+mod cli;
 mod console;
 
 use std::sync::Arc;
@@ -35,6 +36,21 @@ use dadhichi_workspace::Workspace;
 
 #[tokio::main]
 async fn main() {
+    // Fast-path flags before booting anything: packaging tools and installers
+    // invoke `--version`/`--help` and expect an instant, side-effect-free
+    // response on stdout with a zero exit code.
+    let goal_override = match cli::parse(std::env::args().skip(1)) {
+        cli::Command::Version => {
+            println!("{}", cli::version_line());
+            return;
+        }
+        cli::Command::Help => {
+            println!("{}", cli::help_text());
+            return;
+        }
+        cli::Command::Run { goal } => goal,
+    };
+
     init_tracing();
 
     // 1. Boot the microkernel.
@@ -123,8 +139,7 @@ async fn main() {
     }
 
     // 4. Run an agent.
-    let goal = std::env::args()
-        .nth(1)
+    let goal = goal_override
         .unwrap_or_else(|| "Explain what makes Dadhichi an agent-native IDE.".to_string());
     println!("dadhichi ▸ goal: {goal}\n");
 

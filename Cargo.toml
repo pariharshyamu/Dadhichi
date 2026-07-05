@@ -20,6 +20,7 @@ members = [
     "crates/dadhichi-security",
     "crates/dadhichi-telemetry",
     "crates/dadhichi-wasm",
+    "crates/dadhichi-app",
     "crates/dadhichi-plugin",
     "crates/dadhichi",
 ]
@@ -73,6 +74,7 @@ dadhichi-collab = { path = "crates/dadhichi-collab" }
 dadhichi-security = { path = "crates/dadhichi-security" }
 dadhichi-telemetry = { path = "crates/dadhichi-telemetry" }
 dadhichi-wasm = { path = "crates/dadhichi-wasm" }
+dadhichi-app = { path = "crates/dadhichi-app" }
 dadhichi-plugin = { path = "crates/dadhichi-plugin" }
 
 [profile.release]

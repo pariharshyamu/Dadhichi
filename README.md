@@ -33,6 +33,32 @@ secret scan, audit log, injection defense), and observability. See
 autonomous agentic IDE, and [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for
 the complete system design.
 
+## Install
+
+One-line installers detect your OS/architecture, download the matching release
+archive, verify its SHA-256 checksum, and install the `dadhichi` binary:
+
+```bash
+# Linux / macOS
+curl -fsSL https://raw.githubusercontent.com/pariharshyamu/Dadhichi/main/packaging/install.sh | sh
+```
+
+```powershell
+# Windows (PowerShell)
+irm https://raw.githubusercontent.com/pariharshyamu/Dadhichi/main/packaging/install.ps1 | iex
+```
+
+Or install via Homebrew:
+
+```bash
+brew tap pariharshyamu/dadhichi https://github.com/pariharshyamu/Dadhichi
+brew install dadhichi          # or: brew install --HEAD dadhichi
+```
+
+Native packages (`.deb`, `.rpm`, macOS `.app`, Windows `.msi`) and per-platform
+tarballs are attached to each [GitHub Release](https://github.com/pariharshyamu/Dadhichi/releases).
+See [`docs/PACKAGING.md`](docs/PACKAGING.md) for the full packaging story.
+
 ## Quick start
 
 ```bash
@@ -95,12 +121,16 @@ crates/
 ├── dadhichi-security    # credential vault, secret scan, audit log, injection guard
 ├── dadhichi-telemetry   # metrics registry + crash reporting
 ├── dadhichi-wasm        # sandboxed WASM plugin runtime (wasmi, fuel-metered)
+├── dadhichi-app         # application controller: wires kernel + agents + UI live
 ├── dadhichi-plugin      # plugin SDK: manifest, capabilities, signed marketplace
 └── dadhichi             # runtime binary: wires the kernel + Agent Console
 ```
 
-Launch the terminal shell with `cargo run -p dadhichi-tui`, or render a
-headless snapshot of it with `cargo run -p dadhichi-tui --example snapshot`.
+Launch the live terminal shell with `cargo run -p dadhichi-tui` — Ctrl-P opens
+the command palette, which dispatches real kernel commands (run an agent,
+re-index the workspace) whose progress streams into the panels. Render a
+headless snapshot with `cargo run -p dadhichi-tui --example live` (the wired
+stack) or `--example snapshot` (the static layout).
 
 Each crate has its own crate-level Rustdoc (`cargo doc --open`) and unit tests.
 

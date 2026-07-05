@@ -118,6 +118,27 @@ impl Subscription {
         }
     }
 
+    /// Non-blocking receive of the next matching event, if one is buffered.
+    ///
+    /// Returns `Ok(None)` when nothing is currently available (rather than
+    /// awaiting), which lets a synchronous render loop drain pending events each
+    /// frame without blocking. `Lagged` is surfaced once, then delivery resumes.
+    pub fn try_recv(&mut self) -> Result<Option<Event>, RecvError> {
+        loop {
+            match self.rx.try_recv() {
+                Ok(event) => {
+                    if self.matches(&event) {
+                        return Ok(Some(event));
+                    }
+                    // Not our topic — check the next buffered event.
+                }
+                Err(broadcast::error::TryRecvError::Empty) => return Ok(None),
+                Err(broadcast::error::TryRecvError::Closed) => return Err(RecvError::Closed),
+                Err(broadcast::error::TryRecvError::Lagged(n)) => return Err(RecvError::Lagged(n)),
+            }
+        }
+    }
+
     fn matches(&self, event: &Event) -> bool {
         match &self.filter {
             Some(topic) => &event.topic == topic,

@@ -34,3 +34,39 @@ serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 wat = "1"
+
+# ── Linux packaging ──────────────────────────────────────────────────────────
+# `cargo deb` (https://github.com/kornelski/cargo-deb) reads this section to
+# build a .deb straight from the release binary. The desktop entry, man page,
+# AppStream metainfo, and docs are installed to their FHS locations.
+[package.metadata.deb]
+maintainer = "Dadhichi contributors"
+copyright = "2026, Dadhichi contributors"
+license-file = ["../../LICENSE", "0"]
+extended-description = """\
+Dadhichi is a modern, AI-first, agent-native IDE written in Rust. It is built \
+around a microkernel with an event bus, a model-agnostic AI runtime, a \
+permission-gated MCP tool layer, autonomous agents, and sandboxed WASM \
+plugins. Everything runs offline by default."""
+section = "devel"
+priority = "optional"
+assets = [
+    ["target/release/dadhichi", "usr/bin/", "755"],
+    ["../../packaging/linux/dadhichi.desktop", "usr/share/applications/", "644"],
+    ["../../packaging/linux/dadhichi.metainfo.xml", "usr/share/metainfo/", "644"],
+    ["../../packaging/linux/dadhichi.1", "usr/share/man/man1/", "644"],
+    ["../../README.md", "usr/share/doc/dadhichi/README.md", "644"],
+]
+
+# ── RPM packaging ────────────────────────────────────────────────────────────
+# `cargo generate-rpm` (https://github.com/cat-in-136/cargo-generate-rpm)
+# builds an .rpm from the same release binary and shared assets.
+[package.metadata.generate-rpm]
+assets = [
+    { source = "target/release/dadhichi", dest = "/usr/bin/dadhichi", mode = "755" },
+    { source = "packaging/linux/dadhichi.desktop", dest = "/usr/share/applications/dadhichi.desktop", mode = "644" },
+    { source = "packaging/linux/dadhichi.metainfo.xml", dest = "/usr/share/metainfo/dadhichi.metainfo.xml", mode = "644" },
+    { source = "packaging/linux/dadhichi.1", dest = "/usr/share/man/man1/dadhichi.1", mode = "644" },
+    { source = "README.md", dest = "/usr/share/doc/dadhichi/README.md", mode = "644" },
+    { source = "LICENSE", dest = "/usr/share/doc/dadhichi/LICENSE", mode = "644" },
+]
