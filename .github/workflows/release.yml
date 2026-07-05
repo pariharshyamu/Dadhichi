@@ -23,6 +23,10 @@ jobs:
   build:
     name: build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
+    # The aarch64 Linux leg is a cross-compile of heavy C deps (RocksDB, SQLite,
+    # libgit2); treat its failure as non-fatal so it can never block the release
+    # of the natively-built targets (Windows, macOS, x86_64 Linux).
+    continue-on-error: ${{ matrix.cross || false }}
     strategy:
       fail-fast: false
       matrix:
@@ -87,6 +91,9 @@ jobs:
   linux-packages:
     name: deb + rpm
     runs-on: ubuntu-latest
+    # Distro packages are a convenience; a failure here must not block the
+    # release of the portable archives.
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust toolchain
@@ -112,6 +119,9 @@ jobs:
   release:
     name: publish release
     needs: [build, linux-packages]
+    # Publish whatever built: run even if a non-critical build leg (aarch64
+    # Linux, distro packages) failed, so the proven targets still ship.
+    if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -121,6 +131,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: artifacts
+          merge-multiple: true
       - name: Flatten
         run: |
           mkdir -p release
