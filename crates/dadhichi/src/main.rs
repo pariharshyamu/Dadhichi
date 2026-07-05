@@ -23,7 +23,7 @@ use dadhichi_agent::{
     Agent, AgentContext, ConversationalAgent, Orchestrator, SemanticMemory, SpecialistAgent,
     Workflow,
 };
-use dadhichi_ai::{MockEmbedder, MockProvider, ModelRouter};
+use dadhichi_ai::{MockEmbedder, ProviderPlan};
 use dadhichi_cache::RocksBlobCache;
 use dadhichi_collab::Rga;
 use dadhichi_core::Kernel;
@@ -58,13 +58,16 @@ async fn main() {
     println!("dadhichi ▸ kernel booted");
 
     // 2. Register core services into the kernel's service registry.
-    let router = {
-        let mut r = ModelRouter::new();
-        // Offline-first: the mock provider needs no network. Real providers
-        // (Anthropic, OpenAI, Ollama, …) register here behind the same trait.
-        r.register(Arc::new(MockProvider::default()));
-        Arc::new(r)
-    };
+    //
+    // Providers are resolved from the environment: set `ANTHROPIC_API_KEY`,
+    // `OPENAI_API_KEY` (with optional `OPENAI_BASE_URL`), `OPENROUTER_API_KEY`,
+    // or `OLLAMA_HOST` to use a real model; `DADHICHI_PROVIDER` picks the
+    // default when several are set. With none set, the offline mock provider is
+    // used so the whole run stays local and needs no keys.
+    let plan = ProviderPlan::from_env();
+    println!("dadhichi ▸ model provider: {}", plan.summary());
+    let model_id = plan.default_model();
+    let router = Arc::new(plan.build_router());
 
     let tools = {
         let mut t = ToolRegistry::new();
@@ -150,7 +153,7 @@ async fn main() {
         kernel.bus().clone(),
     );
 
-    let agent = ConversationalAgent::default();
+    let agent = ConversationalAgent::new(&model_id);
     match agent.run(&goal, &mut ctx).await {
         Ok(outcome) => {
             println!(
@@ -178,7 +181,7 @@ async fn main() {
         SpecialistAgent::git(),
         SpecialistAgent::security(),
     ] {
-        orchestrator.register(Arc::new(specialist));
+        orchestrator.register(Arc::new(specialist.with_model(&model_id)));
     }
 
     let request = "Refactor authentication, write tests, and update the documentation";

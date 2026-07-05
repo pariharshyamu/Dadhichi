@@ -45,7 +45,16 @@ OPTIONS:
     -V, --version    Print version information and exit.
 
 ENVIRONMENT:
-    RUST_LOG         Tracing filter (e.g. `info`, `dadhichi=debug`). Defaults to `warn`.
+    RUST_LOG              Tracing filter (e.g. `info`, `dadhichi=debug`). Defaults to `warn`.
+
+    Model providers (set any to use a real model; none = offline mock):
+    ANTHROPIC_API_KEY    Use the Anthropic Messages API.
+    OPENAI_API_KEY       Use OpenAI (OPENAI_BASE_URL overrides the endpoint for
+                         Azure / vLLM / LM Studio / proxies).
+    OPENROUTER_API_KEY   Use the OpenRouter aggregator.
+    OLLAMA_HOST          Use a local Ollama server at this host (no key needed).
+    DADHICHI_PROVIDER    Pick the default provider when several are configured
+                         (anthropic | openai | openrouter | ollama | mock).
 
 Everything runs offline by default via the built-in mock model provider, so no
 API keys are required to try it. See https://github.com/pariharshyamu/Dadhichi.",

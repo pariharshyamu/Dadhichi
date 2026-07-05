@@ -21,6 +21,7 @@
 //! ```
 
 pub mod cache;
+pub mod config;
 pub mod cost;
 pub mod embedding;
 pub mod provider;
@@ -30,6 +31,7 @@ pub mod router;
 pub mod types;
 
 pub use cache::{CachingModel, CompletionCache};
+pub use config::{ProviderPlan, ProviderSpec};
 pub use cost::{CostTable, ModelPricing};
 pub use embedding::{EmbeddingModel, MockEmbedder};
 pub use provider::{LanguageModel, MockProvider, ModelCapabilities, ProviderError, ProviderResult};
