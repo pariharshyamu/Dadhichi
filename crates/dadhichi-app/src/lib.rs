@@ -294,6 +294,29 @@ async fn register_commands(
             .await;
     }
 
+    // skill.list — enumerate the available skills as specs (name, description,
+    // required permissions, tool scope, step count) for a palette or picker.
+    {
+        let skills = skills.clone();
+        kernel
+            .commands()
+            .register(
+                "skill.list",
+                Arc::new(move |_cmd: Command| {
+                    let skills = skills.clone();
+                    async move {
+                        let specs = serde_json::to_value(skills.list())
+                            .map_err(KernelError::command_failed)?;
+                        Ok(serde_json::json!({
+                            "count": skills.len(),
+                            "skills": specs,
+                        }))
+                    }
+                }),
+            )
+            .await;
+    }
+
     // workspace.reindex — (re)index a path, emitting symbols.updated per file.
     {
         let indexer = indexer.clone();
@@ -454,6 +477,31 @@ mod tests {
             .dispatch("skill.run", serde_json::json!({ "skill": "nope" }))
             .await;
         assert!(err.is_err());
+    }
+
+    #[tokio::test]
+    async fn skill_list_returns_specs() {
+        let ctrl = AppController::new(".").await;
+        let out = ctrl
+            .dispatch("skill.list", serde_json::json!({}))
+            .await
+            .unwrap();
+
+        assert!(out["count"].as_u64().unwrap() >= 5);
+        let specs = out["skills"].as_array().unwrap();
+        // Each spec carries the discovery metadata a picker needs.
+        let explain = specs
+            .iter()
+            .find(|s| s["name"] == "explain")
+            .expect("explain skill listed");
+        assert!(explain["description"].is_string());
+        assert!(explain["permissions"].is_array());
+        assert!(explain["tools"].is_object());
+        assert!(explain["steps"].is_number());
+
+        // A skill that declares a permission surfaces it in the spec.
+        let review = specs.iter().find(|s| s["name"] == "code-review").unwrap();
+        assert_eq!(review["permissions"][0], "read_workspace");
     }
 
     #[tokio::test]

@@ -236,8 +236,9 @@ permissions up front (refusing with a `skill.denied` event if any are missing),
 executes tool steps through `ScopedTools`, consults the model under the skill's
 instructions, then verifies — emitting `skill.equipped`, `skill.tool.invoked`,
 `skill.completed`, etc. `SkillRegistry` catalogues skills; each is exposed to
-the orchestrator as a `skill:<name>` agent and to the UI through the `skill.run`
-command, granted exactly the permissions it declares.
+the orchestrator as a `skill:<name>` agent and to the UI through two commands:
+`skill.list` (enumerate skills as `SkillSpec`s for a picker) and `skill.run`
+(equip one, granted exactly the permissions it declares).
 
 Skills are plain data, so besides code authoring they load from **JSON
 manifests** on disk: `~/.dadhichi/skills`, `<workspace>/.dadhichi/skills`, and
