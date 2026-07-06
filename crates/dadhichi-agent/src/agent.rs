@@ -137,6 +137,14 @@ pub trait Agent: Send + Sync {
     /// A stable, human-readable name, e.g. `"code-agent"`.
     fn name(&self) -> &str;
 
+    /// A short, action-oriented description of what this agent is good at, used
+    /// to help a delegating agent (or the user) decide when to hand it a task —
+    /// e.g. "Write and complete new code from a specification.". Defaults to
+    /// empty; concrete agents should override it to be delegable via `task`.
+    fn description(&self) -> &str {
+        ""
+    }
+
     /// Pursue `goal`, driving `ctx` and returning an outcome.
     async fn run(&self, goal: &str, ctx: &mut AgentContext) -> Result<AgentOutcome, AgentError>;
 }

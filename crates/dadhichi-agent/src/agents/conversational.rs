@@ -43,6 +43,10 @@ impl Agent for ConversationalAgent {
         &self.name
     }
 
+    fn description(&self) -> &str {
+        "General-purpose assistant for open-ended questions and coding help."
+    }
+
     async fn run(&self, goal: &str, ctx: &mut AgentContext) -> Result<AgentOutcome, AgentError> {
         // 1. Plan.
         ctx.emit("agent.status", serde_json::json!({ "status": "planning" }));

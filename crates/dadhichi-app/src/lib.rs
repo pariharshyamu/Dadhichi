@@ -15,7 +15,7 @@
 //! events back into the Agent Console panel — all through the same bus.
 
 use dadhichi_agent::{
-    Agent, AgentContext, Orchestrator, SpecialistAgent, agents::ConversationalAgent,
+    Agent, AgentContext, Orchestrator, SpecialistAgent, TaskTool, agents::ConversationalAgent,
 };
 use dadhichi_ai::{ModelRouter, ProviderPlan};
 use dadhichi_core::{Command, Event, Kernel, KernelError, RecvError, Subscription};
@@ -233,6 +233,17 @@ impl AppController {
             }
             Arc::new(orch)
         };
+
+        // Register the `task` delegation tool so any agent (or a model tool-loop)
+        // can spawn a specialist with an isolated context. Sub-agents run under a
+        // read-only grant, matching the default top-level run.
+        tools.register(Arc::new(TaskTool::new(
+            orchestrator.clone(),
+            router.clone(),
+            &tools,
+            kernel.bus().clone(),
+            GrantSet::from_iter([Permission::ReadWorkspace]),
+        )));
 
         register_commands(
             &kernel,
@@ -819,6 +830,45 @@ async fn register_commands(
             .await;
     }
 
+    // agent.spawn — delegate a goal to a specialist that runs in an isolated
+    // context, returning only its summary. Args: `{ agent, goal }`. This drives
+    // the registered `task` tool, so the delegation streams the same
+    // agent.delegated / agent.* events to the console.
+    {
+        let tools = tools.clone();
+        kernel
+            .commands()
+            .register(
+                "agent.spawn",
+                Arc::new(move |cmd: Command| {
+                    let tools = tools.clone();
+                    async move {
+                        let agent = cmd
+                            .args
+                            .get("agent")
+                            .and_then(|a| a.as_str())
+                            .unwrap_or("code-agent")
+                            .to_string();
+                        let goal = cmd
+                            .args
+                            .get("goal")
+                            .and_then(|g| g.as_str())
+                            .unwrap_or("Describe what you would do.")
+                            .to_string();
+                        tools
+                            .invoke(
+                                TaskTool::NAME,
+                                serde_json::json!({ "subagent_type": agent, "description": goal }),
+                                &GrantSet::none(),
+                            )
+                            .await
+                            .map_err(KernelError::command_failed)
+                    }
+                }),
+            )
+            .await;
+    }
+
     // skill.run — equip a skill by name and run it with exactly the permissions
     // it declares, so its `skill.*` progress streams to the console. The skill
     // is fetched from the (reloadable) registry and a fresh agent is built per
@@ -1382,6 +1432,58 @@ mod tests {
         assert!(names.contains(&"skill.import"));
         assert!(names.contains(&"mcp.connectors"));
         assert!(names.contains(&"mcp.add"));
+        assert!(names.contains(&"agent.spawn"));
+    }
+
+    #[tokio::test]
+    async fn task_tool_is_registered_and_lists_specialists() {
+        let ctrl = AppController::new(".").await;
+        let out = ctrl
+            .dispatch("mcp.list", serde_json::json!({}))
+            .await
+            .unwrap();
+        assert!(has_tool(&out, "task"), "task tool registered: {out}");
+    }
+
+    #[tokio::test]
+    async fn agent_spawn_delegates_to_an_isolated_specialist() {
+        let mut ctrl = AppController::new(".").await;
+        let out = ctrl
+            .dispatch(
+                "agent.spawn",
+                serde_json::json!({ "agent": "test-agent", "goal": "cover the parser" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(out["subagent_type"], "test-agent");
+        assert_eq!(out["status"], "Completed");
+        assert!(
+            out["summary"]
+                .as_str()
+                .unwrap()
+                .contains("cover the parser")
+        );
+
+        // The delegation surfaced in the console via agent.delegated.
+        ctrl.pump();
+        assert!(
+            ctrl.ui().chat.iter().any(|l| l.contains("agent.delegated")),
+            "chat: {:?}",
+            ctrl.ui().chat
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_spawn_rejects_unknown_specialist() {
+        let ctrl = AppController::new(".").await;
+        let err = ctrl
+            .dispatch(
+                "agent.spawn",
+                serde_json::json!({ "agent": "ghost-agent", "goal": "x" }),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("ghost-agent") || err.to_string().contains("unknown"));
     }
 
     #[tokio::test]

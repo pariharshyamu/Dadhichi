@@ -25,7 +25,11 @@ console) rendered by a real ratatui terminal frontend, plus integrated
 pseudo-terminal and Git view-models. Phase 4 (Autonomous Agents) —
 **complete**: specialist agents, an orchestrator with parallel runs and
 checkpoints, natural-language workflow automation, reflection/verification, a
-live stdio MCP client with tool bridging, and a DAP debugger client. Phase 5
+live stdio MCP client with tool bridging, and a DAP debugger client. Agents can
+**delegate** self-contained sub-tasks to a specialist via the `task` tool (or
+the `agent.spawn` command), which runs it in an **isolated context window** —
+only the task goes in and only the summary comes back — so a delegate's
+intermediate reasoning never pollutes the caller's context. Phase 5
 (Extensibility & Collaboration) — **complete**: a sandboxed WASM plugin runtime,
 a signed extension marketplace, CRDT collaboration, a security suite (vault,
 secret scan, audit log, injection defense), and observability. See

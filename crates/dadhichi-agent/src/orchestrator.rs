@@ -77,6 +77,38 @@ impl Orchestrator {
         names
     }
 
+    /// Every registered agent as a `(name, description)` pair, sorted by name —
+    /// the roster a `task` delegation tool advertises so a caller can pick which
+    /// specialist to hand a sub-task to.
+    pub fn sub_agents(&self) -> Vec<(String, String)> {
+        let mut roster: Vec<(String, String)> = self
+            .agents
+            .values()
+            .map(|a| (a.name().to_string(), a.description().to_string()))
+            .collect();
+        roster.sort_by(|a, b| a.0.cmp(&b.0));
+        roster
+    }
+
+    /// Run `name` against `goal` in an **isolated context**: a fresh fork of
+    /// `template` with its own empty memory and a new correlation id, so the
+    /// sub-agent neither sees nor mutates the caller's working state. Only the
+    /// returned [`AgentOutcome`] flows back — the deep-agent "context quarantine"
+    /// pattern that keeps a delegate's intermediate reasoning out of the caller's
+    /// context window.
+    pub async fn run_isolated(
+        &self,
+        name: &str,
+        goal: &str,
+        template: &AgentContext,
+    ) -> Result<AgentOutcome, AgentError> {
+        let agent = self
+            .agent(name)
+            .ok_or_else(|| AgentError::UnknownAgent(name.to_string()))?;
+        let mut isolated = template.fork();
+        agent.run(goal, &mut isolated).await
+    }
+
     /// Run one agent by name against `goal`, using `ctx`.
     pub async fn run(
         &self,
