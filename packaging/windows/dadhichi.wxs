@@ -5,7 +5,7 @@
   Build (on Windows, with the WiX toolset installed):
     wix build packaging/windows/dadhichi.wxs ^
       -d BinDir=target\release ^
-      -d Version=0.1.6 ^
+      -d Version=0.1.7 ^
       -o dist\dadhichi-x86_64.msi
 
   The BinDir and Version values are supplied at build time by the release

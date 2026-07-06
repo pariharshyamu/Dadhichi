@@ -33,7 +33,11 @@ intermediate reasoning never pollutes the caller's context. Consequential tools
 (running a shell command, writing the workspace) pass through a **human-in-the-
 loop approval gate** — the run pauses for a `y/n` prompt before anything
 executes — and long runs stay inside the model's context window via automatic
-**conversation compaction** at ~85% of the budget. Phase 5
+**conversation compaction** at ~85% of the budget. Agents and their delegates
+share a **sandboxed virtual filesystem** (a `StateStore` backend confined to the
+workspace root by a path-jail, with `fs.read`/`fs.write`/`fs.ls` tools for
+context offloading) and **memory tools** (`memory.write`/`memory.recall`) for
+recording and recalling facts across a run. Phase 5
 (Extensibility & Collaboration) — **complete**: a sandboxed WASM plugin runtime,
 a signed extension marketplace, CRDT collaboration, a security suite (vault,
 secret scan, audit log, injection defense), and observability. See
@@ -339,6 +343,19 @@ inside the model's context window automatically — once the conversation crosse
 ~85% of the budget the agent summarises it in place (an `agent.compacted` line
 notes the before/after token estimate). Tune it with `DADHICHI_CONTEXT_WINDOW`
 (tokens) and `DADHICHI_COMPACT_FRACTION` (`0.0–1.0`).
+
+Agents work against a **sandboxed virtual filesystem** rather than carrying
+everything in the prompt. A `StateStore` backend (a workspace-backed store
+confined to the project root by a `PathJail`, so a write can't escape it) is
+exposed through `fs.read` / `fs.write` / `fs.ls` tools — write a plan or an
+intermediate result to a path, read it back later. A shell command
+(`terminal.run`) is likewise pinned to the workspace root. Alongside the files,
+`memory.write` / `memory.recall` tools let an agent record and recall facts by
+keyword. All of these are shared with the sub-agents spawned by the `task` tool,
+so a delegate can read the files and notes the caller left it and hand results
+back through shared state — while its *conversation* stays quarantined. (`fs`
+writes require `write_workspace`, so they hit the same approval gate; delegates
+run read-only by default.)
 
 Install your own **skills** by dropping a JSON manifest into `~/.dadhichi/skills`
 (the running TUI reloads it live), or with the CLI:

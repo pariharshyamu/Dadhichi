@@ -15,15 +15,17 @@
 //! events back into the Agent Console panel — all through the same bus.
 
 use dadhichi_agent::{
-    Agent, AgentContext, Orchestrator, SpecialistAgent, TaskTool, agents::ConversationalAgent,
+    Agent, AgentContext, MemoryRecallTool, MemoryWriteTool, Orchestrator, SpecialistAgent,
+    TaskTool, agents::ConversationalAgent, shared_memory,
 };
 use dadhichi_ai::{ModelRouter, ProviderPlan};
 use dadhichi_core::{Command, Event, Kernel, KernelError, RecvError, Subscription};
 use dadhichi_index::Indexer;
 use dadhichi_index::store::SqliteSymbolStore;
 use dadhichi_mcp::{
-    ApprovalPolicy, EchoTool, GrantSet, McpConnection, McpConnections, McpServersConfig,
-    Permission, PermissionMode, TerminalTool, ToolRegistry, connect_servers, connector,
+    ApprovalPolicy, EchoTool, FsListTool, FsReadTool, FsWriteTool, GrantSet, McpConnection,
+    McpConnections, McpServersConfig, Permission, PermissionMode, StateStore, TerminalTool,
+    ToolRegistry, WorkspaceStore, connect_servers, connector,
 };
 use dadhichi_security::{SecretResolver, Vault, VaultData};
 use dadhichi_skill::{
@@ -58,6 +60,10 @@ pub struct AppController {
     /// Holds each connection alive; disconnecting drops it and unregisters its
     /// tools.
     mcp: Arc<Mutex<McpConnections>>,
+    /// The permission-gated tool registry (built-ins + bridged MCP tools). Held
+    /// so a frontend can enumerate capabilities and the approval policy applies
+    /// uniformly.
+    tools: Arc<ToolRegistry>,
     /// Tool calls parked awaiting the user's `y/n` approval, keyed by request id.
     /// The `BusApprover` inserts a waiter here on interrupt; `resolve_approval`
     /// fires it when the frontend answers.
@@ -182,10 +188,26 @@ impl AppController {
         // call on a one-shot channel that `resolve_approval` fires. Read-only work
         // stays un-gated, so ordinary agent runs aren't interrupted.
         let approvals: PendingApprovals = Arc::new(Mutex::new(HashMap::new()));
+
+        // The agent's sandboxed virtual filesystem: a workspace-backed state
+        // store confined by a PathJail to `root`, so an fs.write can never
+        // escape the project. Shared behind the fs.* tools.
+        let fs_store: Arc<dyn StateStore> = Arc::new(WorkspaceStore::new(&root));
+        // Shared memory the agent and its delegates record to / recall from.
+        let agent_memory = shared_memory();
+
         let tools = {
             let t = ToolRegistry::new();
             t.register(Arc::new(EchoTool));
-            t.register(Arc::new(TerminalTool));
+            // Shell is pinned to the sandbox root (the run-commands sandbox).
+            t.register(Arc::new(TerminalTool::in_dir(&root)));
+            // Virtual filesystem tools (context offloading), state backend above.
+            t.register(Arc::new(FsReadTool::new(fs_store.clone())));
+            t.register(Arc::new(FsWriteTool::new(fs_store.clone())));
+            t.register(Arc::new(FsListTool::new(fs_store.clone())));
+            // Memory-access tools over the shared store.
+            t.register(Arc::new(MemoryWriteTool::new(agent_memory.clone())));
+            t.register(Arc::new(MemoryRecallTool::new(agent_memory.clone())));
             t.set_policy(
                 ApprovalPolicy::default()
                     .with(Permission::RunCommands, PermissionMode::Interrupt)
@@ -328,8 +350,16 @@ impl AppController {
             _skill_watch: skill_watch,
             mcp_config,
             mcp,
+            tools,
             approvals,
         }
+    }
+
+    /// The permission-gated tool registry (built-in tools plus any bridged in
+    /// from connected MCP servers). Invocations pass through the grant check and
+    /// the approval policy.
+    pub fn tools(&self) -> &Arc<ToolRegistry> {
+        &self.tools
     }
 
     /// Immutable access to the UI view-models.
@@ -1574,6 +1604,70 @@ mod tests {
             .await
             .unwrap();
         assert!(has_tool(&out, "task"), "task tool registered: {out}");
+    }
+
+    #[tokio::test]
+    async fn fs_and_memory_tools_are_registered() {
+        let ctrl = AppController::new(".").await;
+        let out = ctrl
+            .dispatch("mcp.list", serde_json::json!({}))
+            .await
+            .unwrap();
+        for tool in [
+            "fs.read",
+            "fs.write",
+            "fs.ls",
+            "memory.write",
+            "memory.recall",
+        ] {
+            assert!(has_tool(&out, tool), "{tool} registered: {out}");
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_reads_and_writes_its_sandboxed_filesystem() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctrl = AppController::new(dir.path()).await;
+
+        // Subscribe to the approval topic *before* invoking, so the prompt can't
+        // race ahead of the waiter.
+        let mut sub = ctrl.kernel.bus().subscribe_topic("agent.approval");
+        let approvals = ctrl.approvals.clone();
+        let tools = ctrl.tools().clone();
+
+        // A write needs WriteWorkspace, which is set to interrupt.
+        let write = tokio::spawn(async move {
+            tools
+                .invoke(
+                    "fs.write",
+                    serde_json::json!({ "path": "notes/plan.md", "content": "step 1" }),
+                    &GrantSet::from_iter([Permission::WriteWorkspace]),
+                )
+                .await
+        });
+
+        // Receive the interrupt and approve it.
+        let ev = sub.recv().await.unwrap();
+        let id = ev.payload["id"].as_str().unwrap();
+        let uuid = uuid::Uuid::parse_str(id).unwrap();
+        let tx = approvals.lock().unwrap().remove(&uuid).unwrap();
+        tx.send(Decision::Approve).unwrap();
+        write.await.unwrap().unwrap();
+
+        // It really landed inside the sandbox root.
+        assert!(dir.path().join("notes/plan.md").exists());
+
+        // A read (ReadWorkspace, un-gated) returns it — the grant a delegate has.
+        let read = ctrl
+            .tools()
+            .invoke(
+                "fs.read",
+                serde_json::json!({ "path": "notes/plan.md" }),
+                &GrantSet::from_iter([Permission::ReadWorkspace]),
+            )
+            .await
+            .unwrap();
+        assert_eq!(read["content"], "step 1");
     }
 
     #[tokio::test]

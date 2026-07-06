@@ -27,9 +27,11 @@ pub mod bridge;
 pub mod catalog;
 pub mod client;
 pub mod connector;
+pub mod fs;
 pub mod protocol;
 pub mod registry;
 pub mod shell;
+pub mod state;
 pub mod tool;
 
 pub use approval::{
@@ -42,12 +44,14 @@ pub use connector::{
     ConnectReport, ConnectedServer, McpConnections, McpServerConfig, McpServersConfig, ServerError,
     connect_servers, resolve_env,
 };
+pub use fs::{FsListTool, FsReadTool, FsWriteTool};
 pub use protocol::{
     McpClient, McpError, PromptArgument, PromptSpec, ResourceSpec, RpcErrorObject, RpcRequest,
     RpcResponse, ServerCapabilities,
 };
 pub use registry::{GrantSet, ToolRegistry};
 pub use shell::TerminalTool;
+pub use state::{MemStore, OverlayStore, PathJail, StateError, StateStore, WorkspaceStore};
 pub use tool::{EchoTool, Permission, Tool, ToolError, ToolResult, ToolSpec};
 
 #[cfg(test)]

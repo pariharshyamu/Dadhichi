@@ -8,14 +8,33 @@
 
 use crate::tool::{Permission, Tool, ToolError, ToolResult, ToolSpec};
 use async_trait::async_trait;
+use std::path::PathBuf;
 
 /// Runs a single shell command and reports its result.
 #[derive(Debug, Default)]
-pub struct TerminalTool;
+pub struct TerminalTool {
+    /// The working directory to run commands in. When set, the command is
+    /// pinned to this root (the sandbox); when `None`, it inherits the process
+    /// working directory.
+    cwd: Option<PathBuf>,
+}
 
 impl TerminalTool {
     /// The registry name this tool is invoked under.
     pub const NAME: &'static str = "terminal.run";
+
+    /// Run commands with the process's current working directory.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Pin every command's working directory to `root` — the shell half of the
+    /// agent sandbox, so a command starts inside the workspace.
+    pub fn in_dir(root: impl Into<PathBuf>) -> Self {
+        Self {
+            cwd: Some(root.into()),
+        }
+    }
 }
 
 #[async_trait]
@@ -53,6 +72,10 @@ impl Tool for TerminalTool {
             c.arg("-c").arg(command);
             c
         };
+        // Pin the command inside the sandbox root when one is configured.
+        if let Some(cwd) = &self.cwd {
+            cmd.current_dir(cwd);
+        }
 
         let output = cmd
             .output()
@@ -78,7 +101,7 @@ mod tests {
 
     #[tokio::test]
     async fn runs_a_command_and_captures_output() {
-        let out = TerminalTool
+        let out = TerminalTool::new()
             .invoke(serde_json::json!({ "command": "echo hello" }))
             .await
             .unwrap();
@@ -87,9 +110,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn in_dir_pins_the_working_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = TerminalTool::in_dir(dir.path())
+            .invoke(serde_json::json!({ "command": "pwd" }))
+            .await
+            .unwrap();
+        let shown = out["stdout"].as_str().unwrap();
+        // The command ran inside the sandbox root (allowing for /private symlink
+        // on macOS by matching the final path component).
+        let leaf = dir.path().file_name().unwrap().to_string_lossy();
+        assert!(shown.contains(leaf.as_ref()), "pwd={shown}");
+    }
+
+    #[tokio::test]
     async fn interrupt_denied_blocks_the_run() {
         let registry = ToolRegistry::new();
-        registry.register(Arc::new(TerminalTool));
+        registry.register(Arc::new(TerminalTool::new()));
         registry.set_policy(
             ApprovalPolicy::default().with(Permission::RunCommands, PermissionMode::Interrupt),
         );
@@ -110,7 +147,7 @@ mod tests {
     #[tokio::test]
     async fn interrupt_approved_lets_the_run_through() {
         let registry = ToolRegistry::new();
-        registry.register(Arc::new(TerminalTool));
+        registry.register(Arc::new(TerminalTool::new()));
         registry.set_policy(
             ApprovalPolicy::default().with(Permission::RunCommands, PermissionMode::Interrupt),
         );
