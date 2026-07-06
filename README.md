@@ -25,7 +25,11 @@ console) rendered by a real ratatui terminal frontend, plus integrated
 pseudo-terminal and Git view-models. Phase 4 (Autonomous Agents) —
 **complete**: specialist agents, an orchestrator with parallel runs and
 checkpoints, natural-language workflow automation, reflection/verification, a
-live stdio MCP client with tool bridging, and a DAP debugger client. Phase 5
+live stdio MCP client with tool bridging, and a DAP debugger client. Agents can
+**delegate** self-contained sub-tasks to a specialist via the `task` tool (or
+the `agent.spawn` command), which runs it in an **isolated context window** —
+only the task goes in and only the summary comes back — so a delegate's
+intermediate reasoning never pollutes the caller's context. Phase 5
 (Extensibility & Collaboration) — **complete**: a sandboxed WASM plugin runtime,
 a signed extension marketplace, CRDT collaboration, a security suite (vault,
 secret scan, audit log, injection defense), and observability. See
@@ -36,7 +40,9 @@ the complete system design.
 ## Install
 
 One-line installers detect your OS/architecture, download the matching release
-archive, verify its SHA-256 checksum, and install the `dadhichi` binary:
+archive, verify its SHA-256 checksum, and install two binaries — the `dadhichi`
+CLI and the interactive terminal shell `dadhichi-tui` (Ctrl-P for the command
+palette; `>` runs skills, `@` manages MCP servers):
 
 ```bash
 # Linux / macOS
@@ -115,8 +121,8 @@ OPENAI_API_KEY=... OPENAI_BASE_URL=http://localhost:8000/v1  cargo run   # vLLM,
 # OpenRouter
 OPENROUTER_API_KEY=sk-or-...        cargo run
 
-# Local Ollama (no key)
-OLLAMA_HOST=http://localhost:11434  cargo run
+# Local Ollama (no key) — name the model you have pulled
+OLLAMA_HOST=http://localhost:11434  OLLAMA_MODEL=llama3.2  cargo run
 ```
 
 | Variable | Effect |
@@ -125,7 +131,15 @@ OLLAMA_HOST=http://localhost:11434  cargo run
 | `OPENAI_API_KEY` | Use OpenAI (`OPENAI_BASE_URL` overrides the endpoint) |
 | `OPENROUTER_API_KEY` | Use the OpenRouter aggregator |
 | `OLLAMA_HOST` | Use a local Ollama server (no key) |
+| `OLLAMA_MODEL` | The Ollama model name to run (e.g. `llama3.2`) |
 | `DADHICHI_PROVIDER` | Pick the default when several are set (`anthropic`/`openai`/`openrouter`/`ollama`/`mock`) |
+| `DADHICHI_MODEL` | The concrete model name sent to the default provider (e.g. `gpt-4o`, `llama3.2`) |
+
+> **Model name vs. provider:** the provider id (`ollama`, `openai`, …) selects the
+> backend; the *model name* is what it runs. Real backends reject a request for a
+> model literally named `ollama`, so set `OLLAMA_MODEL`/`DADHICHI_MODEL` to a
+> concrete model. Without one, the name defaults to the provider id (fine only for
+> the offline mock).
 
 At startup the binary prints which provider is active, e.g.
 `dadhichi ▸ model provider: anthropic (default: anthropic, + mock fallback)`.
@@ -292,11 +306,30 @@ crates/
 └── dadhichi             # runtime binary: wires the kernel + Agent Console
 ```
 
-Launch the live terminal shell with `cargo run -p dadhichi-tui` — Ctrl-P opens
-the command palette, which dispatches real kernel commands (run an agent,
-re-index the workspace) whose progress streams into the panels. Type `>` in the
-palette to switch to **skill mode**: it lists the equippable skills with their
-required permissions and tool scope inline, and Enter runs the highlighted one.
+Launch the live terminal shell with `cargo run -p dadhichi-tui` (or the
+installed `dadhichi-tui`). It opens focused on the **Agent Console**: type a
+goal on the input line at the bottom and press **Enter** to run the
+conversational agent against it — its planning/running/token/completion events
+stream into the console above as it works. The run is **non-blocking**: the
+console keeps updating (and shows a `⋯ running` indicator) while the model
+thinks, so a slow local model never freezes the UI. **Ctrl-P** opens the command
+palette, which dispatches real kernel commands (run a specific agent, re-index
+the workspace) whose progress streams into the panels. Type `>` in the palette to
+switch to **skill mode**: it lists the equippable skills with their required
+permissions and tool scope inline, and Enter runs the highlighted one; `@`
+switches to **MCP mode**, which lists your configured servers (Enter toggles
+connect/disconnect) **and** the built-in connector catalogue — pick one (e.g.
+`filesystem`, `github`, `git`, `memory`) and Enter adds it to your `mcp.json` and
+connects it, no hand-editing. **Tab** cycles focus between panes, **Ctrl-Q**
+quits.
+
+Install your own **skills** by dropping a JSON manifest into `~/.dadhichi/skills`
+(the running TUI reloads it live), or with the CLI:
+
+```bash
+dadhichi skill import ./my-skill.json   # validate + install into ~/.dadhichi/skills
+dadhichi skill list                     # built-ins + everything on disk
+```
 Render a headless snapshot with `cargo run -p dadhichi-tui --example live` (the
 wired stack) or `--example snapshot` (the static layout).
 

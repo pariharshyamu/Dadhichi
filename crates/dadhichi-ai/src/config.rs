@@ -14,7 +14,16 @@
 //! | `OPENAI_API_KEY` | register an OpenAI provider (`OPENAI_BASE_URL` overrides the endpoint for Azure / vLLM / LM Studio / proxies) |
 //! | `OPENROUTER_API_KEY` | register the OpenRouter provider |
 //! | `OLLAMA_HOST` | register a local Ollama provider at that host (no key) |
+//! | `OLLAMA_MODEL` | the Ollama model name to send (e.g. `llama3.2`, `qwen2.5-coder`) |
 //! | `DADHICHI_PROVIDER` | force the default provider id (`anthropic`, `openai`, `openrouter`, `ollama`, `mock`); also enables Ollama with its default host |
+//! | `DADHICHI_MODEL` | the concrete model name sent to the default provider (e.g. `gpt-4o`, `claude-3-5-sonnet-latest`, `llama3.2`) |
+//!
+//! The **model name** and the **provider id** are distinct: the provider id
+//! (`ollama`, `openai`, …) selects *which* backend, while the model name is what
+//! that backend is asked to run. Real backends reject a request for a model
+//! literally named `ollama`/`openai`, so name a concrete model with
+//! `DADHICHI_MODEL` (or `OLLAMA_MODEL` for Ollama). Without one, the model name
+//! defaults to the provider id — fine for the offline mock, not for real APIs.
 //!
 //! When no key is set the plan is empty and the router falls back to the
 //! offline [`MockProvider`](crate::MockProvider), preserving offline-first
@@ -86,6 +95,9 @@ pub struct ProviderPlan {
     pub specs: Vec<ProviderSpec>,
     /// The id chosen as the router default. `None` means fall back to `mock`.
     pub default_id: Option<String>,
+    /// The concrete model name to send in requests (from `DADHICHI_MODEL` /
+    /// `OLLAMA_MODEL`). `None` falls back to the provider id as the model name.
+    pub model: Option<String>,
 }
 
 impl ProviderPlan {
@@ -141,7 +153,22 @@ impl ProviderPlan {
             _ => specs.first().map(|s| s.id().to_string()),
         };
 
-        Self { specs, default_id }
+        // The concrete model name to send. `DADHICHI_MODEL` applies to whatever
+        // the default provider is; `OLLAMA_MODEL` is a convenience that only
+        // applies when Ollama is the default.
+        let model = read("DADHICHI_MODEL").or_else(|| {
+            if default_id.as_deref() == Some("ollama") {
+                read("OLLAMA_MODEL")
+            } else {
+                None
+            }
+        });
+
+        Self {
+            specs,
+            default_id,
+            model,
+        }
     }
 
     /// Whether any real (non-mock) provider was configured.
@@ -149,9 +176,21 @@ impl ProviderPlan {
         !self.specs.is_empty()
     }
 
-    /// The model id the runtime should drive by default: the resolved default
-    /// provider, or `mock` when nothing is configured.
+    /// The model *name* the runtime sends in requests: the explicit
+    /// `DADHICHI_MODEL`/`OLLAMA_MODEL` override, else the default provider id,
+    /// else `mock`. This is what fills the `model` field of a completion request.
     pub fn default_model(&self) -> String {
+        self.model
+            .clone()
+            .or_else(|| self.default_id.clone())
+            .unwrap_or_else(|| MOCK_ID.to_string())
+    }
+
+    /// The provider *id* the router should default to (the routing key), as
+    /// opposed to [`default_model`](Self::default_model), which is the model name
+    /// sent to that provider. When a request's model name doesn't match any
+    /// registered provider id, the router falls back to this provider.
+    pub fn default_provider_id(&self) -> String {
         self.default_id
             .clone()
             .unwrap_or_else(|| MOCK_ID.to_string())
@@ -227,10 +266,11 @@ mod build {
             // Always keep the offline provider available as the last resort.
             router.register(Arc::new(MockProvider::default()));
 
-            router.set_default(self.default_model());
+            // The router keys on provider ids, not model names.
+            router.set_default(self.default_provider_id());
 
             // Fallback order: the remaining remote providers, then mock.
-            let default = self.default_model();
+            let default = self.default_provider_id();
             let mut chain: Vec<String> = self
                 .specs
                 .iter()
@@ -353,6 +393,38 @@ mod tests {
                 host: Some("http://localhost:11434".into())
             }]
         );
+    }
+
+    #[test]
+    fn ollama_model_names_the_model_but_keeps_provider_routing() {
+        let plan = ProviderPlan::from_env_with(env(&[
+            ("OLLAMA_HOST", "http://localhost:11434"),
+            ("OLLAMA_MODEL", "llama3.2"),
+        ]));
+        // The model *name* sent is the concrete model...
+        assert_eq!(plan.default_model(), "llama3.2");
+        // ...while routing still keys on the `ollama` provider id.
+        assert_eq!(plan.default_provider_id(), "ollama");
+    }
+
+    #[test]
+    fn dadhichi_model_sets_the_model_for_any_provider() {
+        let plan = ProviderPlan::from_env_with(env(&[
+            ("OPENAI_API_KEY", "sk-x"),
+            ("DADHICHI_MODEL", "gpt-4o"),
+        ]));
+        assert_eq!(plan.default_model(), "gpt-4o");
+        assert_eq!(plan.default_provider_id(), "openai");
+    }
+
+    #[test]
+    fn ollama_model_is_ignored_when_ollama_is_not_the_default() {
+        // OLLAMA_MODEL only applies when Ollama is the chosen provider.
+        let plan = ProviderPlan::from_env_with(env(&[
+            ("OPENAI_API_KEY", "sk-x"),
+            ("OLLAMA_MODEL", "llama3.2"),
+        ]));
+        assert_eq!(plan.default_model(), "openai");
     }
 
     #[test]

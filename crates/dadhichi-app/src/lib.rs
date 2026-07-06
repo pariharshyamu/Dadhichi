@@ -15,7 +15,7 @@
 //! events back into the Agent Console panel — all through the same bus.
 
 use dadhichi_agent::{
-    Agent, AgentContext, Orchestrator, SpecialistAgent, agents::ConversationalAgent,
+    Agent, AgentContext, Orchestrator, SpecialistAgent, TaskTool, agents::ConversationalAgent,
 };
 use dadhichi_ai::{ModelRouter, ProviderPlan};
 use dadhichi_core::{Command, Event, Kernel, KernelError, RecvError, Subscription};
@@ -23,11 +23,11 @@ use dadhichi_index::Indexer;
 use dadhichi_index::store::SqliteSymbolStore;
 use dadhichi_mcp::{
     EchoTool, GrantSet, McpConnection, McpConnections, McpServersConfig, Permission, ToolRegistry,
-    connect_servers,
+    connect_servers, connector,
 };
 use dadhichi_security::{SecretResolver, Vault, VaultData};
 use dadhichi_skill::{
-    SharedSkills, SkillAgent, SkillRegistry, SkillSpec, SkillTools, SkillWatchGuard, shared,
+    SharedSkills, Skill, SkillAgent, SkillRegistry, SkillSpec, SkillTools, SkillWatchGuard, shared,
     watch_skills,
 };
 use dadhichi_ui::{App, McpEntry, PaletteAction, SkillEntry};
@@ -43,8 +43,10 @@ pub struct AppController {
     skills: SharedSkills,
     /// Keeps the skill-manifest file watch alive; dropping it stops watching.
     _skill_watch: Option<SkillWatchGuard>,
-    /// The declared MCP servers, for the `@` palette and `mcp.list`.
-    mcp_config: McpServersConfig,
+    /// The declared MCP servers, for the `@` palette and `mcp.list`. Shared and
+    /// mutable so `mcp.add` (connecting a built-in connector at runtime) shows up
+    /// in the palette without a restart.
+    mcp_config: Arc<Mutex<McpServersConfig>>,
     /// The live MCP connections, shared with the `mcp.*` command handlers so
     /// `mcp.connect`/`mcp.disconnect` can mutate the same set the palette reads.
     /// Holds each connection alive; disconnecting drops it and unregisters its
@@ -72,6 +74,57 @@ fn mcp_secret_resolver() -> Arc<SecretResolver> {
         _ => SecretResolver::new(),
     };
     Arc::new(resolver)
+}
+
+/// The home `~/.dadhichi` directory, if a home is known. The durable, global
+/// place user-installed skills and connectors are written so they survive across
+/// projects and restarts.
+fn home_dadhichi() -> Option<PathBuf> {
+    let nonempty = |v: std::ffi::OsString| (!v.is_empty()).then_some(v);
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .and_then(nonempty)
+        .map(|home| PathBuf::from(home).join(".dadhichi"))
+}
+
+/// Reduce a skill name to a safe, lowercase filename stem — alphanumerics kept,
+/// every other character folded to `-`. Prevents a crafted `name` from escaping
+/// the skills directory or colliding with path separators.
+fn sanitize_filename(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let trimmed = cleaned.trim_matches('-').to_string();
+    if trimmed.is_empty() {
+        "skill".to_string()
+    } else {
+        trimmed
+    }
+}
+
+/// Where an imported skill manifest is written so the loader (and file watcher)
+/// pick it up: `~/.dadhichi/skills`, falling back to `<root>/.dadhichi/skills`
+/// when no home directory is set.
+fn writable_skills_dir(root: &Path) -> PathBuf {
+    home_dadhichi()
+        .map(|d| d.join("skills"))
+        .unwrap_or_else(|| root.join(".dadhichi").join("skills"))
+}
+
+/// Where a runtime-added MCP connector is persisted: `~/.dadhichi/mcp.json`,
+/// falling back to `<root>/.dadhichi/mcp.json`. Both are standard discovery
+/// locations, so a saved connector reconnects on the next launch.
+fn writable_mcp_config_path(root: &Path) -> PathBuf {
+    home_dadhichi()
+        .map(|d| d.join("mcp.json"))
+        .unwrap_or_else(|| root.join(".dadhichi").join("mcp.json"))
 }
 
 /// The credential-vault path: `$DADHICHI_VAULT`, else `~/.dadhichi/vault.json`.
@@ -126,11 +179,12 @@ impl AppController {
         // so this reaches the tools every agent already holds). Secrets in the
         // config are `${...}` placeholders resolved from the environment or the
         // encrypted credential vault.
-        let (mcp_config, mcp_cfg_errors) = McpServersConfig::discover_in(&root);
+        let (discovered_config, mcp_cfg_errors) = McpServersConfig::discover_in(&root);
         let secrets = mcp_secret_resolver();
         let (mcp_conns, mcp_report) =
-            connect_servers(&mcp_config, &tools, |key| secrets.resolve(key)).await;
+            connect_servers(&discovered_config, &tools, |key| secrets.resolve(key)).await;
         let mcp = Arc::new(Mutex::new(mcp_conns));
+        let mcp_config = Arc::new(Mutex::new(discovered_config));
 
         // The skill library: the built-ins plus any user/project skills
         // discovered on disk (~/.dadhichi/skills, <root>/.dadhichi/skills,
@@ -180,6 +234,17 @@ impl AppController {
             Arc::new(orch)
         };
 
+        // Register the `task` delegation tool so any agent (or a model tool-loop)
+        // can spawn a specialist with an isolated context. Sub-agents run under a
+        // read-only grant, matching the default top-level run.
+        tools.register(Arc::new(TaskTool::new(
+            orchestrator.clone(),
+            router.clone(),
+            &tools,
+            kernel.bus().clone(),
+            GrantSet::from_iter([Permission::ReadWorkspace]),
+        )));
+
         register_commands(
             &kernel,
             &router,
@@ -203,8 +268,10 @@ impl AppController {
         ui.set_commands(kernel.commands().command_names().await);
         ui.palette
             .set_skills(skill_entries(&skills.read().expect("skills lock")));
-        ui.palette
-            .set_mcp_servers(mcp_entries(&mcp_config, &mcp.lock().expect("mcp lock")));
+        ui.palette.set_mcp_servers(mcp_entries(
+            &mcp_config.lock().expect("mcp config lock"),
+            &mcp.lock().expect("mcp lock"),
+        ));
 
         let events = kernel.bus().subscribe();
 
@@ -275,6 +342,33 @@ impl AppController {
             .await
     }
 
+    /// Start the conversational agent against a free-text `goal` typed into the
+    /// agent console, **without blocking**. The dispatch runs on a spawned task,
+    /// so the render loop keeps pumping and the run's `agent.*` events stream into
+    /// the console as they arrive — essential when a local model takes seconds to
+    /// respond. The command registry is a cheap `Arc` handle, so the clone is
+    /// free; a `mock.error` is published if the agent errors so the console shows
+    /// it rather than swallowing it.
+    pub fn start_agent_goal(&self, goal: &str) {
+        let commands = self.kernel.commands().clone();
+        let bus = self.kernel.bus().clone();
+        let goal = goal.to_string();
+        tokio::spawn(async move {
+            let result = commands
+                .dispatch(Command {
+                    name: "agent.run".into(),
+                    args: serde_json::json!({ "goal": goal, "agent": "conversational-agent" }),
+                })
+                .await;
+            if let Err(err) = result {
+                bus.publish(Event::new(
+                    "agent.error",
+                    serde_json::json!({ "error": err.to_string() }),
+                ));
+            }
+        });
+    }
+
     /// Accept the highlighted palette entry, close the palette, and dispatch it:
     /// a command runs directly; a skill (from `>` skill mode) runs via
     /// `skill.run`. Returns a label for what was dispatched, if anything.
@@ -304,6 +398,12 @@ impl AppController {
                     .await;
                 format!("mcp.disconnect:{name}")
             }
+            PaletteAction::AddMcp(connector) => {
+                let _ = self
+                    .dispatch("mcp.add", serde_json::json!({ "connector": connector }))
+                    .await;
+                format!("mcp.add:{connector}")
+            }
         };
         // A command may have changed the skill set (e.g. `skill.reload`) or the
         // connection state; keep both palette lists current.
@@ -325,8 +425,8 @@ impl AppController {
     /// Refresh the palette's MCP-server list (names, transport, tool count, and
     /// connected state). Call after a connect/disconnect.
     pub fn refresh_mcp(&mut self) {
-        if let Ok(connections) = self.mcp.lock() {
-            let entries = mcp_entries(&self.mcp_config, &connections);
+        if let (Ok(config), Ok(connections)) = (self.mcp_config.lock(), self.mcp.lock()) {
+            let entries = mcp_entries(&config, &connections);
             self.ui.palette.set_mcp_servers(entries);
         }
     }
@@ -346,8 +446,10 @@ impl AppController {
                         // the `>` picker reflects the change without a keystroke.
                         "skill.reloaded" => skills_changed = true,
                         // A connect/disconnect (including from another surface)
-                        // changed the `@` server list.
-                        "mcp.connected" | "mcp.disconnected" | "mcp.error" => mcp_changed = true,
+                        // or a newly-added connector changed the `@` server list.
+                        "mcp.connected" | "mcp.disconnected" | "mcp.error" | "mcp.added" => {
+                            mcp_changed = true
+                        }
                         _ => {}
                     }
                     self.ui.apply_event(&event);
@@ -421,9 +523,11 @@ fn publish_mcp_report(bus: &dadhichi_core::EventBus, report: &dadhichi_mcp::Conn
 }
 
 /// Build the palette's MCP-server rows: every configured server with its
-/// transport, tool count, and connected state.
+/// transport, tool count, and connected state, followed by the built-in
+/// connectors not yet configured (shown as "add" actions), so the `@` palette is
+/// both a control panel and a catalogue.
 fn mcp_entries(config: &McpServersConfig, connections: &McpConnections) -> Vec<McpEntry> {
-    config
+    let mut entries: Vec<McpEntry> = config
         .servers
         .iter()
         .map(|(name, cfg)| {
@@ -441,9 +545,29 @@ fn mcp_entries(config: &McpServersConfig, connections: &McpConnections) -> Vec<M
                 name: name.clone(),
                 detail,
                 connected,
+                available: false,
             }
         })
-        .collect()
+        .collect();
+
+    // Append catalogue connectors the user hasn't added yet.
+    for c in dadhichi_mcp::builtin_connectors() {
+        if config.servers.contains_key(c.id) {
+            continue;
+        }
+        let secret = if c.needs_secrets() {
+            " · needs secret"
+        } else {
+            ""
+        };
+        entries.push(McpEntry {
+            name: c.id.to_string(),
+            detail: format!("add · {}{secret}", c.description),
+            connected: false,
+            available: true,
+        });
+    }
+    entries
 }
 
 /// Connect the servers in `config` (optionally just `only`), merging the results
@@ -649,7 +773,7 @@ async fn register_commands(
     tools: &Arc<ToolRegistry>,
     orchestrator: &Arc<Orchestrator>,
     skills: &SharedSkills,
-    mcp_config: &McpServersConfig,
+    mcp_config: &Arc<Mutex<McpServersConfig>>,
     mcp: &Arc<Mutex<McpConnections>>,
     secrets: &Arc<SecretResolver>,
     model_id: &str,
@@ -700,6 +824,45 @@ async fn register_commands(
                             "status": format!("{:?}", outcome.status),
                             "confidence": outcome.confidence,
                         }))
+                    }
+                }),
+            )
+            .await;
+    }
+
+    // agent.spawn — delegate a goal to a specialist that runs in an isolated
+    // context, returning only its summary. Args: `{ agent, goal }`. This drives
+    // the registered `task` tool, so the delegation streams the same
+    // agent.delegated / agent.* events to the console.
+    {
+        let tools = tools.clone();
+        kernel
+            .commands()
+            .register(
+                "agent.spawn",
+                Arc::new(move |cmd: Command| {
+                    let tools = tools.clone();
+                    async move {
+                        let agent = cmd
+                            .args
+                            .get("agent")
+                            .and_then(|a| a.as_str())
+                            .unwrap_or("code-agent")
+                            .to_string();
+                        let goal = cmd
+                            .args
+                            .get("goal")
+                            .and_then(|g| g.as_str())
+                            .unwrap_or("Describe what you would do.")
+                            .to_string();
+                        tools
+                            .invoke(
+                                TaskTool::NAME,
+                                serde_json::json!({ "subagent_type": agent, "description": goal }),
+                                &GrantSet::none(),
+                            )
+                            .await
+                            .map_err(KernelError::command_failed)
                     }
                 }),
             )
@@ -841,6 +1004,92 @@ async fn register_commands(
             .await;
     }
 
+    // skill.import — install a user-supplied skill manifest so it joins the
+    // catalogue and persists. Accepts either `{ "path": "<file.json>" }` (read
+    // from disk) or `{ "json": "<manifest>" }` (inline). The manifest is
+    // validated, written into the writable skills directory as `<name>.json`,
+    // and the catalogue is reloaded so the new skill appears immediately.
+    {
+        let skills = skills.clone();
+        let root = root.to_path_buf();
+        let bus = kernel.bus().clone();
+        kernel
+            .commands()
+            .register(
+                "skill.import",
+                Arc::new(move |cmd: Command| {
+                    let skills = skills.clone();
+                    let root = root.clone();
+                    let bus = bus.clone();
+                    async move {
+                        // Source the manifest text from `json` or `path`.
+                        let text = if let Some(json) =
+                            cmd.args.get("json").and_then(|j| j.as_str())
+                        {
+                            json.to_string()
+                        } else if let Some(path) = cmd.args.get("path").and_then(|p| p.as_str()) {
+                            std::fs::read_to_string(path).map_err(|e| {
+                                KernelError::command_failed(format!("cannot read {path}: {e}"))
+                            })?
+                        } else {
+                            return Err(KernelError::command_failed(
+                                "skill.import needs a `path` or `json` argument",
+                            ));
+                        };
+
+                        // Validate before writing anything.
+                        let skill = Skill::from_json(&text).map_err(|e| {
+                            KernelError::command_failed(format!("invalid skill manifest: {e}"))
+                        })?;
+                        if skill.name.trim().is_empty() {
+                            return Err(KernelError::command_failed(
+                                "skill manifest has an empty `name`",
+                            ));
+                        }
+
+                        // Write it into the writable skills dir under a filename
+                        // derived from the (sanitised) skill name.
+                        let dir = writable_skills_dir(&root);
+                        std::fs::create_dir_all(&dir).map_err(|e| {
+                            KernelError::command_failed(format!(
+                                "cannot create {}: {e}",
+                                dir.display()
+                            ))
+                        })?;
+                        let file = dir.join(format!("{}.json", sanitize_filename(&skill.name)));
+                        std::fs::write(&file, skill.to_json()).map_err(|e| {
+                            KernelError::command_failed(format!(
+                                "cannot write {}: {e}",
+                                file.display()
+                            ))
+                        })?;
+
+                        // Reload so the imported skill is live in the `>` palette.
+                        let (fresh, report) = SkillRegistry::discover_in(&root);
+                        let count = fresh.len();
+                        *skills.write().map_err(|_| {
+                            KernelError::command_failed("skills lock poisoned")
+                        })? = fresh;
+                        bus.publish(Event::new(
+                            "skill.reloaded",
+                            serde_json::json!({ "count": count, "loaded": report.loaded }),
+                        ));
+                        bus.publish(Event::new(
+                            "skill.imported",
+                            serde_json::json!({ "name": skill.name, "path": file.display().to_string() }),
+                        ));
+
+                        Ok(serde_json::json!({
+                            "name": skill.name,
+                            "path": file.display().to_string(),
+                            "count": count,
+                        }))
+                    }
+                }),
+            )
+            .await;
+    }
+
     // mcp.list — the configured MCP servers (with transport, connected state, and
     // tool count) plus the tools currently registered.
     {
@@ -858,6 +1107,9 @@ async fn register_commands(
                     async move {
                         let connections = mcp.lock().map_err(|_| {
                             KernelError::command_failed("mcp connections lock poisoned")
+                        })?;
+                        let mcp_config = mcp_config.lock().map_err(|_| {
+                            KernelError::command_failed("mcp config lock poisoned")
                         })?;
                         let servers: Vec<serde_json::Value> = mcp_config
                             .servers
@@ -906,10 +1158,13 @@ async fn register_commands(
                     let bus = bus.clone();
                     async move {
                         let only = cmd.args.get("server").and_then(|s| s.as_str());
-                        Ok(
-                            connect_and_merge(&mcp_config, only, &tools, &mcp, &secrets, &bus)
-                                .await,
-                        )
+                        // Snapshot the config so the lock isn't held across the
+                        // connect await.
+                        let config = mcp_config
+                            .lock()
+                            .map_err(|_| KernelError::command_failed("mcp config lock poisoned"))?
+                            .clone();
+                        Ok(connect_and_merge(&config, only, &tools, &mcp, &secrets, &bus).await)
                     }
                 }),
             )
@@ -955,6 +1210,153 @@ async fn register_commands(
                             "server": server,
                             "disconnected": removed.is_some(),
                             "tools_removed": removed.unwrap_or(0),
+                        }))
+                    }
+                }),
+            )
+            .await;
+    }
+
+    // mcp.connectors — the built-in connector catalogue: well-known MCP servers a
+    // user can add without hand-writing config. Flags which are already
+    // configured and which still need a secret.
+    {
+        let mcp_config = mcp_config.clone();
+        kernel
+            .commands()
+            .register(
+                "mcp.connectors",
+                Arc::new(move |_cmd: Command| {
+                    let mcp_config = mcp_config.clone();
+                    async move {
+                        let configured: std::collections::BTreeSet<String> = mcp_config
+                            .lock()
+                            .map_err(|_| {
+                                KernelError::command_failed("mcp config lock poisoned")
+                            })?
+                            .servers
+                            .keys()
+                            .cloned()
+                            .collect();
+                        let connectors: Vec<serde_json::Value> = dadhichi_mcp::builtin_connectors()
+                            .iter()
+                            .map(|c| {
+                                serde_json::json!({
+                                    "id": c.id,
+                                    "description": c.description,
+                                    "command": c.command,
+                                    "needs_secrets": c.needs_secrets(),
+                                    "secrets": c.secrets.iter().map(|s| s.var).collect::<Vec<_>>(),
+                                    "grants": c.grants.iter().map(|p| p.to_string()).collect::<Vec<_>>(),
+                                    "homepage": c.homepage,
+                                    "configured": configured.contains(c.id),
+                                })
+                            })
+                            .collect();
+                        Ok(serde_json::json!({ "connectors": connectors }))
+                    }
+                }),
+            )
+            .await;
+    }
+
+    // mcp.add — add a built-in connector by id: materialise its config (scoped to
+    // the workspace root), persist it to the writable mcp.json, register it in the
+    // live config so the palette shows it, and connect it right away. Args:
+    // `{ "connector": "<id>", "name"?: "<local name>", "connect"?: true }`.
+    {
+        let mcp_config = mcp_config.clone();
+        let mcp = mcp.clone();
+        let tools = tools.clone();
+        let secrets = secrets.clone();
+        let bus = kernel.bus().clone();
+        let root = root.to_path_buf();
+        kernel
+            .commands()
+            .register(
+                "mcp.add",
+                Arc::new(move |cmd: Command| {
+                    let mcp_config = mcp_config.clone();
+                    let mcp = mcp.clone();
+                    let tools = tools.clone();
+                    let secrets = secrets.clone();
+                    let bus = bus.clone();
+                    let root = root.clone();
+                    async move {
+                        let id = cmd
+                            .args
+                            .get("connector")
+                            .and_then(|c| c.as_str())
+                            .ok_or_else(|| {
+                                KernelError::command_failed("mcp.add needs a `connector` id")
+                            })?;
+                        let preset = connector(id).ok_or_else(|| {
+                            KernelError::command_failed(format!("unknown connector: {id}"))
+                        })?;
+                        let name = cmd
+                            .args
+                            .get("name")
+                            .and_then(|n| n.as_str())
+                            .unwrap_or(preset.id)
+                            .to_string();
+                        let should_connect = cmd
+                            .args
+                            .get("connect")
+                            .and_then(|c| c.as_bool())
+                            .unwrap_or(true);
+
+                        let server = preset.to_config(&root.to_string_lossy());
+
+                        // Register in the live config (for the palette) and persist
+                        // to the writable mcp.json (for the next launch).
+                        {
+                            let mut guard = mcp_config.lock().map_err(|_| {
+                                KernelError::command_failed("mcp config lock poisoned")
+                            })?;
+                            guard.servers.insert(name.clone(), server.clone());
+                        }
+                        let path = writable_mcp_config_path(&root);
+                        let mut on_disk = McpServersConfig::load_file(&path)
+                            .map_err(KernelError::command_failed)?;
+                        on_disk.servers.insert(name.clone(), server.clone());
+                        on_disk.save(&path).map_err(KernelError::command_failed)?;
+
+                        bus.publish(Event::new(
+                            "mcp.added",
+                            serde_json::json!({
+                                "connector": preset.id,
+                                "server": name,
+                                "needs_secrets": preset.needs_secrets(),
+                                "path": path.display().to_string(),
+                            }),
+                        ));
+
+                        // Connect it now unless the caller opted out. A missing
+                        // secret surfaces as a non-fatal mcp.error in the report.
+                        let connect_summary = if should_connect {
+                            let mut scoped = McpServersConfig::default();
+                            scoped.servers.insert(name.clone(), server);
+                            Some(
+                                connect_and_merge(
+                                    &scoped,
+                                    Some(&name),
+                                    &tools,
+                                    &mcp,
+                                    &secrets,
+                                    &bus,
+                                )
+                                .await,
+                            )
+                        } else {
+                            None
+                        };
+
+                        Ok(serde_json::json!({
+                            "connector": preset.id,
+                            "server": name,
+                            "needs_secrets": preset.needs_secrets(),
+                            "persisted_to": path.display().to_string(),
+                            "connect": connect_summary,
                         }))
                     }
                 }),
@@ -1026,6 +1428,109 @@ mod tests {
         let names: Vec<_> = commands.iter().map(|m| m.name.as_str()).collect();
         assert!(names.contains(&"agent.run"));
         assert!(names.contains(&"workspace.reindex"));
+        // The new skill/connector management commands are registered too.
+        assert!(names.contains(&"skill.import"));
+        assert!(names.contains(&"mcp.connectors"));
+        assert!(names.contains(&"mcp.add"));
+        assert!(names.contains(&"agent.spawn"));
+    }
+
+    #[tokio::test]
+    async fn task_tool_is_registered_and_lists_specialists() {
+        let ctrl = AppController::new(".").await;
+        let out = ctrl
+            .dispatch("mcp.list", serde_json::json!({}))
+            .await
+            .unwrap();
+        assert!(has_tool(&out, "task"), "task tool registered: {out}");
+    }
+
+    #[tokio::test]
+    async fn agent_spawn_delegates_to_an_isolated_specialist() {
+        let mut ctrl = AppController::new(".").await;
+        let out = ctrl
+            .dispatch(
+                "agent.spawn",
+                serde_json::json!({ "agent": "test-agent", "goal": "cover the parser" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(out["subagent_type"], "test-agent");
+        assert_eq!(out["status"], "Completed");
+        assert!(
+            out["summary"]
+                .as_str()
+                .unwrap()
+                .contains("cover the parser")
+        );
+
+        // The delegation surfaced in the console via agent.delegated.
+        ctrl.pump();
+        assert!(
+            ctrl.ui().chat.iter().any(|l| l.contains("agent.delegated")),
+            "chat: {:?}",
+            ctrl.ui().chat
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_spawn_rejects_unknown_specialist() {
+        let ctrl = AppController::new(".").await;
+        let err = ctrl
+            .dispatch(
+                "agent.spawn",
+                serde_json::json!({ "agent": "ghost-agent", "goal": "x" }),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("ghost-agent") || err.to_string().contains("unknown"));
+    }
+
+    #[tokio::test]
+    async fn mcp_connectors_surfaces_the_builtin_catalogue() {
+        let ctrl = AppController::new(".").await;
+        let out = ctrl
+            .dispatch("mcp.connectors", serde_json::json!({}))
+            .await
+            .unwrap();
+        let ids: Vec<&str> = out["connectors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["id"].as_str().unwrap())
+            .collect();
+        assert!(ids.contains(&"github"), "catalogue lists github: {ids:?}");
+        assert!(ids.contains(&"filesystem"));
+        // GitHub declares a required secret; none are configured yet.
+        let github = out["connectors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"] == "github")
+            .unwrap();
+        assert_eq!(github["needs_secrets"], true);
+        assert_eq!(github["configured"], false);
+    }
+
+    #[tokio::test]
+    async fn at_palette_offers_catalogue_connectors_as_add_actions() {
+        // With no configured servers, the `@` palette still lists the built-in
+        // connectors, each an "add" action.
+        let ctrl = AppController::new(".").await;
+        let mut app = App::new();
+        app.palette.set_mcp_servers(mcp_entries(
+            &ctrl.mcp_config.lock().unwrap(),
+            &ctrl.mcp.lock().unwrap(),
+        ));
+        app.palette.open();
+        app.palette.push('@');
+        let fs = app
+            .palette
+            .items()
+            .into_iter()
+            .find(|i| i.label() == "filesystem")
+            .expect("filesystem connector offered");
+        assert!(fs.detail().unwrap().starts_with("add · "));
     }
 
     #[tokio::test]
@@ -1050,6 +1555,29 @@ mod tests {
             "chat: {:?}",
             ctrl.ui().chat
         );
+    }
+
+    #[tokio::test]
+    async fn start_agent_goal_runs_without_blocking_and_streams_events() {
+        let mut ctrl = AppController::new(".").await;
+        // Returns immediately (spawns the run); the render loop would keep going.
+        ctrl.ui_mut().set_agent_running(true);
+        ctrl.start_agent_goal("explain ownership");
+
+        // Drain events as they arrive, yielding to let the spawned task progress.
+        let mut saw_agent_event = false;
+        for _ in 0..50 {
+            tokio::task::yield_now().await;
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            ctrl.pump();
+            if ctrl.ui().chat.iter().any(|l| l.contains("agent.")) {
+                saw_agent_event = true;
+                break;
+            }
+        }
+        assert!(saw_agent_event, "chat: {:?}", ctrl.ui().chat);
+        // A terminal status cleared the busy flag.
+        assert!(!ctrl.ui().agent_running);
     }
 
     #[tokio::test]

@@ -23,6 +23,7 @@
 //! ```
 
 pub mod bridge;
+pub mod catalog;
 pub mod client;
 pub mod connector;
 pub mod protocol;
@@ -30,6 +31,7 @@ pub mod registry;
 pub mod tool;
 
 pub use bridge::McpToolBridge;
+pub use catalog::{Connector, SecretRequirement, builtin_connectors, connector};
 pub use client::McpConnection;
 pub use connector::{
     ConnectReport, ConnectedServer, McpConnections, McpServerConfig, McpServersConfig, ServerError,

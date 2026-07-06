@@ -91,6 +91,30 @@ impl McpServersConfig {
         self.servers.extend(other.servers);
     }
 
+    /// Load a single config file, returning an empty config if it is missing.
+    /// A malformed file is an error (so a save doesn't clobber a broken but
+    /// present config the user may want to fix by hand).
+    pub fn load_file(path: impl AsRef<std::path::Path>) -> Result<Self, String> {
+        match std::fs::read_to_string(path.as_ref()) {
+            Ok(text) => Self::from_json(&text).map_err(|e| e.to_string()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    /// Persist this config as pretty JSON to `path`, creating parent directories.
+    /// Writes the `{ "mcpServers": { … } }` shape so the file interoperates with
+    /// other MCP hosts.
+    pub fn save(&self, path: impl AsRef<std::path::Path>) -> Result<(), String> {
+        let path = path.as_ref();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        let doc = serde_json::json!({ "mcpServers": &self.servers });
+        let text = serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())?;
+        std::fs::write(path, text).map_err(|e| e.to_string())
+    }
+
     /// The enabled servers, in name order.
     pub fn enabled(&self) -> impl Iterator<Item = (&String, &McpServerConfig)> {
         self.servers.iter().filter(|(_, c)| c.enabled)
@@ -464,6 +488,31 @@ mod tests {
         );
         let enabled: Vec<_> = cfg.enabled().map(|(n, _)| n.clone()).collect();
         assert_eq!(enabled, vec!["gh".to_string()]); // "off" filtered out
+    }
+
+    #[test]
+    fn save_then_load_round_trips_through_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested").join("mcp.json");
+
+        let cfg = McpServersConfig::from_json(
+            r#"{"servers":{"memory":{"command":"npx","args":["-y","@modelcontextprotocol/server-memory"]}}}"#,
+        )
+        .unwrap();
+        cfg.save(&path).unwrap();
+
+        // The file uses the interoperable `mcpServers` shape and reloads equal.
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("mcpServers"));
+        assert_eq!(McpServersConfig::load_file(&path).unwrap(), cfg);
+
+        // A missing file loads as empty, not an error.
+        assert!(
+            McpServersConfig::load_file(dir.path().join("absent.json"))
+                .unwrap()
+                .servers
+                .is_empty()
+        );
     }
 
     #[test]

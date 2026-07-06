@@ -17,16 +17,25 @@ use dadhichi_ai::{CompletionRequest, Message};
 #[derive(Debug, Clone)]
 pub struct SpecialistAgent {
     name: String,
+    description: String,
     system: String,
     steps: Vec<String>,
     model: String,
 }
 
 impl SpecialistAgent {
-    /// Build a specialist from its role definition.
-    pub fn new(name: impl Into<String>, system: impl Into<String>, steps: &[&str]) -> Self {
+    /// Build a specialist from its role definition. `description` is the
+    /// action-oriented summary a delegating agent reads to decide when to hand
+    /// this specialist a task.
+    pub fn new(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        system: impl Into<String>,
+        steps: &[&str],
+    ) -> Self {
         Self {
             name: name.into(),
+            description: description.into(),
             system: system.into(),
             steps: steps.iter().map(|s| s.to_string()).collect(),
             model: "mock".into(),
@@ -43,6 +52,7 @@ impl SpecialistAgent {
     pub fn code() -> Self {
         Self::new(
             "code-agent",
+            "Write and complete new code from a specification.",
             "You are an expert software engineer. Implement the requested change with correct, idiomatic code.",
             &[
                 "analyse the request",
@@ -57,6 +67,7 @@ impl SpecialistAgent {
     pub fn refactor() -> Self {
         Self::new(
             "refactor-agent",
+            "Restructure existing code for clarity without changing its behaviour.",
             "You are a refactoring specialist. Improve structure and clarity while preserving behaviour.",
             &[
                 "locate the code",
@@ -71,6 +82,7 @@ impl SpecialistAgent {
     pub fn test() -> Self {
         Self::new(
             "test-agent",
+            "Write thorough, deterministic tests covering edge cases.",
             "You are a testing specialist. Write thorough, deterministic tests covering edge cases.",
             &[
                 "identify units under test",
@@ -85,6 +97,7 @@ impl SpecialistAgent {
     pub fn review() -> Self {
         Self::new(
             "review-agent",
+            "Review a change for correctness bugs and concrete improvements.",
             "You are a meticulous code reviewer. Find correctness bugs and suggest concrete improvements.",
             &[
                 "read the diff",
@@ -99,6 +112,7 @@ impl SpecialistAgent {
     pub fn docs() -> Self {
         Self::new(
             "docs-agent",
+            "Write and update clear, accurate documentation for the code.",
             "You are a technical writer. Produce clear, accurate documentation for the code.",
             &[
                 "understand the subject",
@@ -113,6 +127,7 @@ impl SpecialistAgent {
     pub fn git() -> Self {
         Self::new(
             "git-agent",
+            "Stage changes and author clear, conventional Git commits.",
             "You are a version-control specialist. Stage changes and write clear, conventional commits.",
             &[
                 "inspect the working tree",
@@ -127,6 +142,7 @@ impl SpecialistAgent {
     pub fn security() -> Self {
         Self::new(
             "security-agent",
+            "Audit code for vulnerabilities and propose safe remediations.",
             "You are a security auditor. Identify vulnerabilities and propose safe remediations.",
             &[
                 "map the attack surface",
@@ -142,6 +158,10 @@ impl SpecialistAgent {
 impl Agent for SpecialistAgent {
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn description(&self) -> &str {
+        &self.description
     }
 
     async fn run(&self, goal: &str, ctx: &mut AgentContext) -> Result<AgentOutcome, AgentError> {

@@ -56,12 +56,17 @@ pub struct SkillEntry {
 /// An MCP server shown in the palette's MCP mode.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct McpEntry {
-    /// The configured server name (dispatched to `mcp.connect`/`mcp.disconnect`).
+    /// The configured server name (dispatched to `mcp.connect`/`mcp.disconnect`),
+    /// or, for an `available` catalogue entry, the connector id (dispatched to
+    /// `mcp.add`).
     pub name: String,
     /// A compact status line, e.g. `http · 3 tools · connected`.
     pub detail: String,
     /// Whether the server is currently connected — decides the toggle action.
     pub connected: bool,
+    /// Whether this is a built-in connector not yet added (an "add" action)
+    /// rather than an already-configured server (a connect/disconnect toggle).
+    pub available: bool,
 }
 
 /// A single row shown in the palette — a command, a skill, or an MCP server.
@@ -107,6 +112,8 @@ pub enum PaletteAction {
     ConnectMcp(String),
     /// Disconnect the named MCP server (dispatch `mcp.disconnect { server: <name> }`).
     DisconnectMcp(String),
+    /// Add a built-in connector (dispatch `mcp.add { connector: <id> }`).
+    AddMcp(String),
 }
 
 impl CommandPalette {
@@ -225,6 +232,8 @@ impl CommandPalette {
         match self.items().into_iter().nth(self.selected)? {
             PaletteItem::Command(name) => Some(PaletteAction::RunCommand(name)),
             PaletteItem::Skill(entry) => Some(PaletteAction::RunSkill(entry.name)),
+            // A catalogue connector not yet configured: add it.
+            PaletteItem::Mcp(entry) if entry.available => Some(PaletteAction::AddMcp(entry.name)),
             PaletteItem::Mcp(entry) if entry.connected => {
                 Some(PaletteAction::DisconnectMcp(entry.name))
             }
@@ -463,11 +472,13 @@ mod tests {
                 name: "github".into(),
                 detail: "stdio · 3 tools · connected".into(),
                 connected: true,
+                available: false,
             },
             McpEntry {
                 name: "linear".into(),
                 detail: "http · offline".into(),
                 connected: false,
+                available: false,
             },
         ]);
         p
@@ -506,6 +517,21 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].label(), "linear");
         assert_eq!(p.accept(), Some(PaletteAction::ConnectMcp("linear".into())));
+    }
+
+    #[test]
+    fn accepting_an_available_connector_adds_it() {
+        let mut p = palette();
+        p.set_mcp_servers(vec![McpEntry {
+            name: "filesystem".into(),
+            detail: "add · read/write files".into(),
+            connected: false,
+            available: true,
+        }]);
+        for c in "@filesystem".chars() {
+            p.push(c);
+        }
+        assert_eq!(p.accept(), Some(PaletteAction::AddMcp("filesystem".into())));
     }
 
     #[test]

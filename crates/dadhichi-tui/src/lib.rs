@@ -136,12 +136,71 @@ fn render_problems(app: &App, frame: &mut Frame, area: Rect) {
 }
 
 fn render_chat(app: &App, frame: &mut Frame, area: Rect) {
-    let block = panel("Agent Console", app.focus() == Focus::Chat);
+    let focused = app.focus() == Focus::Chat;
+    let title = if app.agent_running {
+        "Agent Console  ⋯ running"
+    } else {
+        "Agent Console"
+    };
+    let block = panel(title, focused);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    // Split the console: scrolling transcript on top, a one-line goal input
+    // pinned to the bottom (with a rule above it).
+    let rows = Layout::vertical([
+        Constraint::Min(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .split(inner);
+
+    // Keep the newest transcript lines visible by scrolling to the tail.
     let text: Vec<Line> = app.chat.iter().map(|l| Line::from(l.as_str())).collect();
+    let overflow = text.len().saturating_sub(rows[0].height as usize) as u16;
     frame.render_widget(
-        Paragraph::new(text).block(block).wrap(Wrap { trim: false }),
-        area,
+        Paragraph::new(text)
+            .wrap(Wrap { trim: false })
+            .scroll((overflow, 0)),
+        rows[0],
     );
+
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "─".repeat(rows[1].width as usize),
+            Style::default().fg(Color::DarkGray),
+        ))),
+        rows[1],
+    );
+
+    // The goal input. A dim hint stands in until the user types; once focused a
+    // block cursor marks the caret.
+    let input = if app.prompt.is_empty() && !focused {
+        Line::from(Span::styled(
+            "❯ type a goal, press Enter to run · Tab to switch panes",
+            Style::default().fg(Color::DarkGray),
+        ))
+    } else {
+        let caret = if focused { "▏" } else { "" };
+        // Keep the caret in view: when the goal outgrows the line, show its tail.
+        let budget = (rows[2].width as usize).saturating_sub(3);
+        let shown: String = {
+            let chars: Vec<char> = app.prompt.chars().collect();
+            let start = chars.len().saturating_sub(budget);
+            chars[start..].iter().collect()
+        };
+        Line::from(vec![
+            Span::styled(
+                "❯ ",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(shown),
+            Span::styled(caret, Style::default().fg(Color::Green)),
+        ])
+    };
+    frame.render_widget(Paragraph::new(input), rows[2]);
 }
 
 fn render_status(app: &App, frame: &mut Frame, area: Rect) {
@@ -153,7 +212,7 @@ fn render_status(app: &App, frame: &mut Frame, area: Rect) {
         ),
         Span::raw(format!(" {} ", app.status)),
         Span::styled(format!("[{focus}]"), Style::default().fg(Color::DarkGray)),
-        Span::raw("  Ctrl-P palette · Tab focus · q quit"),
+        Span::raw("  Enter run goal · Ctrl-P palette · Tab focus · Ctrl-Q quit"),
     ]);
     frame.render_widget(Paragraph::new(line), area);
 }
@@ -278,6 +337,33 @@ mod tests {
         assert!(text.contains("Agent Console"), "chat panel drawn");
         assert!(text.contains("fn main()"), "editor content shown");
         assert!(text.contains("dadhichi"), "status bar drawn");
+    }
+
+    #[test]
+    fn renders_goal_input_line() {
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let mut app = demo_app(); // starts focused on the console
+        app.prompt_push('f');
+        app.prompt_push('i');
+        app.prompt_push('x');
+        terminal.draw(|f| render(&app, f)).unwrap();
+
+        let text = buffer_text(&terminal);
+        assert!(text.contains("❯ fix"), "typed goal shown in the input line");
+    }
+
+    #[test]
+    fn renders_goal_hint_when_empty_and_unfocused() {
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let mut app = demo_app();
+        app.set_focus(Focus::Editor); // move focus off the console
+        terminal.draw(|f| render(&app, f)).unwrap();
+
+        let text = buffer_text(&terminal);
+        assert!(
+            text.contains("type a goal"),
+            "hint shown when input is empty"
+        );
     }
 
     #[test]

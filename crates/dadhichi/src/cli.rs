@@ -21,8 +21,34 @@ pub enum Command {
     Help,
     /// Manage the encrypted credential vault, then exit.
     Vault(VaultCommand),
+    /// Manage the skill library (import a manifest, list installed skills).
+    Skill(SkillCommand),
     /// Boot the kernel and run the agent against `goal`.
     Run { goal: Option<String> },
+}
+
+/// A `dadhichi skill …` subcommand for managing the on-disk skill library that
+/// the agent console and TUI load from `~/.dadhichi/skills`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SkillCommand {
+    /// Validate and install the manifest at `path` into the user skills dir.
+    Import { path: String },
+    /// List the available skills (built-ins plus everything on disk).
+    List,
+    /// Print skill usage.
+    Help,
+}
+
+/// Parse the tokens following `skill` into a [`SkillCommand`].
+fn parse_skill(args: &[String]) -> SkillCommand {
+    match args.first().map(String::as_str) {
+        Some("import" | "add" | "install") => match args.get(1) {
+            Some(path) if !path.is_empty() => SkillCommand::Import { path: path.clone() },
+            _ => SkillCommand::Help,
+        },
+        Some("list" | "ls") => SkillCommand::List,
+        _ => SkillCommand::Help,
+    }
 }
 
 /// A `dadhichi vault …` subcommand. Populates the encrypted store the MCP
@@ -73,6 +99,7 @@ pub fn help_text() -> String {
 USAGE:
     {name} [OPTIONS] [GOAL]
     {name} vault <set NAME | list | remove NAME>
+    {name} skill <import PATH | list>
 
 ARGS:
     <GOAL>    Natural-language goal for the built-in agent to plan and execute.
@@ -88,6 +115,9 @@ SUBCOMMANDS:
     vault remove NAME    Delete the secret under NAME.
                          MCP servers in mcp.json reference these as
                          `${{vault:NAME}}`, keeping tokens out of plaintext env.
+    skill import PATH    Validate a skill JSON manifest and install it into
+                         ~/.dadhichi/skills so the agent console and TUI load it.
+    skill list           List the available skills (built-ins plus on-disk).
 
 ENVIRONMENT:
     RUST_LOG              Tracing filter (e.g. `info`, `dadhichi=debug`). Defaults to `warn`.
@@ -102,8 +132,14 @@ ENVIRONMENT:
                          Azure / vLLM / LM Studio / proxies).
     OPENROUTER_API_KEY   Use the OpenRouter aggregator.
     OLLAMA_HOST          Use a local Ollama server at this host (no key needed).
+    OLLAMA_MODEL         The Ollama model name to run (e.g. llama3.2).
     DADHICHI_PROVIDER    Pick the default provider when several are configured
                          (anthropic | openai | openrouter | ollama | mock).
+    DADHICHI_MODEL       The concrete model name to send to the default provider
+                         (e.g. gpt-4o, claude-3-5-sonnet-latest, llama3.2).
+
+The interactive terminal shell installs alongside this CLI as `dadhichi-tui`
+(Ctrl-P for the command palette; `>` runs skills, `@` manages MCP servers).
 
 Everything runs offline by default via the built-in mock model provider, so no
 API keys are required to try it. See https://github.com/pariharshyamu/Dadhichi.",
@@ -124,9 +160,12 @@ where
 {
     let args: Vec<String> = args.into_iter().map(Into::into).collect();
 
-    // The `vault` subcommand claims the whole invocation.
+    // The `vault` and `skill` subcommands claim the whole invocation.
     if args.first().map(String::as_str) == Some("vault") {
         return Command::Vault(parse_vault(&args[1..]));
+    }
+    if args.first().map(String::as_str) == Some("skill") {
+        return Command::Skill(parse_skill(&args[1..]));
     }
 
     let mut goal: Option<String> = None;
@@ -231,6 +270,33 @@ mod tests {
             Command::Vault(VaultCommand::Remove {
                 name: "openai".to_string()
             })
+        );
+    }
+
+    #[test]
+    fn skill_import_captures_the_path() {
+        assert_eq!(
+            parse(["skill", "import", "./my-skill.json"]),
+            Command::Skill(SkillCommand::Import {
+                path: "./my-skill.json".to_string()
+            })
+        );
+        // `add` and `install` are accepted aliases.
+        assert_eq!(
+            parse(["skill", "add", "x.json"]),
+            Command::Skill(SkillCommand::Import {
+                path: "x.json".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn skill_list_and_bare_skill_parse() {
+        assert_eq!(parse(["skill", "list"]), Command::Skill(SkillCommand::List));
+        assert_eq!(parse(["skill"]), Command::Skill(SkillCommand::Help));
+        assert_eq!(
+            parse(["skill", "import"]),
+            Command::Skill(SkillCommand::Help)
         );
     }
 

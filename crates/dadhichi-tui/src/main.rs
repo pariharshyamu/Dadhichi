@@ -31,9 +31,13 @@ async fn main() -> io::Result<()> {
             .open_document(Some(cwd.join("Cargo.toml")), &text);
     }
     controller.ui_mut().status = match GitRepo::open(&cwd).ok().and_then(|r| r.current_branch()) {
-        Some(branch) => format!("on branch {branch}  ·  Ctrl-P for commands"),
+        Some(branch) => format!("on branch {branch}"),
         None => "no git repository".into(),
     };
+    // Greet in the console so the goal input isn't facing an empty void.
+    controller
+        .ui_mut()
+        .push_chat("Welcome to Dadhichi. Type a goal below and press Enter.");
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -90,8 +94,30 @@ async fn handle_key(ctrl: &mut AppController, code: KeyCode, mods: KeyModifiers)
         return false;
     }
 
+    // Ctrl-P and quit are global; Esc quits only outside the console, where it
+    // would otherwise swallow a keystroke the goal input wants.
     match (code, mods) {
-        (KeyCode::Char('p'), KeyModifiers::CONTROL) => ctrl.ui_mut().toggle_palette(),
+        (KeyCode::Char('p'), KeyModifiers::CONTROL) => {
+            ctrl.ui_mut().toggle_palette();
+            return false;
+        }
+        (KeyCode::Char('q'), KeyModifiers::CONTROL) => return true,
+        _ => {}
+    }
+
+    // The agent console owns free text: letters build the goal, Enter runs it.
+    if ctrl.ui().focus() == Focus::Chat {
+        match code {
+            KeyCode::Enter => submit_goal(ctrl),
+            KeyCode::Backspace => ctrl.ui_mut().prompt_backspace(),
+            KeyCode::Tab => ctrl.ui_mut().cycle_focus(),
+            KeyCode::Char(c) => ctrl.ui_mut().prompt_push(c),
+            _ => {}
+        }
+        return false;
+    }
+
+    match (code, mods) {
         (KeyCode::Char('q'), _) | (KeyCode::Esc, _) => return true,
         (KeyCode::Tab, _) => ctrl.ui_mut().cycle_focus(),
         (KeyCode::Up, _) => navigate(ctrl, -1),
@@ -110,6 +136,20 @@ async fn handle_key(ctrl: &mut AppController, code: KeyCode, mods: KeyModifiers)
         _ => {}
     }
     false
+}
+
+/// Submit the typed goal to the agent. Echoes it into the transcript and starts
+/// the run **without blocking** — `start_agent_goal` spawns the dispatch, so the
+/// render loop keeps pumping and the run's `agent.*` events stream into the
+/// console as the model produces them. Marks the console busy until a terminal
+/// `agent.*` event clears it.
+fn submit_goal(ctrl: &mut AppController) {
+    let Some(goal) = ctrl.ui_mut().take_prompt() else {
+        return;
+    };
+    ctrl.ui_mut().push_chat(format!("❯ {goal}"));
+    ctrl.ui_mut().set_agent_running(true);
+    ctrl.start_agent_goal(&goal);
 }
 
 /// Move the selection/cursor within the focused panel.

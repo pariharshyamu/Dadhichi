@@ -41,6 +41,7 @@ pub mod memory;
 pub mod orchestrator;
 pub mod plan;
 pub mod semantic;
+pub mod task_tool;
 pub mod verify;
 pub mod workflow;
 
@@ -53,6 +54,7 @@ pub use memory::{Memory, MemoryItem, Tier};
 pub use orchestrator::{Checkpoint, Orchestrator};
 pub use plan::{Plan, Step};
 pub use semantic::SemanticMemory;
+pub use task_tool::TaskTool;
 pub use verify::{HeuristicVerifier, Verdict, Verifier};
 pub use workflow::{Workflow, WorkflowReport, WorkflowStep};
 

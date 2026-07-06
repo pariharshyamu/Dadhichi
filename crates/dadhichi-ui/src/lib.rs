@@ -83,6 +83,12 @@ pub struct App {
     pub problems: ProblemsPanel,
     /// The chat / agent-console transcript.
     pub chat: Vec<String>,
+    /// The goal the user is typing into the agent console's input line, not yet
+    /// submitted. `take_prompt` drains it when they press Enter.
+    pub prompt: String,
+    /// Whether an agent run is in flight — drives the console's busy indicator.
+    /// Set when a goal is submitted, cleared by a terminal `agent.*` event.
+    pub agent_running: bool,
     /// The status-bar message.
     pub status: String,
     focus: Focus,
@@ -97,8 +103,12 @@ impl Default for App {
             palette: CommandPalette::new(),
             problems: ProblemsPanel::new(),
             chat: Vec::new(),
+            prompt: String::new(),
+            agent_running: false,
             status: "ready".into(),
-            focus: Focus::Editor,
+            // Land on the agent console so the goal input has focus at startup —
+            // typing a goal and pressing Enter is the primary action.
+            focus: Focus::Chat,
         }
     }
 }
@@ -168,6 +178,30 @@ impl App {
         self.chat.push(line.into());
     }
 
+    /// Append a character to the agent-console goal input.
+    pub fn prompt_push(&mut self, c: char) {
+        self.prompt.push(c);
+    }
+
+    /// Delete the last character of the goal input.
+    pub fn prompt_backspace(&mut self) {
+        self.prompt.pop();
+    }
+
+    /// Take the typed goal, trimmed, clearing the input. Returns `None` when the
+    /// input is blank so the frontend can ignore an empty Enter.
+    pub fn take_prompt(&mut self) -> Option<String> {
+        let goal = self.prompt.trim().to_string();
+        self.prompt.clear();
+        if goal.is_empty() { None } else { Some(goal) }
+    }
+
+    /// Mark an agent run as in flight (or finished). The frontend sets this when
+    /// it starts a run; terminal events clear it via `apply_event`.
+    pub fn set_agent_running(&mut self, running: bool) {
+        self.agent_running = running;
+    }
+
     /// Apply a kernel event, routing it to the right view-model. This is the
     /// single seam through which bus traffic mutates UI state.
     pub fn apply_event(&mut self, event: &Event) {
@@ -193,6 +227,16 @@ impl App {
                 }
             }
             t if t.starts_with("agent.") || t.starts_with("skill.") || t.starts_with("mcp.") => {
+                // Clear the busy indicator when a run reaches a terminal state or
+                // errors out, so the console stops showing "running".
+                if t == "agent.error" {
+                    self.agent_running = false;
+                } else if t == "agent.status" {
+                    let status = event.payload.get("status").and_then(|s| s.as_str());
+                    if matches!(status, Some("completed" | "failed" | "error" | "idle")) {
+                        self.agent_running = false;
+                    }
+                }
                 self.chat
                     .push(format!("[{}] {}", t, compact(&event.payload)));
             }
@@ -220,13 +264,55 @@ mod tests {
     #[test]
     fn focus_cycles_through_panels() {
         let mut app = App::new();
+        // Startup focus is the agent console (the goal input).
+        assert_eq!(app.focus(), Focus::Chat);
+        app.cycle_focus();
+        assert_eq!(app.focus(), Focus::Explorer);
+        app.cycle_focus();
         assert_eq!(app.focus(), Focus::Editor);
         app.cycle_focus();
         assert_eq!(app.focus(), Focus::Problems);
         app.cycle_focus();
         assert_eq!(app.focus(), Focus::Chat);
-        app.cycle_focus();
-        assert_eq!(app.focus(), Focus::Explorer);
+    }
+
+    #[test]
+    fn take_prompt_trims_and_clears() {
+        let mut app = App::new();
+        assert_eq!(app.take_prompt(), None);
+        app.prompt_push('h');
+        app.prompt_push('i');
+        assert_eq!(app.take_prompt().as_deref(), Some("hi"));
+        assert!(app.prompt.is_empty());
+    }
+
+    #[test]
+    fn agent_running_clears_on_terminal_event() {
+        let mut app = App::new();
+        app.set_agent_running(true);
+        // A non-terminal status keeps it running.
+        app.apply_event(&Event::new(
+            "agent.status",
+            serde_json::json!({ "status": "running" }),
+        ));
+        assert!(app.agent_running);
+        // A completed status clears it.
+        app.apply_event(&Event::new(
+            "agent.status",
+            serde_json::json!({ "status": "completed" }),
+        ));
+        assert!(!app.agent_running);
+    }
+
+    #[test]
+    fn agent_running_clears_on_error() {
+        let mut app = App::new();
+        app.set_agent_running(true);
+        app.apply_event(&Event::new(
+            "agent.error",
+            serde_json::json!({ "error": "boom" }),
+        ));
+        assert!(!app.agent_running);
     }
 
     #[test]

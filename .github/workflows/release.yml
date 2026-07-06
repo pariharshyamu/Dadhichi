@@ -23,6 +23,10 @@ jobs:
   build:
     name: build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
+    # The aarch64 Linux leg is a cross-compile of heavy C deps (RocksDB, SQLite,
+    # libgit2); treat its failure as non-fatal so it can never block the release
+    # of the natively-built targets (Windows, macOS, x86_64 Linux).
+    continue-on-error: ${{ matrix.cross || false }}
     strategy:
       fail-fast: false
       matrix:
@@ -49,8 +53,8 @@ jobs:
           sudo apt-get install -y gcc-aarch64-linux-gnu
           echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
 
-      - name: Build release binary
-        run: cargo build --release --locked --target ${{ matrix.target }} --bin dadhichi
+      - name: Build release binaries
+        run: cargo build --release --locked --target ${{ matrix.target }} --bin dadhichi --bin dadhichi-tui
 
       - name: Package (Unix)
         if: matrix.ext == 'tar.gz'
@@ -59,6 +63,7 @@ jobs:
           staging="${BIN_NAME}-${{ matrix.target }}"
           mkdir -p "$staging"
           cp "target/${{ matrix.target }}/release/${BIN_NAME}" "$staging/"
+          cp "target/${{ matrix.target }}/release/${BIN_NAME}-tui" "$staging/"
           cp README.md LICENSE "$staging/"
           cp packaging/linux/dadhichi.1 "$staging/" 2>/dev/null || true
           tar -czf "${staging}.tar.gz" "$staging"
@@ -71,6 +76,7 @@ jobs:
           staging="${BIN_NAME}-${{ matrix.target }}"
           mkdir -p "$staging"
           cp "target/${{ matrix.target }}/release/${BIN_NAME}.exe" "$staging/"
+          cp "target/${{ matrix.target }}/release/${BIN_NAME}-tui.exe" "$staging/"
           cp README.md LICENSE "$staging/"
           7z a "${staging}.zip" "$staging" >/dev/null
           certutil -hashfile "${staging}.zip" SHA256 | sed -n 2p | tr -d ' \r' > "${staging}.zip.sha256"
@@ -87,6 +93,9 @@ jobs:
   linux-packages:
     name: deb + rpm
     runs-on: ubuntu-latest
+    # Distro packages are a convenience; a failure here must not block the
+    # release of the portable archives.
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust toolchain
@@ -94,8 +103,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install packagers
         run: cargo install cargo-deb cargo-generate-rpm --locked
-      - name: Build release binary
-        run: cargo build --release --locked --bin dadhichi
+      - name: Build release binaries
+        run: cargo build --release --locked --bin dadhichi --bin dadhichi-tui
       - name: Build .deb
         run: cargo deb -p dadhichi --no-build --output dist/
       - name: Build .rpm
@@ -112,6 +121,9 @@ jobs:
   release:
     name: publish release
     needs: [build, linux-packages]
+    # Publish whatever built: run even if a non-critical build leg (aarch64
+    # Linux, distro packages) failed, so the proven targets still ship.
+    if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -121,12 +133,18 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: artifacts
+          merge-multiple: true
       - name: Flatten
         run: |
           mkdir -p release
           find artifacts -type f -exec cp {} release/ \;
           ls -la release
       - name: Render Homebrew formula
+        # The formula's sha256 is of the tag's source tarball, which only exists
+        # once the release is published — so on a workflow_dispatch run (no tag
+        # yet) this can't render. It's a convenience asset; never let it block
+        # the release of the binaries.
+        continue-on-error: true
         run: |
           tag="${{ github.event.inputs.tag || github.ref_name }}"
           bash packaging/homebrew/update-formula.sh "$tag"
