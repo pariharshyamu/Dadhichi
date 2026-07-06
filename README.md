@@ -29,7 +29,14 @@ live stdio MCP client with tool bridging, and a DAP debugger client. Agents can
 **delegate** self-contained sub-tasks to a specialist via the `task` tool (or
 the `agent.spawn` command), which runs it in an **isolated context window** —
 only the task goes in and only the summary comes back — so a delegate's
-intermediate reasoning never pollutes the caller's context. Consequential tools
+intermediate reasoning never pollutes the caller's context. A delegate can also
+**do real work and land it on the branch**: `dadhichi delegate <specialist>
+<task>` runs a tool-using sub-agent whose file writes are staged in a
+copy-on-write overlay (nothing touches the working tree), then — deep-agents
+style — the orchestrator either **auto-lands** the change set when its verified
+confidence clears a threshold or holds it for a **`y/N` approval**; landing
+flushes the overlay to the workspace and **commits it to the current branch**.
+Consequential tools
 (running a shell command, writing the workspace) pass through a **human-in-the-
 loop approval gate** — the run pauses for a `y/n` prompt before anything
 executes — and long runs stay inside the model's context window via automatic

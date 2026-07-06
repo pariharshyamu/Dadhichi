@@ -17,6 +17,7 @@
 mod approve;
 mod cli;
 mod console;
+mod delegate_cmd;
 mod skill;
 mod vault;
 
@@ -61,6 +62,11 @@ async fn main() {
         }
         cli::Command::Skill(cmd) => {
             skill::run(cmd);
+            return;
+        }
+        cli::Command::Delegate { subagent, task } => {
+            init_tracing();
+            delegate_cmd::run(subagent, task).await;
             return;
         }
         cli::Command::Run { goal } => goal,

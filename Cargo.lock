@@ -366,6 +366,7 @@ dependencies = [
  "dadhichi-cache",
  "dadhichi-collab",
  "dadhichi-core",
+ "dadhichi-git",
  "dadhichi-index",
  "dadhichi-mcp",
  "dadhichi-plugin",

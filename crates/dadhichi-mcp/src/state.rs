@@ -255,6 +255,77 @@ impl OverlayStore {
     fn deleted_lock(&self) -> std::sync::RwLockReadGuard<'_, HashSet<String>> {
         self.deleted.read().unwrap_or_else(|e| e.into_inner())
     }
+
+    /// The set of paths this overlay has written or deleted relative to its base
+    /// — the diff `flush` would apply. Sorted by path. This is what a reviewer
+    /// (or the orchestrator's verifier) inspects before the work lands.
+    pub fn changes(&self) -> Vec<OverlayChange> {
+        let mut out: Vec<OverlayChange> = self
+            .overlay
+            .list("")
+            .unwrap_or_default()
+            .into_iter()
+            .map(|path| OverlayChange {
+                path,
+                deleted: false,
+            })
+            .collect();
+        for path in self.deleted_lock().iter() {
+            out.push(OverlayChange {
+                path: path.clone(),
+                deleted: true,
+            });
+        }
+        out.sort_by(|a, b| a.path.cmp(&b.path));
+        out
+    }
+
+    /// Whether the overlay has any staged change.
+    pub fn is_dirty(&self) -> bool {
+        self.overlay
+            .list("")
+            .map(|l| !l.is_empty())
+            .unwrap_or(false)
+            || !self.deleted_lock().is_empty()
+    }
+
+    /// Apply every staged write and delete to the base store, then clear the
+    /// overlay so it reflects the merged state. Returns the number of paths
+    /// changed. This is the "land the delegate's work" step, run only once the
+    /// change set has been verified or approved.
+    pub fn flush(&self) -> Result<usize, StateError> {
+        let mut applied = 0;
+        let written = self.overlay.list("")?;
+        for path in &written {
+            let content = self.overlay.read(path)?;
+            self.base.write(path, &content)?;
+            applied += 1;
+        }
+        let deletions: Vec<String> = self.deleted_lock().iter().cloned().collect();
+        for path in &deletions {
+            self.base.delete(path)?;
+            applied += 1;
+        }
+        // The changes now live in the base; drop the staged copy so the overlay
+        // is a clean pass-through again.
+        for path in &written {
+            let _ = self.overlay.delete(path);
+        }
+        self.deleted
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        Ok(applied)
+    }
+}
+
+/// A single staged change in an [`OverlayStore`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OverlayChange {
+    /// The affected path, relative to the store root.
+    pub path: String,
+    /// `true` for a deletion, `false` for a write/create.
+    pub deleted: bool,
 }
 
 impl StateStore for OverlayStore {
@@ -386,5 +457,54 @@ mod tests {
             Err(StateError::NotFound(_))
         ));
         assert_eq!(base.read("shared.txt").unwrap(), "from parent");
+    }
+
+    #[test]
+    fn overlay_changes_then_flush_lands_on_the_base() {
+        let base: Arc<dyn StateStore> = Arc::new(MemStore::new());
+        base.write("keep.txt", "v1").unwrap();
+        base.write("drop.txt", "gone soon").unwrap();
+        let overlay = OverlayStore::new(base.clone());
+
+        // The delegate does some work in isolation.
+        overlay.write("new.txt", "created").unwrap();
+        overlay.write("keep.txt", "v2").unwrap();
+        overlay.delete("drop.txt").unwrap();
+
+        // The staged change set is reviewable, sorted, and marks the deletion.
+        let changes = overlay.changes();
+        assert!(overlay.is_dirty());
+        assert_eq!(
+            changes,
+            vec![
+                OverlayChange {
+                    path: "drop.txt".into(),
+                    deleted: true
+                },
+                OverlayChange {
+                    path: "keep.txt".into(),
+                    deleted: false
+                },
+                OverlayChange {
+                    path: "new.txt".into(),
+                    deleted: false
+                },
+            ]
+        );
+        // Nothing has touched the base yet.
+        assert_eq!(base.read("keep.txt").unwrap(), "v1");
+        assert!(base.read("new.txt").is_err());
+
+        // Landing the work applies every change to the base and clears staging.
+        let applied = overlay.flush().unwrap();
+        assert_eq!(applied, 3);
+        assert_eq!(base.read("new.txt").unwrap(), "created");
+        assert_eq!(base.read("keep.txt").unwrap(), "v2");
+        assert!(matches!(
+            base.read("drop.txt"),
+            Err(StateError::NotFound(_))
+        ));
+        assert!(!overlay.is_dirty(), "overlay is clean after flush");
+        assert!(overlay.changes().is_empty());
     }
 }

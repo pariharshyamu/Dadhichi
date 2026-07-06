@@ -23,6 +23,7 @@ dadhichi-agent.workspace = true
 dadhichi-skill.workspace = true
 dadhichi-mcp.workspace = true
 dadhichi-workspace.workspace = true
+dadhichi-git.workspace = true
 dadhichi-index.workspace = true
 dadhichi-cache.workspace = true
 dadhichi-plugin.workspace = true
