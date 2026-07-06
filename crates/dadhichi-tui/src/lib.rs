@@ -137,7 +137,12 @@ fn render_problems(app: &App, frame: &mut Frame, area: Rect) {
 
 fn render_chat(app: &App, frame: &mut Frame, area: Rect) {
     let focused = app.focus() == Focus::Chat;
-    let block = panel("Agent Console", focused);
+    let title = if app.agent_running {
+        "Agent Console  ⋯ running"
+    } else {
+        "Agent Console"
+    };
+    let block = panel(title, focused);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 

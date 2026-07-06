@@ -306,13 +306,26 @@ Launch the live terminal shell with `cargo run -p dadhichi-tui` (or the
 installed `dadhichi-tui`). It opens focused on the **Agent Console**: type a
 goal on the input line at the bottom and press **Enter** to run the
 conversational agent against it — its planning/running/token/completion events
-stream into the console above as it works. **Ctrl-P** opens the command palette,
-which dispatches real kernel commands (run a specific agent, re-index the
-workspace) whose progress streams into the panels. Type `>` in the palette to
+stream into the console above as it works. The run is **non-blocking**: the
+console keeps updating (and shows a `⋯ running` indicator) while the model
+thinks, so a slow local model never freezes the UI. **Ctrl-P** opens the command
+palette, which dispatches real kernel commands (run a specific agent, re-index
+the workspace) whose progress streams into the panels. Type `>` in the palette to
 switch to **skill mode**: it lists the equippable skills with their required
 permissions and tool scope inline, and Enter runs the highlighted one; `@`
-switches to **MCP mode** to connect/disconnect servers. **Tab** cycles focus
-between panes, **Ctrl-Q** quits.
+switches to **MCP mode**, which lists your configured servers (Enter toggles
+connect/disconnect) **and** the built-in connector catalogue — pick one (e.g.
+`filesystem`, `github`, `git`, `memory`) and Enter adds it to your `mcp.json` and
+connects it, no hand-editing. **Tab** cycles focus between panes, **Ctrl-Q**
+quits.
+
+Install your own **skills** by dropping a JSON manifest into `~/.dadhichi/skills`
+(the running TUI reloads it live), or with the CLI:
+
+```bash
+dadhichi skill import ./my-skill.json   # validate + install into ~/.dadhichi/skills
+dadhichi skill list                     # built-ins + everything on disk
+```
 Render a headless snapshot with `cargo run -p dadhichi-tui --example live` (the
 wired stack) or `--example snapshot` (the static layout).
 

@@ -16,6 +16,7 @@
 
 mod cli;
 mod console;
+mod skill;
 mod vault;
 
 use std::sync::Arc;
@@ -52,6 +53,10 @@ async fn main() {
         }
         cli::Command::Vault(cmd) => {
             vault::run(cmd);
+            return;
+        }
+        cli::Command::Skill(cmd) => {
+            skill::run(cmd);
             return;
         }
         cli::Command::Run { goal } => goal,

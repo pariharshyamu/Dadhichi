@@ -108,7 +108,7 @@ async fn handle_key(ctrl: &mut AppController, code: KeyCode, mods: KeyModifiers)
     // The agent console owns free text: letters build the goal, Enter runs it.
     if ctrl.ui().focus() == Focus::Chat {
         match code {
-            KeyCode::Enter => submit_goal(ctrl).await,
+            KeyCode::Enter => submit_goal(ctrl),
             KeyCode::Backspace => ctrl.ui_mut().prompt_backspace(),
             KeyCode::Tab => ctrl.ui_mut().cycle_focus(),
             KeyCode::Char(c) => ctrl.ui_mut().prompt_push(c),
@@ -138,16 +138,18 @@ async fn handle_key(ctrl: &mut AppController, code: KeyCode, mods: KeyModifiers)
     false
 }
 
-/// Submit the typed goal to the agent. Echoes it into the transcript, then
-/// dispatches `agent.run`; the run's `agent.*` events stream back on the next
-/// pump. Like the palette, the dispatch is awaited inline — the mock provider
-/// returns immediately, and a real provider shows its progress once it settles.
-async fn submit_goal(ctrl: &mut AppController) {
+/// Submit the typed goal to the agent. Echoes it into the transcript and starts
+/// the run **without blocking** — `start_agent_goal` spawns the dispatch, so the
+/// render loop keeps pumping and the run's `agent.*` events stream into the
+/// console as the model produces them. Marks the console busy until a terminal
+/// `agent.*` event clears it.
+fn submit_goal(ctrl: &mut AppController) {
     let Some(goal) = ctrl.ui_mut().take_prompt() else {
         return;
     };
     ctrl.ui_mut().push_chat(format!("❯ {goal}"));
-    ctrl.run_agent_goal(&goal).await;
+    ctrl.ui_mut().set_agent_running(true);
+    ctrl.start_agent_goal(&goal);
 }
 
 /// Move the selection/cursor within the focused panel.
