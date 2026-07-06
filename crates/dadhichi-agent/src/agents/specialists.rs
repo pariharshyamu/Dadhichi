@@ -174,10 +174,7 @@ impl Agent for SpecialistAgent {
         for step in &self.steps {
             plan = plan.step(Step::think(step.clone()));
         }
-        ctx.emit(
-            "agent.plan",
-            serde_json::json!({ "agent": self.name, "steps": plan.steps.len() }),
-        );
+        ctx.emit_plan(&plan);
         ctx.memory.remember(Tier::Working, format!("goal: {goal}"));
 
         // 2. Act: consult the model with the role's system prompt.
@@ -206,6 +203,7 @@ impl Agent for SpecialistAgent {
         for id in ids {
             plan.complete(id);
         }
+        ctx.emit_plan(&plan);
 
         // 3. Reflect: verify the work and derive a confidence score.
         let verdict = HeuristicVerifier.verify(goal, &completion.content, &plan);

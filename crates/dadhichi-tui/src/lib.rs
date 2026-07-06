@@ -37,7 +37,16 @@ pub fn render(app: &App, frame: &mut Frame) {
     render_editor(app, frame, center[0]);
     render_problems(app, frame, center[1]);
 
-    render_chat(app, frame, cols[2]);
+    // The right column holds the Agent Console, with a live Plan checklist
+    // stacked above it once the agent has produced a plan.
+    if app.plan.is_some() {
+        let right = Layout::vertical([Constraint::Percentage(40), Constraint::Percentage(60)])
+            .split(cols[2]);
+        render_plan(app, frame, right[0]);
+        render_chat(app, frame, right[1]);
+    } else {
+        render_chat(app, frame, cols[2]);
+    }
     render_status(app, frame, status);
 
     if app.palette.is_open() {
@@ -130,6 +139,55 @@ fn render_problems(app: &App, frame: &mut Frame, area: Rect) {
                     p.message
                 )),
             ]))
+        })
+        .collect();
+    frame.render_widget(List::new(items).block(block), area);
+}
+
+fn render_plan(app: &App, frame: &mut Frame, area: Rect) {
+    let Some(plan) = app.plan.as_ref() else {
+        return;
+    };
+    let heading = format!("Plan ({}%)", plan.percent_done());
+    let block = panel(&heading, false);
+
+    // The first not-yet-done step is the "active" one — mark it distinctly so the
+    // eye lands on what the agent is working on now.
+    let mut active_marked = false;
+    let items: Vec<ListItem> = plan
+        .steps
+        .iter()
+        .map(|step| {
+            if step.done {
+                ListItem::new(Line::from(vec![
+                    Span::styled("☑ ", Style::default().fg(Color::Green)),
+                    Span::styled(
+                        step.description.clone(),
+                        Style::default()
+                            .fg(Color::DarkGray)
+                            .add_modifier(Modifier::CROSSED_OUT),
+                    ),
+                ]))
+            } else if !active_marked {
+                active_marked = true;
+                ListItem::new(Line::from(vec![
+                    Span::styled(
+                        "▸ ",
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        step.description.clone(),
+                        Style::default().add_modifier(Modifier::BOLD),
+                    ),
+                ]))
+            } else {
+                ListItem::new(Line::from(vec![
+                    Span::styled("☐ ", Style::default().fg(Color::DarkGray)),
+                    Span::raw(step.description.clone()),
+                ]))
+            }
         })
         .collect();
     frame.render_widget(List::new(items).block(block), area);
@@ -337,6 +395,28 @@ mod tests {
         assert!(text.contains("Agent Console"), "chat panel drawn");
         assert!(text.contains("fn main()"), "editor content shown");
         assert!(text.contains("dadhichi"), "status bar drawn");
+    }
+
+    #[test]
+    fn renders_plan_panel_when_a_plan_is_present() {
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let mut app = demo_app();
+        app.apply_event(&dadhichi_core::Event::new(
+            "agent.plan",
+            serde_json::json!({
+                "goal": "g",
+                "steps": [
+                    { "description": "first thing", "done": true },
+                    { "description": "second thing", "done": false }
+                ]
+            }),
+        ));
+        terminal.draw(|f| render(&app, f)).unwrap();
+
+        let text = buffer_text(&terminal);
+        assert!(text.contains("Plan (50%)"), "plan header with progress");
+        assert!(text.contains("first thing"), "completed step shown");
+        assert!(text.contains("second thing"), "pending step shown");
     }
 
     #[test]

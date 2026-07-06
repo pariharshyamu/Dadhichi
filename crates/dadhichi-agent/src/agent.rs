@@ -106,6 +106,16 @@ impl AgentContext {
             .publish(Event::new(topic, payload).with_correlation(self.correlation_id));
     }
 
+    /// Emit the current `plan` as an `agent.plan` snapshot (goal + steps with
+    /// their done state), so a frontend can render a live checklist. Call it on
+    /// plan creation and after each step completes.
+    pub fn emit_plan(&self, plan: &Plan) {
+        self.emit(
+            "agent.plan",
+            serde_json::to_value(plan).unwrap_or_else(|_| serde_json::json!({ "steps": [] })),
+        );
+    }
+
     /// Create a sibling context that shares the services (model router, tool
     /// registry, event bus) and grants but gets fresh memory and a new
     /// correlation id. This is how the orchestrator runs several agents in

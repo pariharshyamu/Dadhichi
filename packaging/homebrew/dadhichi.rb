@@ -16,9 +16,9 @@ class Dadhichi < Formula
   head "https://github.com/pariharshyamu/Dadhichi.git", branch: "main"
 
   # BEGIN stable — managed by packaging/homebrew/update-formula.sh
-  url "https://github.com/pariharshyamu/Dadhichi/archive/refs/tags/v0.1.4.tar.gz"
+  url "https://github.com/pariharshyamu/Dadhichi/archive/refs/tags/v0.1.5.tar.gz"
   sha256 "0000000000000000000000000000000000000000000000000000000000000000"
-  version "0.1.4"
+  version "0.1.5"
   # END stable
 
   depends_on "rust" => :build

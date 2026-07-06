@@ -33,7 +33,15 @@ fn main() {
     ));
     app.apply_event(&dadhichi_core::Event::new(
         "agent.plan",
-        serde_json::json!({ "steps": 3 }),
+        serde_json::json!({
+            "goal": "add a retry to the http client",
+            "steps": [
+                { "description": "analyse the request", "done": true },
+                { "description": "design the implementation", "done": true },
+                { "description": "write the code", "done": false },
+                { "description": "self-review", "done": false }
+            ]
+        }),
     ));
     app.apply_event(&dadhichi_core::Event::new(
         "agent.status",

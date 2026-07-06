@@ -39,6 +39,36 @@ pub use problems::ProblemsPanel;
 use dadhichi_core::Event;
 use std::path::PathBuf;
 
+/// One step of the agent's live plan, as shown in the Plan panel.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PlanStep {
+    /// The step's imperative description.
+    pub description: String,
+    /// Whether the agent has completed this step.
+    pub done: bool,
+}
+
+/// The agent's current plan, rebuilt from each `agent.plan` snapshot event so the
+/// TUI can render a live checklist that ticks as the run progresses.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PlanView {
+    /// The goal the plan pursues.
+    pub goal: String,
+    /// The ordered steps with their completion state.
+    pub steps: Vec<PlanStep>,
+}
+
+impl PlanView {
+    /// Fraction of steps completed in `0..=100` (an empty plan reports 0).
+    pub fn percent_done(&self) -> u16 {
+        if self.steps.is_empty() {
+            return 0;
+        }
+        let done = self.steps.iter().filter(|s| s.done).count();
+        ((done * 100) / self.steps.len()) as u16
+    }
+}
+
 /// Which panel currently has keyboard focus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
@@ -89,6 +119,9 @@ pub struct App {
     /// Whether an agent run is in flight — drives the console's busy indicator.
     /// Set when a goal is submitted, cleared by a terminal `agent.*` event.
     pub agent_running: bool,
+    /// The agent's current plan, rendered as a live checklist. `None` until the
+    /// first `agent.plan` event of a run.
+    pub plan: Option<PlanView>,
     /// The status-bar message.
     pub status: String,
     focus: Focus,
@@ -105,6 +138,7 @@ impl Default for App {
             chat: Vec::new(),
             prompt: String::new(),
             agent_running: false,
+            plan: None,
             status: "ready".into(),
             // Land on the agent console so the goal input has focus at startup —
             // typing a goal and pressing Enter is the primary action.
@@ -226,6 +260,36 @@ impl App {
                     self.status = format!("changed: {path}");
                 }
             }
+            // A full plan snapshot: rebuild the Plan panel and keep the console
+            // line concise (the step array would otherwise flood it).
+            "agent.plan" => {
+                if let Some(steps) = event.payload.get("steps").and_then(|s| s.as_array()) {
+                    let goal = event
+                        .payload
+                        .get("goal")
+                        .and_then(|g| g.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let steps: Vec<PlanStep> = steps
+                        .iter()
+                        .map(|s| PlanStep {
+                            description: s
+                                .get("description")
+                                .and_then(|d| d.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                            done: s.get("done").and_then(|d| d.as_bool()).unwrap_or(false),
+                        })
+                        .collect();
+                    let n = steps.len();
+                    let done = steps.iter().filter(|s| s.done).count();
+                    self.plan = Some(PlanView { goal, steps });
+                    self.chat.push(format!(
+                        "[agent.plan] {done}/{n} step{}",
+                        if n == 1 { "" } else { "s" }
+                    ));
+                }
+            }
             t if t.starts_with("agent.") || t.starts_with("skill.") || t.starts_with("mcp.") => {
                 // Clear the busy indicator when a run reaches a terminal state or
                 // errors out, so the console stops showing "running".
@@ -302,6 +366,33 @@ mod tests {
             serde_json::json!({ "status": "completed" }),
         ));
         assert!(!app.agent_running);
+    }
+
+    #[test]
+    fn agent_plan_event_builds_the_plan_panel() {
+        let mut app = App::new();
+        app.apply_event(&Event::new(
+            "agent.plan",
+            serde_json::json!({
+                "goal": "add retries",
+                "steps": [
+                    { "description": "analyse", "done": true },
+                    { "description": "implement", "done": false },
+                    { "description": "test", "done": false }
+                ]
+            }),
+        ));
+        let plan = app.plan.as_ref().expect("plan built");
+        assert_eq!(plan.goal, "add retries");
+        assert_eq!(plan.steps.len(), 3);
+        assert!(plan.steps[0].done && !plan.steps[1].done);
+        assert_eq!(plan.percent_done(), 33);
+        // The console got a concise line, not the raw step array.
+        assert!(
+            app.chat
+                .iter()
+                .any(|l| l.contains("[agent.plan] 1/3 steps"))
+        );
     }
 
     #[test]
