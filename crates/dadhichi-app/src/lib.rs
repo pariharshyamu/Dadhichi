@@ -22,8 +22,8 @@ use dadhichi_core::{Command, Event, Kernel, KernelError, RecvError, Subscription
 use dadhichi_index::Indexer;
 use dadhichi_index::store::SqliteSymbolStore;
 use dadhichi_mcp::{
-    EchoTool, GrantSet, McpConnection, McpConnections, McpServersConfig, Permission, ToolRegistry,
-    connect_servers, connector,
+    ApprovalPolicy, EchoTool, GrantSet, McpConnection, McpConnections, McpServersConfig,
+    Permission, PermissionMode, TerminalTool, ToolRegistry, connect_servers, connector,
 };
 use dadhichi_security::{SecretResolver, Vault, VaultData};
 use dadhichi_skill::{
@@ -31,8 +31,14 @@ use dadhichi_skill::{
     watch_skills,
 };
 use dadhichi_ui::{App, McpEntry, PaletteAction, SkillEntry};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+
+pub mod approval;
+pub use approval::{BusApprover, PendingApprovals};
+// Re-exported so a frontend can answer prompts without depending on dadhichi-mcp.
+pub use dadhichi_mcp::Decision;
 
 /// Owns the live IDE state and mediates between the frontend and the kernel.
 pub struct AppController {
@@ -52,6 +58,10 @@ pub struct AppController {
     /// Holds each connection alive; disconnecting drops it and unregisters its
     /// tools.
     mcp: Arc<Mutex<McpConnections>>,
+    /// Tool calls parked awaiting the user's `y/n` approval, keyed by request id.
+    /// The `BusApprover` inserts a waiter here on interrupt; `resolve_approval`
+    /// fires it when the frontend answers.
+    approvals: PendingApprovals,
 }
 
 /// Build the resolver for `${...}` secrets in `mcp.json`: `env:NAME` (and bare
@@ -166,9 +176,25 @@ impl AppController {
         let plan = ProviderPlan::from_env();
         let model_id = plan.default_model();
         let router = Arc::new(plan.build_router());
+        // Tool-approval gate: consequential capabilities (running shell commands,
+        // writing the workspace) are set to *interrupt*, so every such call pauses
+        // for a human `y/n` routed through the bus. The `BusApprover` parks each
+        // call on a one-shot channel that `resolve_approval` fires. Read-only work
+        // stays un-gated, so ordinary agent runs aren't interrupted.
+        let approvals: PendingApprovals = Arc::new(Mutex::new(HashMap::new()));
         let tools = {
             let t = ToolRegistry::new();
             t.register(Arc::new(EchoTool));
+            t.register(Arc::new(TerminalTool));
+            t.set_policy(
+                ApprovalPolicy::default()
+                    .with(Permission::RunCommands, PermissionMode::Interrupt)
+                    .with(Permission::WriteWorkspace, PermissionMode::Interrupt),
+            );
+            t.set_approver(Arc::new(BusApprover::new(
+                kernel.bus().clone(),
+                approvals.clone(),
+            )));
             Arc::new(t)
         };
         let store = Arc::new(SqliteSymbolStore::in_memory().expect("open symbol store"));
@@ -302,6 +328,7 @@ impl AppController {
             _skill_watch: skill_watch,
             mcp_config,
             mcp,
+            approvals,
         }
     }
 
@@ -367,6 +394,61 @@ impl AppController {
                 ));
             }
         });
+    }
+
+    /// Run a shell command through the gated `terminal.run` tool **without
+    /// blocking**. Because `terminal.run` requires `RunCommands` — set to
+    /// *interrupt* — the call pauses and publishes an `agent.approval` event; the
+    /// render loop keeps pumping (the dispatch is spawned), so the TUI can show
+    /// the prompt and the user's `y/n` unblocks it via [`resolve_approval`]. The
+    /// command's `terminal.result` / `terminal.error` events stream the outcome
+    /// into the console.
+    ///
+    /// [`resolve_approval`]: Self::resolve_approval
+    pub fn start_terminal(&self, command: &str) {
+        let commands = self.kernel.commands().clone();
+        let bus = self.kernel.bus().clone();
+        let command = command.to_string();
+        tokio::spawn(async move {
+            let result = commands
+                .dispatch(Command {
+                    name: "terminal.run".into(),
+                    args: serde_json::json!({ "command": command }),
+                })
+                .await;
+            if let Err(err) = result {
+                bus.publish(Event::new(
+                    "terminal.error",
+                    serde_json::json!({ "error": err.to_string() }),
+                ));
+            }
+        });
+    }
+
+    /// Answer a pending tool-approval prompt: fire the parked one-shot so the
+    /// suspended tool call proceeds (or is rejected), and announce the verdict on
+    /// the bus as `agent.approval.resolved` (which clears the UI prompt). A no-op
+    /// if `id` isn't a live request.
+    pub fn resolve_approval(&self, id: &str, decision: Decision) {
+        let Ok(uuid) = uuid::Uuid::parse_str(id) else {
+            return;
+        };
+        let sender = self
+            .approvals
+            .lock()
+            .ok()
+            .and_then(|mut guard| guard.remove(&uuid));
+        if let Some(sender) = sender {
+            let _ = sender.send(decision);
+            let verdict = match decision {
+                Decision::Approve => "approve",
+                Decision::Deny => "deny",
+            };
+            self.kernel.bus().publish(Event::new(
+                "agent.approval.resolved",
+                serde_json::json!({ "id": id, "decision": verdict }),
+            ));
+        }
     }
 
     /// Accept the highlighted palette entry, close the palette, and dispatch it:
@@ -1394,6 +1476,55 @@ async fn register_commands(
             .await;
     }
 
+    // terminal.run — run a shell command through the gated `terminal.run` tool.
+    // The tool requires `RunCommands`, set to *interrupt*, so the invocation
+    // pauses for approval; the result (or rejection) is published as
+    // `terminal.result` / `terminal.error` for the console. Args: `{ command }`.
+    {
+        let tools = tools.clone();
+        let bus = kernel.bus().clone();
+        kernel
+            .commands()
+            .register(
+                "terminal.run",
+                Arc::new(move |cmd: Command| {
+                    let tools = tools.clone();
+                    let bus = bus.clone();
+                    async move {
+                        let command = str_arg(&cmd, "command")?;
+                        bus.publish(Event::new(
+                            "terminal.started",
+                            serde_json::json!({ "command": command }),
+                        ));
+                        // Grant the permission so the call reaches the approval
+                        // gate (rather than being statically denied).
+                        let grants = GrantSet::from_iter([Permission::RunCommands]);
+                        match tools
+                            .invoke(
+                                TerminalTool::NAME,
+                                serde_json::json!({ "command": command }),
+                                &grants,
+                            )
+                            .await
+                        {
+                            Ok(result) => {
+                                bus.publish(Event::new("terminal.result", result.clone()));
+                                Ok(result)
+                            }
+                            Err(err) => {
+                                bus.publish(Event::new(
+                                    "terminal.error",
+                                    serde_json::json!({ "command": command, "error": err.to_string() }),
+                                ));
+                                Err(KernelError::command_failed(err))
+                            }
+                        }
+                    }
+                }),
+            )
+            .await;
+    }
+
     // editor.save — emit a save event the status bar reflects.
     {
         let bus = kernel.bus().clone();
@@ -1578,6 +1709,80 @@ mod tests {
         assert!(saw_agent_event, "chat: {:?}", ctrl.ui().chat);
         // A terminal status cleared the busy flag.
         assert!(!ctrl.ui().agent_running);
+    }
+
+    #[tokio::test]
+    async fn shell_command_interrupts_for_approval_then_runs_when_approved() {
+        let mut ctrl = AppController::new(".").await;
+        ctrl.start_terminal("echo approved-run");
+
+        // The interrupt surfaces as an agent.approval event → a pending prompt.
+        let mut prompt_id = None;
+        for _ in 0..50 {
+            tokio::task::yield_now().await;
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            ctrl.pump();
+            if let Some(p) = ctrl.ui().pending_approval() {
+                prompt_id = Some(p.id.clone());
+                break;
+            }
+        }
+        let id = prompt_id.expect("approval prompt was raised");
+
+        // Approve it; the parked command resumes and reports its output.
+        ctrl.resolve_approval(&id, Decision::Approve);
+        let mut saw_result = false;
+        for _ in 0..50 {
+            tokio::task::yield_now().await;
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            ctrl.pump();
+            if ctrl.ui().chat.iter().any(|l| l.contains("approved-run")) {
+                saw_result = true;
+                break;
+            }
+        }
+        assert!(saw_result, "chat: {:?}", ctrl.ui().chat);
+        // The prompt was cleared by the resolved event.
+        assert!(ctrl.ui().pending_approval().is_none());
+    }
+
+    #[tokio::test]
+    async fn shell_command_is_rejected_when_denied() {
+        let mut ctrl = AppController::new(".").await;
+        ctrl.start_terminal("echo should-not-appear");
+
+        let mut prompt_id = None;
+        for _ in 0..50 {
+            tokio::task::yield_now().await;
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            ctrl.pump();
+            if let Some(p) = ctrl.ui().pending_approval() {
+                prompt_id = Some(p.id.clone());
+                break;
+            }
+        }
+        let id = prompt_id.expect("approval prompt was raised");
+
+        ctrl.resolve_approval(&id, Decision::Deny);
+        let mut saw_error = false;
+        for _ in 0..50 {
+            tokio::task::yield_now().await;
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            ctrl.pump();
+            if ctrl.ui().chat.iter().any(|l| l.contains("terminal.error")) {
+                saw_error = true;
+                break;
+            }
+        }
+        assert!(saw_error, "chat: {:?}", ctrl.ui().chat);
+        // The command never ran, so no successful result was published (the
+        // command name still echoes in the started/error lines, so we key on the
+        // result event, not the substring).
+        assert!(
+            !ctrl.ui().chat.iter().any(|l| l.contains("terminal.result")),
+            "denied command must not execute: {:?}",
+            ctrl.ui().chat
+        );
     }
 
     #[tokio::test]

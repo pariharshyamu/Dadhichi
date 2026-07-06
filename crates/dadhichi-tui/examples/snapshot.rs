@@ -47,11 +47,23 @@ fn main() {
         "agent.status",
         serde_json::json!({ "status": "completed", "confidence": 0.9 }),
     ));
+    // Context compaction fired mid-run: it logs a concise console line.
+    app.apply_event(&dadhichi_core::Event::new(
+        "agent.compacted",
+        serde_json::json!({ "before_tokens": 178_320, "after_tokens": 4_120, "threshold": 170_000 }),
+    ));
+    // A gated shell command is paused for approval: the input line becomes a
+    // y/n prompt until the user answers `y` or `n`.
+    app.apply_event(&dadhichi_core::Event::new(
+        "agent.approval",
+        serde_json::json!({
+            "id": "demo",
+            "tool": "terminal.run",
+            "permission": "run_commands",
+            "summary": "terminal.run (run_commands): {\"command\":\"cargo test --workspace\"}"
+        }),
+    ));
     app.status = "on branch claude/agentic-ide-rust-ctgpcx".into();
-    // A goal mid-typing, to show the console's input line.
-    for c in "add a retry to the http client".chars() {
-        app.prompt_push(c);
-    }
 
     let (w, h) = (100u16, 26u16);
     let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();

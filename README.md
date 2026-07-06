@@ -29,7 +29,11 @@ live stdio MCP client with tool bridging, and a DAP debugger client. Agents can
 **delegate** self-contained sub-tasks to a specialist via the `task` tool (or
 the `agent.spawn` command), which runs it in an **isolated context window** —
 only the task goes in and only the summary comes back — so a delegate's
-intermediate reasoning never pollutes the caller's context. Phase 5
+intermediate reasoning never pollutes the caller's context. Consequential tools
+(running a shell command, writing the workspace) pass through a **human-in-the-
+loop approval gate** — the run pauses for a `y/n` prompt before anything
+executes — and long runs stay inside the model's context window via automatic
+**conversation compaction** at ~85% of the budget. Phase 5
 (Extensibility & Collaboration) — **complete**: a sandboxed WASM plugin runtime,
 a signed extension marketplace, CRDT collaboration, a security suite (vault,
 secret scan, audit log, injection defense), and observability. See
@@ -324,6 +328,17 @@ connect/disconnect) **and** the built-in connector catalogue — pick one (e.g.
 `filesystem`, `github`, `git`, `memory`) and Enter adds it to your `mcp.json` and
 connects it, no hand-editing. **Tab** cycles focus between panes, **Ctrl-Q**
 quits.
+
+Prefix a line with **`!`** to run it as a shell command (e.g. `!cargo test`).
+Because shell and file-writing tools are gated at *interrupt*, the input line
+turns into an **`APPROVE … [y/n]`** prompt before the command runs — press `y`
+to let it through or `n`/Esc to reject it. This is the same human-in-the-loop
+gate any agent tool call passes through: `run_commands` and `write_workspace`
+default to *interrupt*, read-only work runs un-gated. Long sessions are kept
+inside the model's context window automatically — once the conversation crosses
+~85% of the budget the agent summarises it in place (an `agent.compacted` line
+notes the before/after token estimate). Tune it with `DADHICHI_CONTEXT_WINDOW`
+(tokens) and `DADHICHI_COMPACT_FRACTION` (`0.0–1.0`).
 
 Install your own **skills** by dropping a JSON manifest into `~/.dadhichi/skills`
 (the running TUI reloads it live), or with the CLI:

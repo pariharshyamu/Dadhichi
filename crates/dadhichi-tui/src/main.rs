@@ -14,7 +14,7 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use dadhichi_app::AppController;
+use dadhichi_app::{AppController, Decision};
 use dadhichi_git::GitRepo;
 use dadhichi_ui::Focus;
 use ratatui::{Terminal, backend::CrosstermBackend};
@@ -105,6 +105,20 @@ async fn handle_key(ctrl: &mut AppController, code: KeyCode, mods: KeyModifiers)
         _ => {}
     }
 
+    // A pending tool-approval prompt captures the next keystroke globally: `y`
+    // approves the parked call, `n`/Esc rejects it. Nothing else is dispatched
+    // until it's answered, so a shell command can't slip past the gate.
+    if ctrl.ui().pending_approval().is_some() {
+        match code {
+            KeyCode::Char('y') | KeyCode::Char('Y') => resolve_approval(ctrl, Decision::Approve),
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                resolve_approval(ctrl, Decision::Deny)
+            }
+            _ => {}
+        }
+        return false;
+    }
+
     // The agent console owns free text: letters build the goal, Enter runs it.
     if ctrl.ui().focus() == Focus::Chat {
         match code {
@@ -147,9 +161,29 @@ fn submit_goal(ctrl: &mut AppController) {
     let Some(goal) = ctrl.ui_mut().take_prompt() else {
         return;
     };
+    // A leading `!` runs the rest as a shell command through the gated
+    // `terminal.run` tool — the approval prompt fires before it executes.
+    if let Some(command) = goal.strip_prefix('!') {
+        let command = command.trim().to_string();
+        if command.is_empty() {
+            return;
+        }
+        ctrl.ui_mut().push_chat(format!("$ {command}"));
+        ctrl.start_terminal(&command);
+        return;
+    }
     ctrl.ui_mut().push_chat(format!("❯ {goal}"));
     ctrl.ui_mut().set_agent_running(true);
     ctrl.start_agent_goal(&goal);
+}
+
+/// Answer the pending approval prompt and clear it from the view. The parked
+/// tool call resumes (or is rejected) on the controller's one-shot channel.
+fn resolve_approval(ctrl: &mut AppController, decision: Decision) {
+    if let Some(id) = ctrl.ui().pending_approval().map(|p| p.id.clone()) {
+        ctrl.resolve_approval(&id, decision);
+        ctrl.ui_mut().clear_approval();
+    }
 }
 
 /// Move the selection/cursor within the focused panel.

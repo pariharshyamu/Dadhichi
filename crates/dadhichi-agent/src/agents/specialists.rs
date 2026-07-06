@@ -196,6 +196,8 @@ impl Agent for SpecialistAgent {
         );
         ctx.memory
             .remember(Tier::Conversation, completion.content.clone());
+        // Keep the run inside the context window once the conversation grows.
+        ctx.maybe_compact(&self.model).await;
 
         // Mark every planned step complete (this reference agent acts in one
         // shot; a richer agent would complete steps as it goes).

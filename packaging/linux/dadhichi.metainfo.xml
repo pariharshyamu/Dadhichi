@@ -32,6 +32,13 @@
   </provides>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.1.6" date="2026-07-06">
+      <description>
+        <p>Human-in-the-loop approval gate for consequential tools (shell,
+        file writes) and automatic conversation compaction to keep long runs
+        inside the model's context window.</p>
+      </description>
+    </release>
     <release version="0.1.5" date="2026-07-06">
       <description>
         <p>Foundational runtime: microkernel, AI runtime, agents, index,

@@ -231,6 +231,29 @@ fn render_chat(app: &App, frame: &mut Frame, area: Rect) {
         rows[1],
     );
 
+    // A pending approval commandeers the input line with a y/n prompt so the
+    // choice is impossible to miss and lands right where the eye already is.
+    if let Some(prompt) = app.pending_approval() {
+        let budget = (rows[2].width as usize).saturating_sub(24);
+        let summary: String = prompt.summary.chars().take(budget).collect();
+        let line = Line::from(vec![
+            Span::styled(
+                " APPROVE ",
+                Style::default()
+                    .bg(Color::Yellow)
+                    .fg(Color::Black)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(" {summary} "),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("[y/n]", Style::default().fg(Color::Yellow)),
+        ]);
+        frame.render_widget(Paragraph::new(line), rows[2]);
+        return;
+    }
+
     // The goal input. A dim hint stands in until the user types; once focused a
     // block cursor marks the caret.
     let input = if app.prompt.is_empty() && !focused {

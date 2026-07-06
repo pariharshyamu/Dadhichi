@@ -69,6 +69,21 @@ impl PlanView {
     }
 }
 
+/// A pending tool-approval request the user must answer before a gated tool
+/// (a shell command, a file write) runs. Raised by an `agent.approval` event and
+/// cleared by `agent.approval.resolved`, it drives the console's `y/n` prompt.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ApprovalPrompt {
+    /// Correlates the answer back to the suspended tool call.
+    pub id: String,
+    /// The tool awaiting approval, e.g. `"terminal.run"`.
+    pub tool: String,
+    /// The permission that triggered the interrupt, e.g. `"run_commands"`.
+    pub permission: String,
+    /// A one-line, secret-free summary of the call (tool, permission, args).
+    pub summary: String,
+}
+
 /// Which panel currently has keyboard focus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
@@ -122,6 +137,9 @@ pub struct App {
     /// The agent's current plan, rendered as a live checklist. `None` until the
     /// first `agent.plan` event of a run.
     pub plan: Option<PlanView>,
+    /// A tool call awaiting the user's `y/n` approval, if any. `Some` between an
+    /// `agent.approval` event and its `agent.approval.resolved`.
+    pub approval: Option<ApprovalPrompt>,
     /// The status-bar message.
     pub status: String,
     focus: Focus,
@@ -139,6 +157,7 @@ impl Default for App {
             prompt: String::new(),
             agent_running: false,
             plan: None,
+            approval: None,
             status: "ready".into(),
             // Land on the agent console so the goal input has focus at startup —
             // typing a goal and pressing Enter is the primary action.
@@ -236,6 +255,17 @@ impl App {
         self.agent_running = running;
     }
 
+    /// The tool call currently awaiting the user's `y/n`, if any. The frontend
+    /// checks this to intercept the keystroke and render the approval prompt.
+    pub fn pending_approval(&self) -> Option<&ApprovalPrompt> {
+        self.approval.as_ref()
+    }
+
+    /// Clear the pending approval prompt (after the user answers it).
+    pub fn clear_approval(&mut self) {
+        self.approval = None;
+    }
+
     /// Apply a kernel event, routing it to the right view-model. This is the
     /// single seam through which bus traffic mutates UI state.
     pub fn apply_event(&mut self, event: &Event) {
@@ -290,7 +320,51 @@ impl App {
                     ));
                 }
             }
-            t if t.starts_with("agent.") || t.starts_with("skill.") || t.starts_with("mcp.") => {
+            // A gated tool paused for approval: raise the y/n prompt and note it
+            // in the console. The run stays "running" while the user decides.
+            "agent.approval" => {
+                let get = |k: &str| {
+                    event
+                        .payload
+                        .get(k)
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string()
+                };
+                let summary = event
+                    .payload
+                    .get("summary")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                self.chat
+                    .push(format!("[agent.approval] approve? {summary}"));
+                self.approval = Some(ApprovalPrompt {
+                    id: get("id"),
+                    tool: get("tool"),
+                    permission: get("permission"),
+                    summary,
+                });
+            }
+            // The user (or a policy) answered: clear the prompt and log the verdict.
+            "agent.approval.resolved" => {
+                let decision = event
+                    .payload
+                    .get("decision")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
+                let id = event.payload.get("id").and_then(|v| v.as_str());
+                if id.is_none() || self.approval.as_ref().map(|a| a.id.as_str()) == id {
+                    self.approval = None;
+                }
+                self.chat
+                    .push(format!("[agent.approval.resolved] {decision}"));
+            }
+            t if t.starts_with("agent.")
+                || t.starts_with("skill.")
+                || t.starts_with("mcp.")
+                || t.starts_with("terminal.") =>
+            {
                 // Clear the busy indicator when a run reaches a terminal state or
                 // errors out, so the console stops showing "running".
                 if t == "agent.error" {

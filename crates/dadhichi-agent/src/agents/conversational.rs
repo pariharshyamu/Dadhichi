@@ -82,6 +82,9 @@ impl Agent for ConversationalAgent {
         );
         ctx.memory
             .remember(Tier::Conversation, completion.content.clone());
+        // Keep the run inside the context window: compact the conversation once
+        // its footprint crosses the policy threshold (a no-op when under budget).
+        ctx.maybe_compact(&self.model).await;
         plan.complete(plan.steps[1].id);
         ctx.emit_plan(&plan);
 
