@@ -18,6 +18,9 @@ pub struct Document {
     cursor: usize,
     /// Whether the buffer has unsaved changes.
     pub dirty: bool,
+    /// The first (0-based) line visible in the editor viewport. Tracked so a
+    /// buffer taller than its pane can scroll to keep the cursor in view.
+    scroll: usize,
 }
 
 impl Default for Document {
@@ -27,6 +30,7 @@ impl Default for Document {
             path: None,
             cursor: 0,
             dirty: false,
+            scroll: 0,
         }
     }
 }
@@ -44,6 +48,29 @@ impl Document {
             path,
             cursor: 0,
             dirty: false,
+            scroll: 0,
+        }
+    }
+
+    /// The first visible line in the viewport (the vertical scroll offset).
+    pub fn scroll(&self) -> usize {
+        self.scroll
+    }
+
+    /// Adjust the scroll offset by the minimum needed to keep the cursor line
+    /// within a viewport of `height` rows, so navigating or editing past the
+    /// bottom (or above the top) of the pane scrolls the buffer to follow.
+    pub fn ensure_visible(&mut self, height: usize) {
+        if height == 0 {
+            return;
+        }
+        let cursor_line = self.cursor_line_col().0;
+        if cursor_line < self.scroll {
+            // Cursor moved above the viewport — scroll up to it.
+            self.scroll = cursor_line;
+        } else if cursor_line >= self.scroll + height {
+            // Cursor moved below the viewport — scroll down just enough.
+            self.scroll = cursor_line + 1 - height;
         }
     }
 
@@ -132,6 +159,50 @@ impl Document {
         self.cursor = self.clamp_to_line(line + 1, col);
     }
 
+    /// Move the cursor to the next occurrence of `needle` after the cursor,
+    /// wrapping to the top of the buffer. Returns whether a match was found.
+    /// The search is case-sensitive and does not modify the buffer.
+    pub fn find_next(&mut self, needle: &str) -> bool {
+        if needle.is_empty() {
+            return false;
+        }
+        let text = self.rope.to_string();
+        // Start one char past the cursor so repeated searches advance.
+        let from_char = (self.cursor + 1).min(self.rope.len_chars());
+        let from_byte = char_to_byte(&text, from_char);
+        let hit = text[from_byte..]
+            .find(needle)
+            .map(|i| from_byte + i)
+            .or_else(|| text.find(needle));
+        match hit {
+            Some(byte) => {
+                self.cursor = text[..byte].chars().count();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Move the cursor to the previous occurrence of `needle` before the cursor,
+    /// wrapping to the bottom of the buffer. Returns whether a match was found.
+    pub fn find_prev(&mut self, needle: &str) -> bool {
+        if needle.is_empty() {
+            return false;
+        }
+        let text = self.rope.to_string();
+        let before_byte = char_to_byte(&text, self.cursor);
+        let hit = text[..before_byte]
+            .rfind(needle)
+            .or_else(|| text.rfind(needle));
+        match hit {
+            Some(byte) => {
+                self.cursor = text[..byte].chars().count();
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Mark the buffer clean (e.g. after a save).
     pub fn mark_saved(&mut self) {
         self.dirty = false;
@@ -145,9 +216,42 @@ impl Document {
     }
 }
 
+/// Byte offset of the `n`-th char in `text` (clamped to its end), for bridging
+/// the char-indexed cursor to byte-indexed `str` search.
+fn char_to_byte(text: &str, n: usize) -> usize {
+    text.char_indices()
+        .nth(n)
+        .map(|(b, _)| b)
+        .unwrap_or(text.len())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn find_next_and_prev_move_the_cursor_and_wrap() {
+        let mut doc = Document::from_str(None, "foo bar foo baz foo");
+        // Cursor starts at 0; find_next lands on the second `foo` (offset 8).
+        assert!(doc.find_next("foo"));
+        assert_eq!(doc.cursor(), 8);
+        // Again advances to the third `foo` (offset 16).
+        assert!(doc.find_next("foo"));
+        assert_eq!(doc.cursor(), 16);
+        // Past the last match it wraps to the first (offset 0).
+        assert!(doc.find_next("foo"));
+        assert_eq!(doc.cursor(), 0);
+
+        // find_prev from the first match wraps to the last (offset 16).
+        assert!(doc.find_prev("foo"));
+        assert_eq!(doc.cursor(), 16);
+
+        // A miss leaves the cursor put and reports false.
+        let here = doc.cursor();
+        assert!(!doc.find_next("qux"));
+        assert_eq!(doc.cursor(), here);
+        assert!(!doc.find_next(""));
+    }
 
     #[test]
     fn insert_and_backspace_track_cursor() {
@@ -160,6 +264,33 @@ mod tests {
         doc.backspace();
         assert_eq!(doc.text(), "hell");
         assert_eq!(doc.cursor(), 4);
+    }
+
+    #[test]
+    fn ensure_visible_scrolls_to_follow_the_cursor() {
+        // A 20-line buffer viewed through an 8-row pane.
+        let text: String = (0..20).map(|n| format!("line {n}\n")).collect();
+        let mut doc = Document::from_str(None, &text);
+        assert_eq!(doc.scroll(), 0);
+
+        // Cursor near the top stays put — no scroll needed.
+        doc.ensure_visible(8);
+        assert_eq!(doc.scroll(), 0);
+
+        // Move the cursor to line 15 and re-check: the pane scrolls just enough
+        // to bring line 15 onto the last visible row (15 + 1 - 8 = 8).
+        for _ in 0..15 {
+            doc.move_down();
+        }
+        doc.ensure_visible(8);
+        assert_eq!(doc.scroll(), 8);
+
+        // Moving back above the viewport scrolls up to the cursor.
+        for _ in 0..12 {
+            doc.move_up();
+        }
+        doc.ensure_visible(8);
+        assert_eq!(doc.scroll(), 3);
     }
 
     #[test]

@@ -85,9 +85,17 @@ cargo test
 # Boot the kernel and run the built-in demo agent
 cargo run
 
-# Run the agent against your own goal
-cargo run -- "Explain what makes Dadhichi agent-native."
+# Run the tool-using agent against your own goal — it acts, not just answers
+cargo run -- "add git to this folder"
 ```
+
+Given a concrete goal, the CLI runs the **tool-using ReAct agent**: it reasons,
+calls tools (`terminal.run`, `fs.read`/`fs.write`, …) to carry out the task, and
+loops until it's done — pausing for a `y/N` confirmation on the terminal before
+each shell command or file write. So `dadhichi "add git to this folder"` actually
+runs `git init` (once you approve it). Set a real model first (see
+[Use a real model](#use-a-real-model)) — e.g. `DADHICHI_PROVIDER=ollama
+OLLAMA_MODEL=qwen2.5-coder` — since the offline mock can't drive tool use.
 
 Running `cargo run` boots the microkernel, registers the core services,
 attaches the Agent Console to the event bus, and drives a `ConversationalAgent`
@@ -316,13 +324,21 @@ crates/
 
 Launch the live terminal shell with `cargo run -p dadhichi-tui` (or the
 installed `dadhichi-tui`). It opens focused on the **Agent Console**: type a
-goal on the input line at the bottom and press **Enter** to run the
-conversational agent against it — its planning/running/token/completion events
-stream into the console above as it works, and a live **Plan** panel appears
-alongside showing the agent's checklist ticking off (`☑`/`▸`/`☐`) with a percent
-complete. The run is **non-blocking**: the console keeps updating (and shows a
-`⋯ running` indicator) while the model thinks, so a slow local model never
-freezes the UI. **Ctrl-P** opens the command
+goal on the input line at the bottom and press **Enter** to run the default
+**tool-using agent** against it. This agent doesn't just answer — it *acts*: it
+reasons, calls tools (`terminal.run`, `fs.read`/`fs.write`, `task`, …) to carry
+out the goal, feeds each result back to itself, and loops until the work is
+done. You watch it happen: the model's reply renders as a `‹assistant›` block,
+each tool call shows as an action line (`↳ terminal.run(…)` → `✓ …`), and a live
+**Plan** panel ticks its checklist off (`☑`/`▸`/`☐`) with a percent complete.
+So a goal like *"add git to this folder"* actually runs `git init` (after you
+approve it), rather than returning prose about how to do it. The run is
+**non-blocking**: the console keeps updating (and shows a `⋯ running` indicator)
+while the model thinks, so a slow local model never freezes the UI. In the
+**Explorer**, press **Enter** on a folder to expand it and on a file to open it
+in the editor pane; the tree re-scans itself when the agent finishes a run or you
+save, so files the agent creates show up without reopening the workspace (your
+expanded folders stay expanded). **Ctrl-P** opens the command
 palette, which dispatches real kernel commands (run a specific agent, re-index
 the workspace) whose progress streams into the panels. Type `>` in the palette to
 switch to **skill mode**: it lists the equippable skills with their required
@@ -330,8 +346,15 @@ permissions and tool scope inline, and Enter runs the highlighted one; `@`
 switches to **MCP mode**, which lists your configured servers (Enter toggles
 connect/disconnect) **and** the built-in connector catalogue — pick one (e.g.
 `filesystem`, `github`, `git`, `memory`) and Enter adds it to your `mcp.json` and
-connects it, no hand-editing. **Tab** cycles focus between panes, **Ctrl-Q**
-quits.
+connects it, no hand-editing. In the editor, type to edit the buffer and press
+**Ctrl-S** to write it back to disk (the status bar confirms the save); the pane
+scrolls to keep the cursor in view (the current line is highlighted), so files
+taller than the pane read and edit normally. Press **Ctrl-F** to open an
+incremental find line: type a query and press **Enter** to jump to the next
+match (repeat to walk through them), **Esc** to close. Lines that carry an LSP
+diagnostic are flagged in the editor's gutter — `●` (red) for an error, `▲`
+(yellow) for a warning — so problems show where they occur, not only in the
+Problems panel. **Tab** cycles focus between panes, **Ctrl-Q** quits.
 
 Prefix a line with **`!`** to run it as a shell command (e.g. `!cargo test`).
 Because shell and file-writing tools are gated at *interrupt*, the input line

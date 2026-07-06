@@ -31,7 +31,7 @@ async fn main() {
     let (w, h) = (100u16, 24u16);
     let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
     terminal
-        .draw(|f| dadhichi_tui::render(controller.ui(), f))
+        .draw(|f| dadhichi_tui::render(controller.ui_mut(), f))
         .unwrap();
 
     let buffer = terminal.backend().buffer();

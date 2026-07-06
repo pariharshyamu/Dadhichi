@@ -360,6 +360,7 @@ dependencies = [
 name = "dadhichi"
 version = "0.1.7"
 dependencies = [
+ "async-trait",
  "dadhichi-agent",
  "dadhichi-ai",
  "dadhichi-cache",

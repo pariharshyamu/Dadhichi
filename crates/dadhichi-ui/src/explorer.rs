@@ -73,6 +73,28 @@ impl Explorer {
         }
     }
 
+    /// Re-scan the tree from the filesystem, picking up files created or removed
+    /// since the last scan (e.g. by the agent, or a save-as) while preserving
+    /// which directories the user had expanded. The selection is clamped to the
+    /// new row count.
+    pub fn refresh(&mut self) {
+        let mut expanded = Vec::new();
+        collect_expanded(&self.root, &mut expanded);
+        let mut root = build(&self.root.path);
+        for path in &expanded {
+            set_expanded(&mut root, path);
+        }
+        // The root is always shown expanded.
+        root.expanded = true;
+        self.root = root;
+        let rows = self.rows().len();
+        if rows > 0 {
+            self.selected = self.selected.min(rows - 1);
+        } else {
+            self.selected = 0;
+        }
+    }
+
     /// The root node.
     pub fn root(&self) -> &Node {
         &self.root
@@ -229,6 +251,31 @@ fn toggle(node: &mut Node, path: &Path) -> bool {
     false
 }
 
+/// Gather the paths of every expanded directory (excluding the always-open root)
+/// so a re-scan can restore them.
+fn collect_expanded(node: &Node, out: &mut Vec<PathBuf>) {
+    for child in &node.children {
+        if child.is_dir && child.expanded {
+            out.push(child.path.clone());
+        }
+        collect_expanded(child, out);
+    }
+}
+
+/// Mark the directory at `path` expanded, if it still exists in the tree.
+fn set_expanded(node: &mut Node, path: &Path) -> bool {
+    if node.path == path {
+        node.expanded = true;
+        return true;
+    }
+    for child in &mut node.children {
+        if set_expanded(child, path) {
+            return true;
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -243,6 +290,36 @@ mod tests {
         // Directories sort before files: `src` precedes `README.md`.
         assert_eq!(rows[1].name, "src");
         assert!(rows[1].is_dir);
+    }
+
+    #[test]
+    fn refresh_picks_up_new_files_and_keeps_expansion() {
+        let dir = std::env::temp_dir().join(format!("dadhichi-explorer-{}", std::process::id()));
+        let sub = dir.join("src");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join("main.rs"), "fn main() {}").unwrap();
+
+        let mut explorer = Explorer::scan(&dir);
+        // Expand `src` (row 1).
+        explorer.select_next();
+        explorer.toggle_selected();
+        assert!(
+            explorer.rows().iter().any(|r| r.name == "main.rs"),
+            "src expanded before refresh"
+        );
+
+        // A new file lands on disk (as the agent would write it).
+        std::fs::write(dir.join("NOTES.md"), "hi").unwrap();
+        explorer.refresh();
+
+        let names: Vec<_> = explorer.rows().into_iter().map(|r| r.name).collect();
+        assert!(names.contains(&"NOTES.md".to_string()), "new file appears");
+        assert!(
+            names.contains(&"main.rs".to_string()),
+            "src stayed expanded across the refresh"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

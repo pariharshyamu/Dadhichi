@@ -84,6 +84,16 @@ pub struct ApprovalPrompt {
     pub summary: String,
 }
 
+/// The editor's incremental-find state: the query being typed and whether the
+/// find input line is currently capturing keystrokes.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FindState {
+    /// The current search query.
+    pub query: String,
+    /// Whether the find input line is active (capturing typed characters).
+    pub active: bool,
+}
+
 /// Which panel currently has keyboard focus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
@@ -142,6 +152,8 @@ pub struct App {
     pub approval: Option<ApprovalPrompt>,
     /// The status-bar message.
     pub status: String,
+    /// The editor's incremental-find state.
+    pub find: FindState,
     focus: Focus,
 }
 
@@ -159,6 +171,7 @@ impl Default for App {
             plan: None,
             approval: None,
             status: "ready".into(),
+            find: FindState::default(),
             // Land on the agent console so the goal input has focus at startup —
             // typing a goal and pressing Enter is the primary action.
             focus: Focus::Chat,
@@ -247,6 +260,58 @@ impl App {
         let goal = self.prompt.trim().to_string();
         self.prompt.clear();
         if goal.is_empty() { None } else { Some(goal) }
+    }
+
+    /// Whether the editor's find input line is capturing keystrokes.
+    pub fn is_finding(&self) -> bool {
+        self.find.active
+    }
+
+    /// Open the editor find line, starting a fresh query.
+    pub fn find_begin(&mut self) {
+        self.find.active = true;
+        self.find.query.clear();
+    }
+
+    /// Append a character to the find query.
+    pub fn find_push(&mut self, c: char) {
+        self.find.query.push(c);
+    }
+
+    /// Delete the last character of the find query.
+    pub fn find_backspace(&mut self) {
+        self.find.query.pop();
+    }
+
+    /// Close the find input line, keeping the query so `n`/`N` can repeat it.
+    pub fn find_close(&mut self) {
+        self.find.active = false;
+    }
+
+    /// The current find query.
+    pub fn find_query(&self) -> &str {
+        &self.find.query
+    }
+
+    /// Search the active buffer for the current find query, moving the cursor to
+    /// the match, and report a result message on the status bar. `forward`
+    /// chooses direction. Returns whether a match was found.
+    pub fn find_run(&mut self, forward: bool) -> bool {
+        let query = self.find.query.clone();
+        if query.is_empty() {
+            return false;
+        }
+        let found = match self.active_document_mut() {
+            Some(doc) if forward => doc.find_next(&query),
+            Some(doc) => doc.find_prev(&query),
+            None => false,
+        };
+        self.status = if found {
+            format!("/{query}")
+        } else {
+            format!("/{query} — not found")
+        };
+        found
     }
 
     /// Mark an agent run as in flight (or finished). The frontend sets this when
@@ -360,6 +425,52 @@ impl App {
                 self.chat
                     .push(format!("[agent.approval.resolved] {decision}"));
             }
+            // The model's actual reply. Render it prominently as its own block —
+            // a header line then the body split across chat lines so it wraps —
+            // rather than as a compacted `key=value` telemetry line.
+            "agent.message" => {
+                let content = event
+                    .payload
+                    .get("content")
+                    .and_then(|c| c.as_str())
+                    .unwrap_or("");
+                let role = event
+                    .payload
+                    .get("role")
+                    .and_then(|r| r.as_str())
+                    .unwrap_or("assistant");
+                self.chat.push(format!("‹{role}›"));
+                if content.trim().is_empty() {
+                    self.chat.push("(empty reply)".to_string());
+                } else {
+                    for line in content.lines() {
+                        self.chat.push(line.to_string());
+                    }
+                }
+            }
+            // A tool the agent decided to call: show it as an action line so the
+            // user can watch the agent work, not just see a token counter.
+            "agent.tool" => {
+                let tool = event
+                    .payload
+                    .get("tool")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("?");
+                let args = event.payload.get("args").map(compact).unwrap_or_default();
+                self.chat.push(format!("↳ {tool}({})", truncate(&args, 80)));
+            }
+            "agent.tool.result" => {
+                let result = event.payload.get("result").map(compact).unwrap_or_default();
+                self.chat.push(format!("  ✓ {}", truncate(&result, 100)));
+            }
+            "agent.tool.error" => {
+                let err = event
+                    .payload
+                    .get("error")
+                    .and_then(|e| e.as_str())
+                    .unwrap_or("");
+                self.chat.push(format!("  ✗ {}", truncate(err, 100)));
+            }
             t if t.starts_with("agent.")
                 || t.starts_with("skill.")
                 || t.starts_with("mcp.")
@@ -380,6 +491,17 @@ impl App {
             }
             _ => {}
         }
+    }
+}
+
+/// Clip `s` to at most `max` characters, appending an ellipsis when clipped, so
+/// a long tool result doesn't flood the console.
+fn truncate(s: &str, max: usize) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= max {
+        s.to_string()
+    } else {
+        format!("{}…", chars[..max].iter().collect::<String>())
     }
 }
 
@@ -415,6 +537,34 @@ mod tests {
     }
 
     #[test]
+    fn editor_find_moves_the_cursor_through_matches() {
+        let mut app = App::new();
+        app.open_document(Some("f.rs".into()), "let x = foo(); // foo again\nfoo");
+        // Type a query into the find line.
+        app.find_begin();
+        assert!(app.is_finding());
+        for c in "foo".chars() {
+            app.find_push(c);
+        }
+        assert_eq!(app.find_query(), "foo");
+
+        // Running the search jumps the cursor to the first match (offset 8).
+        assert!(app.find_run(true));
+        assert_eq!(app.active_document().unwrap().cursor(), 8);
+        // Repeating advances to the next occurrence.
+        assert!(app.find_run(true));
+        assert_eq!(app.active_document().unwrap().cursor(), 18);
+
+        // A miss reports not-found on the status bar.
+        app.find.query = "zzz".into();
+        assert!(!app.find_run(true));
+        assert!(app.status.contains("not found"));
+
+        app.find_close();
+        assert!(!app.is_finding());
+    }
+
+    #[test]
     fn take_prompt_trims_and_clears() {
         let mut app = App::new();
         assert_eq!(app.take_prompt(), None);
@@ -440,6 +590,34 @@ mod tests {
             serde_json::json!({ "status": "completed" }),
         ));
         assert!(!app.agent_running);
+    }
+
+    #[test]
+    fn agent_message_event_renders_the_reply_body() {
+        let mut app = App::new();
+        app.apply_event(&Event::new(
+            "agent.message",
+            serde_json::json!({ "role": "assistant", "content": "line one\nline two" }),
+        ));
+        // The reply body lands in the console verbatim (header + each line),
+        // not as a compacted `content=...` telemetry line.
+        assert!(app.chat.iter().any(|l| l.contains("‹assistant›")));
+        assert!(app.chat.iter().any(|l| l == "line one"));
+        assert!(app.chat.iter().any(|l| l == "line two"));
+        assert!(
+            !app.chat.iter().any(|l| l.contains("content=")),
+            "reply must not be rendered as a telemetry key=value line"
+        );
+    }
+
+    #[test]
+    fn agent_message_event_handles_empty_content() {
+        let mut app = App::new();
+        app.apply_event(&Event::new(
+            "agent.message",
+            serde_json::json!({ "role": "assistant", "content": "   " }),
+        ));
+        assert!(app.chat.iter().any(|l| l.contains("(empty reply)")));
     }
 
     #[test]

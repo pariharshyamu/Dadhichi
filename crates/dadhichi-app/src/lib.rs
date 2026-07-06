@@ -15,8 +15,8 @@
 //! events back into the Agent Console panel — all through the same bus.
 
 use dadhichi_agent::{
-    Agent, AgentContext, MemoryRecallTool, MemoryWriteTool, Orchestrator, SpecialistAgent,
-    TaskTool, agents::ConversationalAgent, shared_memory,
+    Agent, AgentContext, MemoryRecallTool, MemoryWriteTool, Orchestrator, ReactAgent,
+    SpecialistAgent, TaskTool, agents::ConversationalAgent, shared_memory,
 };
 use dadhichi_ai::{ModelRouter, ProviderPlan};
 use dadhichi_core::{Command, Event, Kernel, KernelError, RecvError, Subscription};
@@ -267,6 +267,10 @@ impl AppController {
 
         let orchestrator = {
             let mut orch = Orchestrator::new();
+            // The tool-using ReAct agent is the default: it can actually perform
+            // tasks (run commands, read/write files) via the approval-gated tool
+            // loop, not just answer in prose.
+            orch.register(Arc::new(ReactAgent::new(&model_id)));
             orch.register(Arc::new(ConversationalAgent::new(&model_id)));
             for agent in [
                 SpecialistAgent::code(),
@@ -370,6 +374,31 @@ impl AppController {
     /// Mutable access to the UI view-models (for the frontend's input handling).
     pub fn ui_mut(&mut self) -> &mut App {
         &mut self.ui
+    }
+
+    /// Write the active editor buffer back to its file on disk, clearing its
+    /// dirty flag and reflecting the result in the status bar. Returns `Ok(false)`
+    /// when there is nothing to save (no active buffer, or a scratch buffer with
+    /// no path). This is the real work behind the editor's Ctrl-S.
+    pub fn save_active_document(&mut self) -> std::io::Result<bool> {
+        let Some(doc) = self.ui.active_document() else {
+            return Ok(false);
+        };
+        let Some(path) = doc.path.clone() else {
+            self.ui.status = "cannot save: buffer has no path".into();
+            return Ok(false);
+        };
+        let text = doc.text();
+        std::fs::write(&path, text)?;
+        if let Some(doc) = self.ui.active_document_mut() {
+            doc.mark_saved();
+        }
+        self.ui.status = format!("saved {}", path.display());
+        self.kernel.bus().publish(Event::new(
+            "editor.saved",
+            serde_json::json!({ "ok": true, "path": path.display().to_string() }),
+        ));
+        Ok(true)
     }
 
     /// The symbol store, for code-intelligence queries.
@@ -549,6 +578,7 @@ impl AppController {
         let mut applied = 0;
         let mut skills_changed = false;
         let mut mcp_changed = false;
+        let mut tree_changed = false;
         loop {
             match self.events.try_recv() {
                 Ok(Some(event)) => {
@@ -561,6 +591,17 @@ impl AppController {
                         // or a newly-added connector changed the `@` server list.
                         "mcp.connected" | "mcp.disconnected" | "mcp.error" | "mcp.added" => {
                             mcp_changed = true
+                        }
+                        // A save, or an agent run that may have written files,
+                        // can change what is on disk — re-scan the Explorer so
+                        // new files appear without reopening the workspace.
+                        "editor.saved" => tree_changed = true,
+                        "agent.status" => {
+                            if event.payload.get("status").and_then(|s| s.as_str())
+                                == Some("completed")
+                            {
+                                tree_changed = true;
+                            }
                         }
                         _ => {}
                     }
@@ -577,6 +618,9 @@ impl AppController {
         }
         if mcp_changed {
             self.refresh_mcp();
+        }
+        if tree_changed && let Some(explorer) = self.ui.explorer.as_mut() {
+            explorer.refresh();
         }
         applied
     }
@@ -918,13 +962,21 @@ async fn register_commands(
                             .args
                             .get("agent")
                             .and_then(|a| a.as_str())
-                            .unwrap_or("conversational-agent")
+                            .unwrap_or("react-agent")
                             .to_string();
 
+                        // The default run may act, not just read: grant the write
+                        // and run-command capabilities too. Each such call is still
+                        // stopped at the y/n approval gate before it executes, so a
+                        // broad grant here does not mean unattended side effects.
                         let mut ctx = AgentContext::new(
                             router,
                             tools,
-                            GrantSet::from_iter([Permission::ReadWorkspace]),
+                            GrantSet::from_iter([
+                                Permission::ReadWorkspace,
+                                Permission::WriteWorkspace,
+                                Permission::RunCommands,
+                            ]),
                             bus,
                         );
                         let outcome = orchestrator
@@ -1594,6 +1646,42 @@ mod tests {
         assert!(names.contains(&"mcp.connectors"));
         assert!(names.contains(&"mcp.add"));
         assert!(names.contains(&"agent.spawn"));
+    }
+
+    #[tokio::test]
+    async fn save_active_document_writes_the_buffer_to_disk() {
+        let dir = std::env::temp_dir().join(format!("dadhichi-save-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("note.txt");
+        std::fs::write(&file, "original").unwrap();
+
+        let mut ctrl = AppController::new(&dir).await;
+        ctrl.ui_mut().open_document(Some(file.clone()), "original");
+        // Edit the buffer, then save it.
+        if let Some(doc) = ctrl.ui_mut().active_document_mut() {
+            doc.insert(" edited");
+        }
+        assert!(ctrl.ui().active_document().unwrap().dirty);
+
+        let saved = ctrl.save_active_document().unwrap();
+        assert!(saved, "a buffer with a path saves");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), " editedoriginal");
+        assert!(
+            !ctrl.ui().active_document().unwrap().dirty,
+            "dirty flag cleared after save"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn save_active_document_noops_without_a_path() {
+        let mut ctrl = AppController::new(".").await;
+        ctrl.ui_mut().open_document(None, "scratch");
+        assert!(
+            !ctrl.save_active_document().unwrap(),
+            "a scratch buffer with no path is not saved"
+        );
     }
 
     #[tokio::test]

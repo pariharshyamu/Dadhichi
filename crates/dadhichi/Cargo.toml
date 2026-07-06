@@ -31,6 +31,7 @@ dadhichi-security.workspace = true
 dadhichi-telemetry.workspace = true
 dadhichi-wasm.workspace = true
 tokio.workspace = true
+async-trait.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

@@ -60,7 +60,7 @@ async fn run_loop(
         // Drain live bus events (agent progress, diagnostics, indexing) into the
         // view-models, then draw.
         controller.pump();
-        terminal.draw(|f| dadhichi_tui::render(controller.ui(), f))?;
+        terminal.draw(|f| dadhichi_tui::render(controller.ui_mut(), f))?;
 
         if event::poll(Duration::from_millis(150))?
             && let Event::Key(key) = event::read()?
@@ -102,7 +102,46 @@ async fn handle_key(ctrl: &mut AppController, code: KeyCode, mods: KeyModifiers)
             return false;
         }
         (KeyCode::Char('q'), KeyModifiers::CONTROL) => return true,
+        // Ctrl-S saves the active editor buffer to disk.
+        (KeyCode::Char('s'), KeyModifiers::CONTROL) => {
+            if let Err(err) = ctrl.save_active_document() {
+                ctrl.ui_mut().status = format!("save failed: {err}");
+            }
+            return false;
+        }
+        // Ctrl-F opens the editor's incremental find line.
+        (KeyCode::Char('f'), KeyModifiers::CONTROL) if ctrl.ui().focus() == Focus::Editor => {
+            ctrl.ui_mut().find_begin();
+            ctrl.ui_mut().status = "/".into();
+            return false;
+        }
         _ => {}
+    }
+
+    // While the find line is open it captures every keystroke: type to edit the
+    // query, Enter jumps to the next match (repeat to walk matches), Esc closes.
+    if ctrl.ui().is_finding() {
+        match code {
+            KeyCode::Enter => {
+                ctrl.ui_mut().find_run(true);
+            }
+            KeyCode::Esc => {
+                ctrl.ui_mut().find_close();
+                ctrl.ui_mut().status = "ready".into();
+            }
+            KeyCode::Backspace => {
+                ctrl.ui_mut().find_backspace();
+                let q = ctrl.ui().find_query().to_string();
+                ctrl.ui_mut().status = format!("/{q}");
+            }
+            KeyCode::Char(c) => {
+                ctrl.ui_mut().find_push(c);
+                let q = ctrl.ui().find_query().to_string();
+                ctrl.ui_mut().status = format!("/{q}");
+            }
+            _ => {}
+        }
+        return false;
     }
 
     // A pending tool-approval prompt captures the next keystroke globally: `y`
@@ -219,12 +258,34 @@ fn navigate(ctrl: &mut AppController, delta: i32) {
     }
 }
 
-/// Activate the selection in the focused panel (Enter).
+/// Activate the selection in the focused panel (Enter). In the Explorer a
+/// directory expands/collapses; a file is read from disk and opened in the
+/// editor, and focus moves there so it can be scrolled and edited immediately.
 fn activate(ctrl: &mut AppController) {
-    let app = ctrl.ui_mut();
-    if app.focus() == Focus::Explorer
-        && let Some(explorer) = app.explorer.as_mut()
-    {
-        explorer.toggle_selected();
+    if ctrl.ui().focus() != Focus::Explorer {
+        return;
+    }
+    let selected = ctrl.ui().explorer.as_ref().and_then(|e| {
+        let idx = e.selected_index();
+        e.rows().into_iter().nth(idx)
+    });
+    let Some(row) = selected else {
+        return;
+    };
+    if row.is_dir {
+        if let Some(explorer) = ctrl.ui_mut().explorer.as_mut() {
+            explorer.toggle_selected();
+        }
+        return;
+    }
+    match std::fs::read_to_string(&row.path) {
+        Ok(text) => {
+            ctrl.ui_mut().open_document(Some(row.path.clone()), &text);
+            ctrl.ui_mut().set_focus(Focus::Editor);
+        }
+        Err(err) => {
+            ctrl.ui_mut()
+                .push_chat(format!("cannot open {}: {err}", row.path.display()));
+        }
     }
 }
