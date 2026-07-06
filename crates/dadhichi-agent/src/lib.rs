@@ -37,7 +37,9 @@
 
 pub mod agent;
 pub mod agents;
+pub mod compaction;
 pub mod memory;
+pub mod memory_tools;
 pub mod orchestrator;
 pub mod plan;
 pub mod semantic;
@@ -50,7 +52,9 @@ mod test_support;
 
 pub use agent::{Agent, AgentContext, AgentError, AgentOutcome, AgentStatus};
 pub use agents::{ConversationalAgent, SpecialistAgent};
+pub use compaction::{CompactionPolicy, CompactionReport, estimate_tokens};
 pub use memory::{Memory, MemoryItem, Tier};
+pub use memory_tools::{MemoryRecallTool, MemoryWriteTool, SharedMemory, shared_memory};
 pub use orchestrator::{Checkpoint, Orchestrator};
 pub use plan::{Plan, Step};
 pub use semantic::SemanticMemory;

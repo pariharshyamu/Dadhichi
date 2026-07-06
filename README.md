@@ -29,7 +29,15 @@ live stdio MCP client with tool bridging, and a DAP debugger client. Agents can
 **delegate** self-contained sub-tasks to a specialist via the `task` tool (or
 the `agent.spawn` command), which runs it in an **isolated context window** —
 only the task goes in and only the summary comes back — so a delegate's
-intermediate reasoning never pollutes the caller's context. Phase 5
+intermediate reasoning never pollutes the caller's context. Consequential tools
+(running a shell command, writing the workspace) pass through a **human-in-the-
+loop approval gate** — the run pauses for a `y/n` prompt before anything
+executes — and long runs stay inside the model's context window via automatic
+**conversation compaction** at ~85% of the budget. Agents and their delegates
+share a **sandboxed virtual filesystem** (a `StateStore` backend confined to the
+workspace root by a path-jail, with `fs.read`/`fs.write`/`fs.ls` tools for
+context offloading) and **memory tools** (`memory.write`/`memory.recall`) for
+recording and recalling facts across a run. Phase 5
 (Extensibility & Collaboration) — **complete**: a sandboxed WASM plugin runtime,
 a signed extension marketplace, CRDT collaboration, a security suite (vault,
 secret scan, audit log, injection defense), and observability. See
@@ -310,9 +318,11 @@ Launch the live terminal shell with `cargo run -p dadhichi-tui` (or the
 installed `dadhichi-tui`). It opens focused on the **Agent Console**: type a
 goal on the input line at the bottom and press **Enter** to run the
 conversational agent against it — its planning/running/token/completion events
-stream into the console above as it works. The run is **non-blocking**: the
-console keeps updating (and shows a `⋯ running` indicator) while the model
-thinks, so a slow local model never freezes the UI. **Ctrl-P** opens the command
+stream into the console above as it works, and a live **Plan** panel appears
+alongside showing the agent's checklist ticking off (`☑`/`▸`/`☐`) with a percent
+complete. The run is **non-blocking**: the console keeps updating (and shows a
+`⋯ running` indicator) while the model thinks, so a slow local model never
+freezes the UI. **Ctrl-P** opens the command
 palette, which dispatches real kernel commands (run a specific agent, re-index
 the workspace) whose progress streams into the panels. Type `>` in the palette to
 switch to **skill mode**: it lists the equippable skills with their required
@@ -322,6 +332,30 @@ connect/disconnect) **and** the built-in connector catalogue — pick one (e.g.
 `filesystem`, `github`, `git`, `memory`) and Enter adds it to your `mcp.json` and
 connects it, no hand-editing. **Tab** cycles focus between panes, **Ctrl-Q**
 quits.
+
+Prefix a line with **`!`** to run it as a shell command (e.g. `!cargo test`).
+Because shell and file-writing tools are gated at *interrupt*, the input line
+turns into an **`APPROVE … [y/n]`** prompt before the command runs — press `y`
+to let it through or `n`/Esc to reject it. This is the same human-in-the-loop
+gate any agent tool call passes through: `run_commands` and `write_workspace`
+default to *interrupt*, read-only work runs un-gated. Long sessions are kept
+inside the model's context window automatically — once the conversation crosses
+~85% of the budget the agent summarises it in place (an `agent.compacted` line
+notes the before/after token estimate). Tune it with `DADHICHI_CONTEXT_WINDOW`
+(tokens) and `DADHICHI_COMPACT_FRACTION` (`0.0–1.0`).
+
+Agents work against a **sandboxed virtual filesystem** rather than carrying
+everything in the prompt. A `StateStore` backend (a workspace-backed store
+confined to the project root by a `PathJail`, so a write can't escape it) is
+exposed through `fs.read` / `fs.write` / `fs.ls` tools — write a plan or an
+intermediate result to a path, read it back later. A shell command
+(`terminal.run`) is likewise pinned to the workspace root. Alongside the files,
+`memory.write` / `memory.recall` tools let an agent record and recall facts by
+keyword. All of these are shared with the sub-agents spawned by the `task` tool,
+so a delegate can read the files and notes the caller left it and hand results
+back through shared state — while its *conversation* stays quarantined. (`fs`
+writes require `write_workspace`, so they hit the same approval gate; delegates
+run read-only by default.)
 
 Install your own **skills** by dropping a JSON manifest into `~/.dadhichi/skills`
 (the running TUI reloads it live), or with the CLI:

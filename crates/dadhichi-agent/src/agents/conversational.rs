@@ -54,15 +54,13 @@ impl Agent for ConversationalAgent {
             .step(Step::think("understand the goal"))
             .step(Step::think("consult the model"))
             .step(Step::think("summarise the answer"));
-        ctx.emit(
-            "agent.plan",
-            serde_json::json!({ "steps": plan.steps.len() }),
-        );
+        ctx.emit_plan(&plan);
 
         // 2. Act: understand.
         let step0 = plan.steps[0].id;
         ctx.memory.remember(Tier::Working, format!("goal: {goal}"));
         plan.complete(step0);
+        ctx.emit_plan(&plan);
 
         // 2b. Act: consult the model.
         ctx.emit("agent.status", serde_json::json!({ "status": "running" }));
@@ -84,10 +82,15 @@ impl Agent for ConversationalAgent {
         );
         ctx.memory
             .remember(Tier::Conversation, completion.content.clone());
+        // Keep the run inside the context window: compact the conversation once
+        // its footprint crosses the policy threshold (a no-op when under budget).
+        ctx.maybe_compact(&self.model).await;
         plan.complete(plan.steps[1].id);
+        ctx.emit_plan(&plan);
 
         // 3. Reflect / summarise.
         plan.complete(plan.steps[2].id);
+        ctx.emit_plan(&plan);
         let outcome = AgentOutcome {
             status: AgentStatus::Completed,
             summary: completion.content,

@@ -22,6 +22,8 @@ dadhichi-security.workspace = true
 dadhichi-index.workspace = true
 tokio.workspace = true
 serde_json.workspace = true
+async-trait.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "net"] }

@@ -18,6 +18,9 @@ pub enum ToolError {
     /// The caller lacked the permission this tool requires.
     #[error("permission denied: requires {0}")]
     PermissionDenied(String),
+    /// The call was refused by the approval policy or a human reviewer.
+    #[error("rejected: {0}")]
+    Rejected(String),
     /// The tool ran but failed.
     #[error("tool execution failed: {0}")]
     Execution(String),

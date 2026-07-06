@@ -32,7 +32,21 @@
   </provides>
   <content_rating type="oars-1.1"/>
   <releases>
-    <release version="0.1.4" date="2026-07-06">
+    <release version="0.1.7" date="2026-07-06">
+      <description>
+        <p>A sandboxed virtual filesystem (state backend + path-jail) with
+        fs.read/fs.write/fs.ls tools, and memory.write/memory.recall tools,
+        shared across agents and their isolated-context sub-agents.</p>
+      </description>
+    </release>
+    <release version="0.1.6" date="2026-07-06">
+      <description>
+        <p>Human-in-the-loop approval gate for consequential tools (shell,
+        file writes) and automatic conversation compaction to keep long runs
+        inside the model's context window.</p>
+      </description>
+    </release>
+    <release version="0.1.5" date="2026-07-06">
       <description>
         <p>Foundational runtime: microkernel, AI runtime, agents, index,
         UI shell, WASM plugins, and cross-platform packaging.</p>

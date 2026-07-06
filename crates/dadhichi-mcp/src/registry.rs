@@ -1,5 +1,6 @@
 //! The tool registry: a permission-aware catalogue of every available tool.
 
+use crate::approval::{ApprovalPolicy, ApprovalRequest, Approver, Decision, PermissionMode};
 use crate::tool::{Permission, Tool, ToolError, ToolResult, ToolSpec};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
@@ -50,6 +51,11 @@ impl FromIterator<Permission> for GrantSet {
 #[derive(Default)]
 pub struct ToolRegistry {
     tools: RwLock<HashMap<String, Arc<dyn Tool>>>,
+    /// Per-permission approval policy (default: allow everything).
+    policy: RwLock<ApprovalPolicy>,
+    /// The approver consulted when a call is interrupted. Without one, an
+    /// `Interrupt` mode falls back to allowing the call (headless default).
+    approver: RwLock<Option<Arc<dyn Approver>>>,
 }
 
 impl std::fmt::Debug for ToolRegistry {
@@ -99,10 +105,34 @@ impl ToolRegistry {
         specs
     }
 
-    /// Invoke `name` with `args`, enforcing `grants` first.
+    /// Replace the approval policy that gates interrupting/denied permissions.
+    pub fn set_policy(&self, policy: ApprovalPolicy) -> &Self {
+        *self.policy.write().unwrap_or_else(|e| e.into_inner()) = policy;
+        self
+    }
+
+    /// The current approval policy.
+    pub fn policy(&self) -> ApprovalPolicy {
+        self.policy
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Install the [`Approver`] consulted when a call is interrupted (a TUI
+    /// prompt, a policy engine, a test double). Replaces any previous one.
+    pub fn set_approver(&self, approver: Arc<dyn Approver>) -> &Self {
+        *self.approver.write().unwrap_or_else(|e| e.into_inner()) = Some(approver);
+        self
+    }
+
+    /// Invoke `name` with `args`, enforcing `grants` and the approval policy.
     ///
-    /// This is the single choke point where permission is checked, so no tool
-    /// can be reached without passing through the security gate.
+    /// This is the single choke point where capability is checked, so no tool
+    /// can be reached without passing through both gates: first the static
+    /// `grants` (does the caller hold the permission at all?), then the dynamic
+    /// [`ApprovalPolicy`] (should this specific call be denied, or paused for a
+    /// human?).
     pub async fn invoke(
         &self,
         name: &str,
@@ -119,6 +149,43 @@ impl ToolRegistry {
         let spec = tool.spec();
         if let Some(missing) = grants.first_missing(&spec.permissions) {
             return Err(ToolError::PermissionDenied(missing.to_string()));
+        }
+
+        // Dynamic approval gate: deny outright, or interrupt for a human verdict.
+        let policy = self.policy();
+        match policy.decide(&spec.permissions) {
+            PermissionMode::Allow => {}
+            PermissionMode::Deny => {
+                let perm = policy
+                    .first_with_mode(&spec.permissions, PermissionMode::Deny)
+                    .map(|p| p.to_string())
+                    .unwrap_or_default();
+                return Err(ToolError::Rejected(format!(
+                    "{name} denied by policy ({perm})"
+                )));
+            }
+            PermissionMode::Interrupt => {
+                let approver = self
+                    .approver
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone();
+                if let Some(approver) = approver {
+                    let permission = policy
+                        .first_with_mode(&spec.permissions, PermissionMode::Interrupt)
+                        .unwrap_or(Permission::RunCommands);
+                    let request = ApprovalRequest {
+                        tool: name.to_string(),
+                        permission,
+                        args: args.clone(),
+                    };
+                    if approver.approve(&request).await == Decision::Deny {
+                        return Err(ToolError::Rejected(format!("{name} rejected by reviewer")));
+                    }
+                }
+                // No approver wired ⇒ nothing can answer the interrupt, so fall
+                // through and allow (a headless run isn't blocked by a prompt).
+            }
         }
 
         tool.invoke(args).await

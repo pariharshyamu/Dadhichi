@@ -1,9 +1,10 @@
 //! The agent abstraction: lifecycle, execution context, and the [`Agent`] trait.
 
-use crate::memory::Memory;
+use crate::compaction::{CompactionPolicy, CompactionReport, estimate_tokens};
+use crate::memory::{Memory, Tier};
 use crate::plan::Plan;
 use async_trait::async_trait;
-use dadhichi_ai::ModelRouter;
+use dadhichi_ai::{CompletionRequest, Message, ModelRouter};
 use dadhichi_core::{Event, EventBus};
 use dadhichi_mcp::{GrantSet, ToolRegistry};
 use serde::{Deserialize, Serialize};
@@ -79,6 +80,8 @@ pub struct AgentContext {
     pub memory: Memory,
     /// Correlates every event this run emits.
     pub correlation_id: Uuid,
+    /// When to compact the conversation to stay inside the context window.
+    pub compaction: CompactionPolicy,
     bus: EventBus,
 }
 
@@ -96,14 +99,96 @@ impl AgentContext {
             grants,
             memory: Memory::new(),
             correlation_id: Uuid::new_v4(),
+            compaction: CompactionPolicy::from_env(),
             bus,
         }
+    }
+
+    /// Override the compaction policy (window and trigger fraction), returning
+    /// `self` for chaining. Handy for tests and for pinning a specific model's
+    /// window.
+    pub fn with_compaction(mut self, policy: CompactionPolicy) -> Self {
+        self.compaction = policy;
+        self
     }
 
     /// Emit a progress event on `topic`, correlated to this run.
     pub fn emit(&self, topic: &str, payload: serde_json::Value) {
         self.bus
             .publish(Event::new(topic, payload).with_correlation(self.correlation_id));
+    }
+
+    /// Emit the current `plan` as an `agent.plan` snapshot (goal + steps with
+    /// their done state), so a frontend can render a live checklist. Call it on
+    /// plan creation and after each step completes.
+    pub fn emit_plan(&self, plan: &Plan) {
+        self.emit(
+            "agent.plan",
+            serde_json::to_value(plan).unwrap_or_else(|_| serde_json::json!({ "steps": [] })),
+        );
+    }
+
+    /// A rough token estimate of everything currently in memory, across tiers.
+    /// This is the footprint the compaction policy watches.
+    pub fn memory_token_estimate(&self) -> usize {
+        [Tier::Working, Tier::Conversation, Tier::LongTerm]
+            .into_iter()
+            .flat_map(|tier| self.memory.recall_tier(tier))
+            .map(|item| estimate_tokens(&item.content))
+            .sum()
+    }
+
+    /// Compact the conversation **if** its estimated footprint has crossed the
+    /// policy's threshold. Asks `model` to summarise the [`Conversation`](
+    /// Tier::Conversation) tier, collapses those turns into a single durable
+    /// [`LongTerm`](Tier::LongTerm) summary, and emits `agent.compacted` with the
+    /// before/after token estimates. Returns the report when it acted, `None`
+    /// when compaction wasn't needed (or the summary call failed — the run then
+    /// simply carries on uncompacted).
+    ///
+    /// Call it after appending model turns to memory: it is cheap when under
+    /// budget (an estimate and a comparison) and only reaches for the model when
+    /// the window is actually filling up.
+    pub async fn maybe_compact(&mut self, model: &str) -> Option<CompactionReport> {
+        let before = self.memory_token_estimate();
+        if !self.compaction.should_compact(before) {
+            return None;
+        }
+        let convo: Vec<String> = self
+            .memory
+            .recall_tier(Tier::Conversation)
+            .iter()
+            .map(|item| item.content.clone())
+            .collect();
+        if convo.is_empty() {
+            return None;
+        }
+
+        let request = CompletionRequest::new(model)
+            .message(Message::system(
+                "You are compacting an agent's working memory. Summarise the conversation so far \
+                 in a few sentences, preserving decisions, facts, file paths, and open questions. \
+                 Omit pleasantries.",
+            ))
+            .message(Message::user(convo.join("\n")));
+        let summary = self.models.complete(request).await.ok()?.content;
+
+        // Collapse the conversation into one long-term summary.
+        self.memory.summarise_conversation(|_| summary.clone());
+        let after = self.memory_token_estimate();
+        self.emit(
+            "agent.compacted",
+            serde_json::json!({
+                "before_tokens": before,
+                "after_tokens": after,
+                "threshold": self.compaction.threshold_tokens(),
+            }),
+        );
+        Some(CompactionReport {
+            before_tokens: before,
+            after_tokens: after,
+            summary,
+        })
     }
 
     /// Create a sibling context that shares the services (model router, tool
@@ -117,6 +202,7 @@ impl AgentContext {
             grants: self.grants.clone(),
             memory: Memory::new(),
             correlation_id: Uuid::new_v4(),
+            compaction: self.compaction,
             bus: self.bus.clone(),
         }
     }
@@ -147,4 +233,48 @@ pub trait Agent: Send + Sync {
 
     /// Pursue `goal`, driving `ctx` and returning an outcome.
     async fn run(&self, goal: &str, ctx: &mut AgentContext) -> Result<AgentOutcome, AgentError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::test_context;
+
+    #[tokio::test]
+    async fn maybe_compact_collapses_conversation_when_over_budget() {
+        let (mut ctx, bus) = test_context();
+        // A tiny window so a handful of turns crosses the 85% threshold.
+        ctx.compaction = CompactionPolicy::new(100, 0.85);
+        let mut sub = bus.subscribe_topic("agent.compacted");
+
+        for i in 0..20 {
+            ctx.memory.remember(
+                Tier::Conversation,
+                format!("turn {i}: {}", "lorem ipsum ".repeat(4)),
+            );
+        }
+        let before = ctx.memory_token_estimate();
+        assert!(before >= ctx.compaction.threshold_tokens());
+
+        let report = ctx.maybe_compact("mock").await.expect("should compact");
+        assert_eq!(report.before_tokens, before);
+        // (The offline mock echoes its input, so it doesn't actually shrink the
+        // text; a real model summariser does. We assert the structural collapse.)
+        // The conversation collapsed into a single durable summary.
+        assert!(ctx.memory.recall_tier(Tier::Conversation).is_empty());
+        assert_eq!(ctx.memory.recall_tier(Tier::LongTerm).len(), 1);
+
+        let event = sub.recv().await.unwrap();
+        assert_eq!(event.topic.as_str(), "agent.compacted");
+        assert_eq!(event.payload["before_tokens"], before);
+    }
+
+    #[tokio::test]
+    async fn maybe_compact_is_a_noop_under_budget() {
+        let (mut ctx, _bus) = test_context();
+        // The default window is large; a short turn stays well under budget.
+        ctx.memory.remember(Tier::Conversation, "a short turn");
+        assert!(ctx.maybe_compact("mock").await.is_none());
+        assert_eq!(ctx.memory.recall_tier(Tier::Conversation).len(), 1);
+    }
 }
