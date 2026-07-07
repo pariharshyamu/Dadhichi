@@ -11,11 +11,12 @@
 use std::io::{self, Write};
 use std::sync::Arc;
 
-use dadhichi_agent::{Delegator, ReactAgent, SubAgentSpec};
+use dadhichi_agent::{Delegator, ModelCritic, ReactAgent, SubAgentSpec};
 use dadhichi_ai::ProviderPlan;
 use dadhichi_core::EventBus;
 use dadhichi_git::GitRepo;
 use dadhichi_mcp::{StateStore, WorkspaceStore};
+use dadhichi_skill::SkillRegistry;
 
 use crate::console;
 
@@ -41,6 +42,11 @@ pub async fn run(subagent: String, task: String) {
     let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
     let base: Arc<dyn StateStore> = Arc::new(WorkspaceStore::new(&cwd));
 
+    // Equip the specialist's skills from the library (prebuilt plus any on disk),
+    // folding each skill's instructions into the delegate's persona so it gains
+    // the reusable capability, not just the role.
+    let persona = equip_skills(&spec.persona, &spec.skills);
+
     // Stream the delegation's bus events (delegated → reviewed, plus the
     // delegate's own agent.* activity) to stdout.
     let bus = EventBus::new();
@@ -48,8 +54,12 @@ pub async fn run(subagent: String, task: String) {
 
     // The delegate is a tool-using agent in the specialist's role. Its file
     // writes land in the overlay, so it stages work rather than mutating the tree.
-    let agent = ReactAgent::new(&model_id).as_role(&spec.name, &spec.persona);
-    let delegator = Delegator::new(router, bus.clone());
+    let agent = ReactAgent::new(&model_id).as_role(&spec.name, persona);
+
+    // Verify the delegate's work with an orchestrator-side critic model rather
+    // than trusting its own self-assessment.
+    let critic = Arc::new(ModelCritic::new(router.clone(), &model_id));
+    let delegator = Delegator::new(router, bus.clone()).with_critic(critic);
 
     println!("dadhichi ▸ delegating to '{}': {task}\n", spec.name);
     let review = match delegator
@@ -126,6 +136,35 @@ pub async fn run(subagent: String, task: String) {
 
     drop(bus);
     let _ = console.await;
+}
+
+/// Resolve `skills` from the skill library (built-ins plus any user/project
+/// manifests on disk) and append their instructions to `persona`, so the
+/// delegate adopts both the role and the reusable capability. Unknown skill
+/// names are noted and skipped.
+fn equip_skills(persona: &str, skills: &[String]) -> String {
+    if skills.is_empty() {
+        return persona.to_string();
+    }
+    let (registry, _load) = SkillRegistry::discover();
+    let mut out = persona.to_string();
+    let mut equipped = Vec::new();
+    for name in skills {
+        match registry.get(name) {
+            Some(skill) => {
+                out.push_str(&format!(
+                    "\n\nSkill — {}: {}",
+                    skill.name, skill.instructions
+                ));
+                equipped.push(name.clone());
+            }
+            None => eprintln!("dadhichi ▸ skill '{name}' not found; skipping"),
+        }
+    }
+    if !equipped.is_empty() {
+        println!("dadhichi ▸ equipped skills: {}", equipped.join(", "));
+    }
+    out
 }
 
 /// Stage and commit the landed changes, attributing them to the sub-agent.
