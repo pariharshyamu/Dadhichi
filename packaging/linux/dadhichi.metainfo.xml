@@ -32,6 +32,15 @@
   </provides>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.1.8" date="2026-07-07">
+      <description>
+        <p>Deep-agents delegation: sub-agents do isolated real work with their own
+        tools and prebuilt skills, verified by an orchestrator-side critic and
+        landed on the branch after auto-approval or a TUI Review panel. Plus
+        editor usability (open/save, scroll, find, inline diagnostics) and keyless
+        MCP connectors (playwright, sqlite, time).</p>
+      </description>
+    </release>
     <release version="0.1.7" date="2026-07-06">
       <description>
         <p>A sandboxed virtual filesystem (state backend + path-jail) with
