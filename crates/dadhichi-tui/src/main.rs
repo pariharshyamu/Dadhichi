@@ -158,6 +158,24 @@ async fn handle_key(ctrl: &mut AppController, code: KeyCode, mods: KeyModifiers)
         return false;
     }
 
+    // A delegation Review panel captures the next keystroke: `y` lands the staged
+    // work (flush + commit to the branch), `n`/Esc discards it. Nothing else is
+    // dispatched until it's answered.
+    if ctrl.ui().pending_delegation_review().is_some() {
+        match code {
+            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                ctrl.resolve_delegation(true);
+                ctrl.ui_mut().clear_delegation_review();
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                ctrl.resolve_delegation(false);
+                ctrl.ui_mut().clear_delegation_review();
+            }
+            _ => {}
+        }
+        return false;
+    }
+
     // The agent console owns free text: letters build the goal, Enter runs it.
     if ctrl.ui().focus() == Focus::Chat {
         match code {
@@ -209,6 +227,23 @@ fn submit_goal(ctrl: &mut AppController) {
         }
         ctrl.ui_mut().push_chat(format!("$ {command}"));
         ctrl.start_terminal(&command);
+        return;
+    }
+    // A leading `@` delegates the rest to a specialist: `@code-agent add a test`.
+    // It works in an isolated overlay and lands on the branch after the critic
+    // verifies it (or you approve it in the Review panel).
+    if let Some(rest) = goal.strip_prefix('@') {
+        let rest = rest.trim();
+        let (subagent, task) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+        let task = task.trim();
+        if task.is_empty() {
+            ctrl.ui_mut()
+                .push_chat("usage: @<specialist> <task>".to_string());
+            return;
+        }
+        ctrl.ui_mut()
+            .push_chat(format!("⇥ delegate {subagent}: {task}"));
+        ctrl.start_delegation(subagent, task);
         return;
     }
     ctrl.ui_mut().push_chat(format!("❯ {goal}"));

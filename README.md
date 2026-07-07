@@ -376,7 +376,12 @@ Problems panel. **Tab** cycles focus between panes, **Ctrl-Q** quits.
 Prefix a line with **`!`** to run it as a shell command (e.g. `!cargo test`).
 Because shell and file-writing tools are gated at *interrupt*, the input line
 turns into an **`APPROVE … [y/n]`** prompt before the command runs — press `y`
-to let it through or `n`/Esc to reject it. This is the same human-in-the-loop
+to let it through or `n`/Esc to reject it. Prefix a line with **`@`** to
+delegate it to a specialist (e.g. `@code-agent add a retry helper`): the
+sub-agent works in an isolated overlay and, if the critic doesn't clear it
+automatically, a modal **Review panel** pops up showing its verdict and staged
+change set — press **`y`** to land the work (commit it to the branch) or
+**`n`/Esc** to discard it. This is the same human-in-the-loop
 gate any agent tool call passes through: `run_commands` and `write_workspace`
 default to *interrupt*, read-only work runs un-gated. Long sessions are kept
 inside the model's context window automatically — once the conversation crosses

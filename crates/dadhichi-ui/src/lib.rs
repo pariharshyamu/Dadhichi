@@ -84,6 +84,20 @@ pub struct ApprovalPrompt {
     pub summary: String,
 }
 
+/// A finished delegation whose staged changes await the user's decision before
+/// they land on the branch. Raised by an `agent.delegation.review` event when a
+/// delegate's work does not clear the critic's confidence threshold, and cleared
+/// by `agent.delegation.resolved`. Drives the Review panel's `y/n` prompt.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DelegationReviewPrompt {
+    /// The specialist whose work is under review, e.g. `"code-agent"`.
+    pub subagent: String,
+    /// The one-line verdict (status, critic confidence vs threshold, notes).
+    pub verdict: String,
+    /// The files the delegate staged: `(path, is_deletion)`.
+    pub files: Vec<(String, bool)>,
+}
+
 /// The editor's incremental-find state: the query being typed and whether the
 /// find input line is currently capturing keystrokes.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -150,6 +164,10 @@ pub struct App {
     /// A tool call awaiting the user's `y/n` approval, if any. `Some` between an
     /// `agent.approval` event and its `agent.approval.resolved`.
     pub approval: Option<ApprovalPrompt>,
+    /// A delegated sub-agent's staged work awaiting the user's decision to land
+    /// it on the branch. `Some` between an `agent.delegation.review` event and
+    /// its `agent.delegation.resolved`.
+    pub delegation_review: Option<DelegationReviewPrompt>,
     /// The status-bar message.
     pub status: String,
     /// The editor's incremental-find state.
@@ -170,6 +188,7 @@ impl Default for App {
             agent_running: false,
             plan: None,
             approval: None,
+            delegation_review: None,
             status: "ready".into(),
             find: FindState::default(),
             // Land on the agent console so the goal input has focus at startup —
@@ -331,6 +350,17 @@ impl App {
         self.approval = None;
     }
 
+    /// The delegation currently awaiting a land/discard decision, if any. The
+    /// frontend checks this to intercept the keystroke and render the Review panel.
+    pub fn pending_delegation_review(&self) -> Option<&DelegationReviewPrompt> {
+        self.delegation_review.as_ref()
+    }
+
+    /// Clear the pending delegation review (after the user decides).
+    pub fn clear_delegation_review(&mut self) {
+        self.delegation_review = None;
+    }
+
     /// Apply a kernel event, routing it to the right view-model. This is the
     /// single seam through which bus traffic mutates UI state.
     pub fn apply_event(&mut self, event: &Event) {
@@ -424,6 +454,72 @@ impl App {
                 }
                 self.chat
                     .push(format!("[agent.approval.resolved] {decision}"));
+            }
+            // A delegate's staged work needs a land/discard decision: raise the
+            // Review panel with its verdict and change set.
+            "agent.delegation.review" => {
+                let get = |k: &str| {
+                    event
+                        .payload
+                        .get(k)
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string()
+                };
+                let files = event
+                    .payload
+                    .get("files")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|f| {
+                                let path = f.get("path")?.as_str()?.to_string();
+                                let deleted =
+                                    f.get("deleted").and_then(|d| d.as_bool()).unwrap_or(false);
+                                Some((path, deleted))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let subagent = get("subagent");
+                let verdict = get("verdict");
+                self.chat.push(format!(
+                    "[agent.delegation.review] {subagent}: {verdict} — land? (y/n)"
+                ));
+                self.delegation_review = Some(DelegationReviewPrompt {
+                    subagent,
+                    verdict,
+                    files,
+                });
+            }
+            // The delegation decision was made (landed or discarded): clear the
+            // panel and log the outcome.
+            "agent.delegation.resolved" => {
+                let outcome = event
+                    .payload
+                    .get("outcome")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
+                self.delegation_review = None;
+                self.chat
+                    .push(format!("[agent.delegation.resolved] {outcome}"));
+            }
+            // A delegation landed and committed to the branch.
+            "agent.delegation.landed" => {
+                let commit = event
+                    .payload
+                    .get("commit")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let files = event
+                    .payload
+                    .get("files")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                self.delegation_review = None;
+                self.chat.push(format!(
+                    "[agent.delegation.landed] committed {commit} ({files} file(s))"
+                ));
             }
             // The model's actual reply. Render it prominently as its own block —
             // a header line then the body split across chat lines so it wraps —
@@ -534,6 +630,36 @@ mod tests {
         assert_eq!(app.focus(), Focus::Problems);
         app.cycle_focus();
         assert_eq!(app.focus(), Focus::Chat);
+    }
+
+    #[test]
+    fn delegation_review_prompt_is_raised_and_cleared() {
+        let mut app = App::new();
+        assert!(app.pending_delegation_review().is_none());
+
+        app.apply_event(&dadhichi_core::Event::new(
+            "agent.delegation.review",
+            serde_json::json!({
+                "subagent": "code-agent",
+                "verdict": "Completed · critic confidence 40% vs threshold 75%",
+                "files": [
+                    { "path": "src/new.rs", "deleted": false },
+                    { "path": "old.rs", "deleted": true }
+                ]
+            }),
+        ));
+        let review = app.pending_delegation_review().expect("review raised");
+        assert_eq!(review.subagent, "code-agent");
+        assert!(review.verdict.contains("40%"));
+        assert_eq!(review.files.len(), 2);
+        assert_eq!(review.files[1], ("old.rs".to_string(), true));
+
+        // Resolving clears the panel.
+        app.apply_event(&dadhichi_core::Event::new(
+            "agent.delegation.resolved",
+            serde_json::json!({ "outcome": "discarded" }),
+        ));
+        assert!(app.pending_delegation_review().is_none());
     }
 
     #[test]

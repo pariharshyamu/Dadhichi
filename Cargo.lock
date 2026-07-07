@@ -423,6 +423,7 @@ dependencies = [
  "dadhichi-agent",
  "dadhichi-ai",
  "dadhichi-core",
+ "dadhichi-git",
  "dadhichi-index",
  "dadhichi-mcp",
  "dadhichi-security",

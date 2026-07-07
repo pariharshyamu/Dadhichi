@@ -20,6 +20,7 @@ dadhichi-ai.workspace = true
 dadhichi-mcp = { workspace = true, features = ["remote"] }
 dadhichi-security.workspace = true
 dadhichi-index.workspace = true
+dadhichi-git.workspace = true
 tokio.workspace = true
 serde_json.workspace = true
 async-trait.workspace = true
