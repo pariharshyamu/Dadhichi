@@ -144,6 +144,15 @@ pub fn builtin_connectors() -> &'static [Connector] {
             homepage: "https://github.com/modelcontextprotocol/servers/tree/main/src/fetch",
         },
         Connector {
+            id: "playwright",
+            description: "Drive a real browser: navigate, click, fill, snapshot, screenshot (for E2E tests and verifying web apps)",
+            command: NPX_MCP,
+            args: &["-y", "@playwright/mcp@latest"],
+            grants: &[Permission::Network],
+            secrets: &[],
+            homepage: "https://github.com/microsoft/playwright-mcp",
+        },
+        Connector {
             id: "git",
             description: "Read, search, and manipulate a local Git repository",
             command: UVX,
@@ -151,6 +160,24 @@ pub fn builtin_connectors() -> &'static [Connector] {
             grants: &[Permission::ReadWorkspace],
             secrets: &[],
             homepage: "https://github.com/modelcontextprotocol/servers/tree/main/src/git",
+        },
+        Connector {
+            id: "sqlite",
+            description: "Inspect and query a local SQLite database (schema, tables, SQL)",
+            command: UVX,
+            args: &["mcp-server-sqlite", "--db-path", "{root}/dadhichi.db"],
+            grants: &[Permission::ReadWorkspace, Permission::WriteWorkspace],
+            secrets: &[],
+            homepage: "https://github.com/modelcontextprotocol/servers/tree/main/src/sqlite",
+        },
+        Connector {
+            id: "time",
+            description: "The current time and timezone conversions",
+            command: UVX,
+            args: &["mcp-server-time"],
+            grants: &[],
+            secrets: &[],
+            homepage: "https://github.com/modelcontextprotocol/servers/tree/main/src/time",
         },
     ]
 }
@@ -204,5 +231,28 @@ mod tests {
             Some("${env:GITHUB_PERSONAL_ACCESS_TOKEN}")
         );
         assert_eq!(cfg.grants, vec![Permission::Network]);
+    }
+
+    #[test]
+    fn keyless_tier1_connectors_are_present_and_need_no_secrets() {
+        for id in ["playwright", "sqlite", "time"] {
+            let c = connector(id).unwrap_or_else(|| panic!("{id} in catalogue"));
+            assert!(!c.needs_secrets(), "{id} is keyless");
+            assert!(c.to_config("/proj").env.is_empty(), "{id} sets no env");
+        }
+        // Playwright drives a browser, so it needs the network.
+        assert_eq!(
+            connector("playwright").unwrap().grants,
+            &[Permission::Network]
+        );
+        // The SQLite db path is scoped under the workspace root.
+        let sqlite = connector("sqlite").unwrap().to_config("/home/me/proj");
+        assert!(
+            sqlite.args.iter().any(|a| a == "/home/me/proj/dadhichi.db"),
+            "sqlite db path scoped to root: {:?}",
+            sqlite.args
+        );
+        // Time needs nothing at all.
+        assert!(connector("time").unwrap().grants.is_empty());
     }
 }

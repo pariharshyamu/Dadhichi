@@ -362,8 +362,9 @@ switch to **skill mode**: it lists the equippable skills with their required
 permissions and tool scope inline, and Enter runs the highlighted one; `@`
 switches to **MCP mode**, which lists your configured servers (Enter toggles
 connect/disconnect) **and** the built-in connector catalogue — pick one (e.g.
-`filesystem`, `github`, `git`, `memory`) and Enter adds it to your `mcp.json` and
-connects it, no hand-editing. In the editor, type to edit the buffer and press
+`filesystem`, `github`, `git`, `memory`, or the keyless `playwright` (browser
+automation for E2E tests), `sqlite`, and `time`) and Enter adds it to your
+`mcp.json` and connects it, no hand-editing. In the editor, type to edit the buffer and press
 **Ctrl-S** to write it back to disk (the status bar confirms the save); the pane
 scrolls to keep the cursor in view (the current line is highlighted), so files
 taller than the pane read and edit normally. Press **Ctrl-F** to open an
