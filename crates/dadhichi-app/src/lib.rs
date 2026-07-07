@@ -466,7 +466,7 @@ impl AppController {
             let result = commands
                 .dispatch(Command {
                     name: "agent.run".into(),
-                    args: serde_json::json!({ "goal": goal, "agent": "conversational-agent" }),
+                    args: serde_json::json!({ "goal": goal }),
                 })
                 .await;
             if let Err(err) = result {
