@@ -36,6 +36,10 @@ copy-on-write overlay (nothing touches the working tree), then — deep-agents
 style — the orchestrator either **auto-lands** the change set when its verified
 confidence clears a threshold or holds it for a **`y/N` approval**; landing
 flushes the overlay to the workspace and **commits it to the current branch**.
+Each specialist gets its **own role and tool/permission envelope** — a
+`review-agent` and `security-agent` are read-only, a `docs-agent` may write
+files, and `code-agent`/`test-agent`/`refactor-agent` may write and run commands
+— so different sub-agents genuinely have different tools.
 Consequential tools
 (running a shell command, writing the workspace) pass through a **human-in-the-
 loop approval gate** — the run pauses for a `y/n` prompt before anything

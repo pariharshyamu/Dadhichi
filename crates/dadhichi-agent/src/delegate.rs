@@ -34,6 +34,9 @@ pub struct SubAgentSpec {
     /// a `WriteWorkspace` grant here stages changes — it never overwrites the
     /// real workspace until the work is verified/approved and flushed.
     pub grants: GrantSet,
+    /// The role the delegate adopts, fed to the agent as a persona so it behaves
+    /// in character (empty for a generic delegate).
+    pub persona: String,
 }
 
 impl SubAgentSpec {
@@ -42,6 +45,7 @@ impl SubAgentSpec {
         Self {
             name: name.into(),
             grants: GrantSet::from_iter([Permission::ReadWorkspace]),
+            persona: String::new(),
         }
     }
 
@@ -50,6 +54,7 @@ impl SubAgentSpec {
         Self {
             name: name.into(),
             grants: GrantSet::from_iter([Permission::ReadWorkspace, Permission::WriteWorkspace]),
+            persona: String::new(),
         }
     }
 
@@ -57,6 +62,63 @@ impl SubAgentSpec {
     pub fn with_commands(mut self) -> Self {
         self.grants.grant(Permission::RunCommands);
         self
+    }
+
+    /// Give the delegate a role to adopt.
+    pub fn with_persona(mut self, persona: impl Into<String>) -> Self {
+        self.persona = persona.into();
+        self
+    }
+
+    /// The built-in specialist for `name`, each with a role and a tool/permission
+    /// envelope matched to its job — a reviewer and a security auditor are
+    /// read-only, a docs writer may write, a coder/tester/refactorer may write
+    /// and run commands. Returns `None` if the name isn't in the [`roster`].
+    ///
+    /// [`roster`]: SubAgentSpec::roster
+    pub fn for_role(name: &str) -> Option<Self> {
+        let spec = match name {
+            "code-agent" | "code" => Self::writer("code-agent").with_commands().with_persona(
+                "an expert software engineer who implements correct, idiomatic code, \
+                 and may run commands to build and check it",
+            ),
+            "test-agent" | "test" => Self::writer("test-agent").with_commands().with_persona(
+                "a testing specialist who writes thorough, deterministic tests and runs \
+                 them to confirm they pass",
+            ),
+            "refactor-agent" | "refactor" => {
+                Self::writer("refactor-agent").with_commands().with_persona(
+                    "a refactoring specialist who improves structure and clarity while \
+                     preserving behaviour, running tests to confirm nothing changed",
+                )
+            }
+            "docs-agent" | "docs" => Self::writer("docs-agent").with_persona(
+                "a technical writer who writes and updates clear, accurate documentation \
+                 files (you do not run commands)",
+            ),
+            "review-agent" | "review" => Self::read_only("review-agent").with_persona(
+                "a meticulous code reviewer who reads the code and reports correctness \
+                 bugs and concrete improvements — you do NOT modify files",
+            ),
+            "security-agent" | "security" => Self::read_only("security-agent").with_persona(
+                "a security auditor who inspects the code for vulnerabilities and reports \
+                 findings — you do NOT modify files",
+            ),
+            _ => return None,
+        };
+        Some(spec)
+    }
+
+    /// The canonical names of the built-in specialists.
+    pub fn roster() -> &'static [&'static str] {
+        &[
+            "code-agent",
+            "test-agent",
+            "refactor-agent",
+            "docs-agent",
+            "review-agent",
+            "security-agent",
+        ]
     }
 
     /// Whether the spec grants a capability.
@@ -243,6 +305,32 @@ mod tests {
         assert_eq!(base.read("report.md").unwrap(), "findings");
 
         let _ = (models, bus);
+    }
+
+    #[test]
+    fn roster_specialists_have_distinct_tool_envelopes() {
+        // A reviewer and a security auditor are read-only.
+        let review = SubAgentSpec::for_role("review-agent").unwrap();
+        assert!(review.grants(Permission::ReadWorkspace));
+        assert!(!review.grants(Permission::WriteWorkspace));
+        assert!(!review.grants(Permission::RunCommands));
+        assert!(review.persona.contains("reviewer"));
+
+        // A docs writer may write but not run commands.
+        let docs = SubAgentSpec::for_role("docs").unwrap();
+        assert!(docs.grants(Permission::WriteWorkspace));
+        assert!(!docs.grants(Permission::RunCommands));
+
+        // A coder may write and run commands.
+        let code = SubAgentSpec::for_role("code-agent").unwrap();
+        assert!(code.grants(Permission::WriteWorkspace));
+        assert!(code.grants(Permission::RunCommands));
+
+        // Unknown names are rejected, and every roster name resolves.
+        assert!(SubAgentSpec::for_role("nope").is_none());
+        for name in SubAgentSpec::roster() {
+            assert!(SubAgentSpec::for_role(name).is_some(), "{name} resolves");
+        }
     }
 
     #[tokio::test]

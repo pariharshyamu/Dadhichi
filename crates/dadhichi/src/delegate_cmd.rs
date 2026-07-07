@@ -27,6 +27,17 @@ pub async fn run(subagent: String, task: String) {
     let model_id = plan.default_model();
     let router = Arc::new(plan.build_router());
 
+    // Resolve the named specialist to its role + tool/permission envelope. Each
+    // specialist gets exactly the powers its job needs (a reviewer is read-only,
+    // a coder may write and run commands).
+    let Some(spec) = SubAgentSpec::for_role(&subagent) else {
+        eprintln!(
+            "dadhichi ▸ unknown specialist '{subagent}'. Available: {}",
+            SubAgentSpec::roster().join(", ")
+        );
+        return;
+    };
+
     let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
     let base: Arc<dyn StateStore> = Arc::new(WorkspaceStore::new(&cwd));
 
@@ -35,13 +46,12 @@ pub async fn run(subagent: String, task: String) {
     let bus = EventBus::new();
     let console = console::spawn(&bus);
 
-    // The delegate can write files and run commands — but every write lands in
-    // the overlay, so it stages work rather than mutating the tree.
-    let agent = ReactAgent::new(&model_id);
-    let spec = SubAgentSpec::writer(&subagent).with_commands();
+    // The delegate is a tool-using agent in the specialist's role. Its file
+    // writes land in the overlay, so it stages work rather than mutating the tree.
+    let agent = ReactAgent::new(&model_id).as_role(&spec.name, &spec.persona);
     let delegator = Delegator::new(router, bus.clone());
 
-    println!("dadhichi ▸ delegating to '{subagent}': {task}\n");
+    println!("dadhichi ▸ delegating to '{}': {task}\n", spec.name);
     let review = match delegator
         .delegate(&agent, &spec, &task, base.clone(), &cwd)
         .await
@@ -106,7 +116,7 @@ pub async fn run(subagent: String, task: String) {
         }
     }
 
-    match commit(&cwd, &subagent, &task) {
+    match commit(&cwd, &spec.name, &task) {
         Ok(id) => println!(
             "dadhichi ▸ committed {} to the branch.",
             &id[..id.len().min(10)]

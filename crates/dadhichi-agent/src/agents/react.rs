@@ -26,6 +26,10 @@ pub struct ReactAgent {
     name: String,
     model: String,
     max_steps: usize,
+    /// An optional role the agent adopts (e.g. "a meticulous code reviewer"),
+    /// prepended to the steering prompt so a delegated specialist behaves in
+    /// character while still following the same tool-call protocol.
+    persona: Option<String>,
 }
 
 impl Default for ReactAgent {
@@ -34,6 +38,7 @@ impl Default for ReactAgent {
             name: "react-agent".into(),
             model: "mock".into(),
             max_steps: DEFAULT_MAX_STEPS,
+            persona: None,
         }
     }
 }
@@ -42,15 +47,22 @@ impl ReactAgent {
     /// Create an agent that routes its calls to `model`.
     pub fn new(model: impl Into<String>) -> Self {
         Self {
-            name: "react-agent".into(),
             model: model.into(),
-            max_steps: DEFAULT_MAX_STEPS,
+            ..Self::default()
         }
     }
 
     /// Override the maximum number of tool-call iterations.
     pub fn with_max_steps(mut self, max_steps: usize) -> Self {
         self.max_steps = max_steps.max(1);
+        self
+    }
+
+    /// Give the agent a name and a role it adopts — used when a specialist is
+    /// delegated so its behaviour and reported name match the role.
+    pub fn as_role(mut self, name: impl Into<String>, persona: impl Into<String>) -> Self {
+        self.name = name.into();
+        self.persona = Some(persona.into());
         self
     }
 
@@ -77,10 +89,16 @@ impl ReactAgent {
             .join("\n")
     }
 
-    /// The steering prompt that teaches the model the action protocol.
-    fn system_prompt(tools: &str) -> String {
+    /// The steering prompt that teaches the model the action protocol. When the
+    /// agent has a `persona`, a role line is prepended so the specialist behaves
+    /// in character.
+    fn system_prompt(&self, tools: &str) -> String {
+        let role = match &self.persona {
+            Some(p) => format!("You are acting as {p}.\n\n"),
+            None => String::new(),
+        };
         format!(
-            "You are Dadhichi, an autonomous agent working inside a code IDE. You accomplish the \
+            "{role}You are Dadhichi, an autonomous agent working inside a code IDE. You accomplish the \
              user's goal by CALLING TOOLS — you do not merely describe what to do, you do it.\n\n\
              Tools available to you:\n{tools}\n\n\
              On every turn reply with EXACTLY ONE JSON object and NOTHING else — no prose, no \
@@ -156,7 +174,7 @@ impl Agent for ReactAgent {
         ctx.emit_plan(&plan);
 
         let tool_specs = ctx.tools.list();
-        let system = Self::system_prompt(&Self::describe_tools(&tool_specs));
+        let system = self.system_prompt(&Self::describe_tools(&tool_specs));
 
         let mut messages = vec![Message::system(system), Message::user(goal)];
 
