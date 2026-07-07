@@ -29,7 +29,24 @@ live stdio MCP client with tool bridging, and a DAP debugger client. Agents can
 **delegate** self-contained sub-tasks to a specialist via the `task` tool (or
 the `agent.spawn` command), which runs it in an **isolated context window** —
 only the task goes in and only the summary comes back — so a delegate's
-intermediate reasoning never pollutes the caller's context. Consequential tools
+intermediate reasoning never pollutes the caller's context. A delegate can also
+**do real work and land it on the branch**: `dadhichi delegate <specialist>
+<task>` runs a tool-using sub-agent whose file writes are staged in a
+copy-on-write overlay (nothing touches the working tree), then — deep-agents
+style — the orchestrator either **auto-lands** the change set when its verified
+confidence clears a threshold or holds it for a **`y/N` approval**; landing
+flushes the overlay to the workspace and **commits it to the current branch**.
+Each specialist gets its **own role, prebuilt skills, and tool/permission
+envelope** — a `review-agent` and `security-agent` are read-only, a `docs-agent`
+may write files, and `code-agent`/`test-agent`/`refactor-agent` may write and run
+commands — so different sub-agents genuinely have different tools. A spec equips
+named **skills** from the library (e.g. `code-agent` → `implement`, `test-agent`
+→ `author-tests`, `review-agent` → `code-review`), whose instructions fold into
+the delegate's prompt. And the landing decision is verified by an
+**orchestrator-side critic model** — a separate review of the staged work, so
+the delegate never grades its own homework — whose confidence, not the
+delegate's self-assessment, gates the auto-land.
+Consequential tools
 (running a shell command, writing the workspace) pass through a **human-in-the-
 loop approval gate** — the run pauses for a `y/n` prompt before anything
 executes — and long runs stay inside the model's context window via automatic
@@ -85,9 +102,17 @@ cargo test
 # Boot the kernel and run the built-in demo agent
 cargo run
 
-# Run the agent against your own goal
-cargo run -- "Explain what makes Dadhichi agent-native."
+# Run the tool-using agent against your own goal — it acts, not just answers
+cargo run -- "add git to this folder"
 ```
+
+Given a concrete goal, the CLI runs the **tool-using ReAct agent**: it reasons,
+calls tools (`terminal.run`, `fs.read`/`fs.write`, …) to carry out the task, and
+loops until it's done — pausing for a `y/N` confirmation on the terminal before
+each shell command or file write. So `dadhichi "add git to this folder"` actually
+runs `git init` (once you approve it). Set a real model first (see
+[Use a real model](#use-a-real-model)) — e.g. `DADHICHI_PROVIDER=ollama
+OLLAMA_MODEL=qwen2.5-coder` — since the offline mock can't drive tool use.
 
 Running `cargo run` boots the microkernel, registers the core services,
 attaches the Agent Console to the event bus, and drives a `ConversationalAgent`
@@ -316,27 +341,48 @@ crates/
 
 Launch the live terminal shell with `cargo run -p dadhichi-tui` (or the
 installed `dadhichi-tui`). It opens focused on the **Agent Console**: type a
-goal on the input line at the bottom and press **Enter** to run the
-conversational agent against it — its planning/running/token/completion events
-stream into the console above as it works, and a live **Plan** panel appears
-alongside showing the agent's checklist ticking off (`☑`/`▸`/`☐`) with a percent
-complete. The run is **non-blocking**: the console keeps updating (and shows a
-`⋯ running` indicator) while the model thinks, so a slow local model never
-freezes the UI. **Ctrl-P** opens the command
+goal on the input line at the bottom and press **Enter** to run the default
+**tool-using agent** against it. This agent doesn't just answer — it *acts*: it
+reasons, calls tools (`terminal.run`, `fs.read`/`fs.write`, `task`, …) to carry
+out the goal, feeds each result back to itself, and loops until the work is
+done. You watch it happen: the model's reply renders as a `‹assistant›` block,
+each tool call shows as an action line (`↳ terminal.run(…)` → `✓ …`), and a live
+**Plan** panel ticks its checklist off (`☑`/`▸`/`☐`) with a percent complete.
+So a goal like *"add git to this folder"* actually runs `git init` (after you
+approve it), rather than returning prose about how to do it. The run is
+**non-blocking**: the console keeps updating (and shows a `⋯ running` indicator)
+while the model thinks, so a slow local model never freezes the UI. In the
+**Explorer**, press **Enter** on a folder to expand it and on a file to open it
+in the editor pane; the tree re-scans itself when the agent finishes a run or you
+save, so files the agent creates show up without reopening the workspace (your
+expanded folders stay expanded). **Ctrl-P** opens the command
 palette, which dispatches real kernel commands (run a specific agent, re-index
 the workspace) whose progress streams into the panels. Type `>` in the palette to
 switch to **skill mode**: it lists the equippable skills with their required
 permissions and tool scope inline, and Enter runs the highlighted one; `@`
 switches to **MCP mode**, which lists your configured servers (Enter toggles
 connect/disconnect) **and** the built-in connector catalogue — pick one (e.g.
-`filesystem`, `github`, `git`, `memory`) and Enter adds it to your `mcp.json` and
-connects it, no hand-editing. **Tab** cycles focus between panes, **Ctrl-Q**
-quits.
+`filesystem`, `github`, `git`, `memory`, or the keyless `playwright` (browser
+automation for E2E tests), `sqlite`, and `time`) and Enter adds it to your
+`mcp.json` and connects it, no hand-editing. In the editor, type to edit the buffer and press
+**Ctrl-S** to write it back to disk (the status bar confirms the save); the pane
+scrolls to keep the cursor in view (the current line is highlighted), so files
+taller than the pane read and edit normally. Press **Ctrl-F** to open an
+incremental find line: type a query and press **Enter** to jump to the next
+match (repeat to walk through them), **Esc** to close. Lines that carry an LSP
+diagnostic are flagged in the editor's gutter — `●` (red) for an error, `▲`
+(yellow) for a warning — so problems show where they occur, not only in the
+Problems panel. **Tab** cycles focus between panes, **Ctrl-Q** quits.
 
 Prefix a line with **`!`** to run it as a shell command (e.g. `!cargo test`).
 Because shell and file-writing tools are gated at *interrupt*, the input line
 turns into an **`APPROVE … [y/n]`** prompt before the command runs — press `y`
-to let it through or `n`/Esc to reject it. This is the same human-in-the-loop
+to let it through or `n`/Esc to reject it. Prefix a line with **`@`** to
+delegate it to a specialist (e.g. `@code-agent add a retry helper`): the
+sub-agent works in an isolated overlay and, if the critic doesn't clear it
+automatically, a modal **Review panel** pops up showing its verdict and staged
+change set — press **`y`** to land the work (commit it to the branch) or
+**`n`/Esc** to discard it. This is the same human-in-the-loop
 gate any agent tool call passes through: `run_commands` and `write_workspace`
 default to *interrupt*, read-only work runs un-gated. Long sessions are kept
 inside the model's context window automatically — once the conversation crosses

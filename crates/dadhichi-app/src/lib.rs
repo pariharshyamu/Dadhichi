@@ -15,11 +15,13 @@
 //! events back into the Agent Console panel — all through the same bus.
 
 use dadhichi_agent::{
-    Agent, AgentContext, MemoryRecallTool, MemoryWriteTool, Orchestrator, SpecialistAgent,
-    TaskTool, agents::ConversationalAgent, shared_memory,
+    Agent, AgentContext, DelegationReview, Delegator, MemoryRecallTool, MemoryWriteTool,
+    ModelCritic, Orchestrator, ReactAgent, SpecialistAgent, SubAgentSpec, TaskTool,
+    agents::ConversationalAgent, shared_memory,
 };
 use dadhichi_ai::{ModelRouter, ProviderPlan};
 use dadhichi_core::{Command, Event, Kernel, KernelError, RecvError, Subscription};
+use dadhichi_git::GitRepo;
 use dadhichi_index::Indexer;
 use dadhichi_index::store::SqliteSymbolStore;
 use dadhichi_mcp::{
@@ -68,6 +70,23 @@ pub struct AppController {
     /// The `BusApprover` inserts a waiter here on interrupt; `resolve_approval`
     /// fires it when the frontend answers.
     approvals: PendingApprovals,
+    /// The model router, for spawning delegated sub-agents and their critic.
+    router: Arc<ModelRouter>,
+    /// The workspace root — the delegation base store and git repo.
+    root: PathBuf,
+    /// The default model id delegated agents and the critic run under.
+    model_id: String,
+    /// A delegated sub-agent's staged work held pending the user's land/discard
+    /// decision. `Some` while the Review panel is up; `resolve_delegation` takes it.
+    pending_delegation: Arc<Mutex<Option<PendingDelegation>>>,
+}
+
+/// A delegation held between its review and the user's land/discard decision:
+/// the reviewed work plus the metadata needed to attribute the commit.
+struct PendingDelegation {
+    subagent: String,
+    task: String,
+    review: DelegationReview,
 }
 
 /// Build the resolver for `${...}` secrets in `mcp.json`: `env:NAME` (and bare
@@ -267,6 +286,10 @@ impl AppController {
 
         let orchestrator = {
             let mut orch = Orchestrator::new();
+            // The tool-using ReAct agent is the default: it can actually perform
+            // tasks (run commands, read/write files) via the approval-gated tool
+            // loop, not just answer in prose.
+            orch.register(Arc::new(ReactAgent::new(&model_id)));
             orch.register(Arc::new(ConversationalAgent::new(&model_id)));
             for agent in [
                 SpecialistAgent::code(),
@@ -352,6 +375,10 @@ impl AppController {
             mcp,
             tools,
             approvals,
+            router: router.clone(),
+            root: root.clone(),
+            model_id: model_id.clone(),
+            pending_delegation: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -370,6 +397,31 @@ impl AppController {
     /// Mutable access to the UI view-models (for the frontend's input handling).
     pub fn ui_mut(&mut self) -> &mut App {
         &mut self.ui
+    }
+
+    /// Write the active editor buffer back to its file on disk, clearing its
+    /// dirty flag and reflecting the result in the status bar. Returns `Ok(false)`
+    /// when there is nothing to save (no active buffer, or a scratch buffer with
+    /// no path). This is the real work behind the editor's Ctrl-S.
+    pub fn save_active_document(&mut self) -> std::io::Result<bool> {
+        let Some(doc) = self.ui.active_document() else {
+            return Ok(false);
+        };
+        let Some(path) = doc.path.clone() else {
+            self.ui.status = "cannot save: buffer has no path".into();
+            return Ok(false);
+        };
+        let text = doc.text();
+        std::fs::write(&path, text)?;
+        if let Some(doc) = self.ui.active_document_mut() {
+            doc.mark_saved();
+        }
+        self.ui.status = format!("saved {}", path.display());
+        self.kernel.bus().publish(Event::new(
+            "editor.saved",
+            serde_json::json!({ "ok": true, "path": path.display().to_string() }),
+        ));
+        Ok(true)
     }
 
     /// The symbol store, for code-intelligence queries.
@@ -481,6 +533,134 @@ impl AppController {
         }
     }
 
+    /// Delegate `task` to the named `subagent` specialist **without blocking**.
+    /// The delegate runs in a copy-on-write overlay so its file writes are staged;
+    /// an orchestrator-side critic reviews the result; work that clears the
+    /// confidence threshold lands and commits to the branch automatically, while
+    /// work below it raises the Review panel (`agent.delegation.review`) for a
+    /// land/discard decision routed through [`resolve_delegation`].
+    ///
+    /// [`resolve_delegation`]: Self::resolve_delegation
+    pub fn start_delegation(&self, subagent: &str, task: &str) {
+        let Some(spec) = SubAgentSpec::for_role(subagent) else {
+            self.kernel.bus().publish(Event::new(
+                "agent.error",
+                serde_json::json!({
+                    "error": format!(
+                        "unknown specialist '{subagent}'; try one of: {}",
+                        SubAgentSpec::roster().join(", ")
+                    )
+                }),
+            ));
+            return;
+        };
+        // Fold the spec's skills into the delegate's persona from the live library.
+        let persona = self.equip_delegate_persona(&spec);
+
+        let router = self.router.clone();
+        let bus = self.kernel.bus().clone();
+        let root = self.root.clone();
+        let model_id = self.model_id.clone();
+        let task = task.to_string();
+        let pending = self.pending_delegation.clone();
+        let spec_name = spec.name.clone();
+
+        tokio::spawn(async move {
+            let base: Arc<dyn StateStore> = Arc::new(WorkspaceStore::new(&root));
+            let critic = Arc::new(ModelCritic::new(router.clone(), &model_id));
+            let delegator = Delegator::new(router.clone(), bus.clone()).with_critic(critic);
+            let agent = ReactAgent::new(&model_id).as_role(&spec_name, persona);
+
+            let review = match delegator.delegate(&agent, &spec, &task, base, &root).await {
+                Ok(review) => review,
+                Err(err) => {
+                    bus.publish(Event::new(
+                        "agent.error",
+                        serde_json::json!({ "error": err.to_string() }),
+                    ));
+                    return;
+                }
+            };
+
+            if review.auto_approved() {
+                // Verified above the threshold — land and commit automatically.
+                land_and_commit(&review, &root, &spec_name, &task, &bus);
+            } else if review.has_changes() {
+                // Below the threshold — hold the work for a human decision.
+                bus.publish(Event::new(
+                    "agent.delegation.review",
+                    delegation_review_payload(&spec_name, &review),
+                ));
+                *pending.lock().unwrap_or_else(|e| e.into_inner()) = Some(PendingDelegation {
+                    subagent: spec_name,
+                    task,
+                    review,
+                });
+            } else {
+                // A read-only specialist (reviewer, auditor) — nothing to land.
+                bus.publish(Event::new(
+                    "agent.delegation.resolved",
+                    serde_json::json!({ "outcome": "reported (no changes to land)" }),
+                ));
+            }
+        });
+    }
+
+    /// Answer the pending delegation review: on approval, land the staged work
+    /// (flush the overlay onto the workspace and commit it to the branch); on
+    /// rejection, discard it. Either way clears the Review panel via
+    /// `agent.delegation.resolved`. A no-op if no review is pending.
+    pub fn resolve_delegation(&self, approve: bool) {
+        let pending = self
+            .pending_delegation
+            .lock()
+            .ok()
+            .and_then(|mut guard| guard.take());
+        let Some(pending) = pending else {
+            return;
+        };
+        let bus = self.kernel.bus();
+        if approve {
+            land_and_commit(
+                &pending.review,
+                &self.root,
+                &pending.subagent,
+                &pending.task,
+                bus,
+            );
+        } else {
+            bus.publish(Event::new(
+                "agent.delegation.resolved",
+                serde_json::json!({ "outcome": "discarded — nothing committed" }),
+            ));
+        }
+    }
+
+    /// Fold a spec's equipped skills' instructions into its persona, resolving
+    /// their names against the live skill library.
+    fn equip_delegate_persona(&self, spec: &SubAgentSpec) -> String {
+        let mut persona = spec.persona.clone();
+        if let Ok(registry) = self.skills.read() {
+            for name in &spec.skills {
+                if let Some(skill) = registry.get(name) {
+                    persona.push_str(&format!(
+                        "\n\nSkill — {}: {}",
+                        skill.name, skill.instructions
+                    ));
+                }
+            }
+        }
+        persona
+    }
+
+    /// Whether a delegation review is on screen awaiting the user's decision.
+    pub fn has_pending_delegation(&self) -> bool {
+        self.pending_delegation
+            .lock()
+            .map(|g| g.is_some())
+            .unwrap_or(false)
+    }
+
     /// Accept the highlighted palette entry, close the palette, and dispatch it:
     /// a command runs directly; a skill (from `>` skill mode) runs via
     /// `skill.run`. Returns a label for what was dispatched, if anything.
@@ -549,6 +729,7 @@ impl AppController {
         let mut applied = 0;
         let mut skills_changed = false;
         let mut mcp_changed = false;
+        let mut tree_changed = false;
         loop {
             match self.events.try_recv() {
                 Ok(Some(event)) => {
@@ -561,6 +742,17 @@ impl AppController {
                         // or a newly-added connector changed the `@` server list.
                         "mcp.connected" | "mcp.disconnected" | "mcp.error" | "mcp.added" => {
                             mcp_changed = true
+                        }
+                        // A save, or an agent run that may have written files,
+                        // can change what is on disk — re-scan the Explorer so
+                        // new files appear without reopening the workspace.
+                        "editor.saved" => tree_changed = true,
+                        "agent.status" => {
+                            if event.payload.get("status").and_then(|s| s.as_str())
+                                == Some("completed")
+                            {
+                                tree_changed = true;
+                            }
                         }
                         _ => {}
                     }
@@ -578,12 +770,78 @@ impl AppController {
         if mcp_changed {
             self.refresh_mcp();
         }
+        if tree_changed && let Some(explorer) = self.ui.explorer.as_mut() {
+            explorer.refresh();
+        }
         applied
     }
 }
 
 /// Register the IDE's commands. Each runs real work and emits bus events, so the
 /// UI updates purely by pumping the bus.
+/// The `agent.delegation.review` payload: the verdict plus the staged change set
+/// the Review panel renders.
+fn delegation_review_payload(subagent: &str, review: &DelegationReview) -> serde_json::Value {
+    serde_json::json!({
+        "subagent": subagent,
+        "verdict": review.verdict_note(),
+        "files": review
+            .changes
+            .iter()
+            .map(|c| serde_json::json!({ "path": c.path, "deleted": c.deleted }))
+            .collect::<Vec<_>>(),
+    })
+}
+
+/// Land a reviewed delegation: flush its overlay onto the workspace, then commit
+/// the result to the current branch, announcing the outcome on the bus.
+fn land_and_commit(
+    review: &DelegationReview,
+    root: &Path,
+    subagent: &str,
+    task: &str,
+    bus: &dadhichi_core::EventBus,
+) {
+    let landed = match review.land() {
+        Ok(n) => n,
+        Err(err) => {
+            bus.publish(Event::new(
+                "agent.delegation.resolved",
+                serde_json::json!({ "outcome": format!("failed to land: {err}") }),
+            ));
+            return;
+        }
+    };
+    match commit_delegation(root, subagent, task) {
+        Ok(id) => {
+            bus.publish(Event::new(
+                "agent.delegation.landed",
+                serde_json::json!({ "commit": id, "files": landed, "subagent": subagent }),
+            ));
+        }
+        Err(err) => {
+            bus.publish(Event::new(
+                "agent.delegation.resolved",
+                serde_json::json!({
+                    "outcome": format!("landed {landed} file(s) but commit failed: {err}")
+                }),
+            ));
+        }
+    }
+}
+
+/// Stage and commit the landed changes to the repo at `root`, attributed to the
+/// sub-agent (author from `GIT_AUTHOR_*`, falling back to a sub-agent identity).
+fn commit_delegation(root: &Path, subagent: &str, task: &str) -> Result<String, String> {
+    let repo = GitRepo::open(root).map_err(|e| e.to_string())?;
+    repo.stage_all().map_err(|e| e.to_string())?;
+    let name = std::env::var("GIT_AUTHOR_NAME").unwrap_or_else(|_| "dadhichi-agent".to_string());
+    let email =
+        std::env::var("GIT_AUTHOR_EMAIL").unwrap_or_else(|_| "agent@dadhichi.local".to_string());
+    repo.commit(&format!("{subagent}: {task}"), &name, &email)
+        .map_err(|e| e.to_string())
+}
+
 /// Build the palette's skill rows (name, description, capability summary) from
 /// the catalogue.
 fn skill_entries(registry: &SkillRegistry) -> Vec<SkillEntry> {
@@ -918,13 +1176,21 @@ async fn register_commands(
                             .args
                             .get("agent")
                             .and_then(|a| a.as_str())
-                            .unwrap_or("conversational-agent")
+                            .unwrap_or("react-agent")
                             .to_string();
 
+                        // The default run may act, not just read: grant the write
+                        // and run-command capabilities too. Each such call is still
+                        // stopped at the y/n approval gate before it executes, so a
+                        // broad grant here does not mean unattended side effects.
                         let mut ctx = AgentContext::new(
                             router,
                             tools,
-                            GrantSet::from_iter([Permission::ReadWorkspace]),
+                            GrantSet::from_iter([
+                                Permission::ReadWorkspace,
+                                Permission::WriteWorkspace,
+                                Permission::RunCommands,
+                            ]),
                             bus,
                         );
                         let outcome = orchestrator
@@ -1594,6 +1860,60 @@ mod tests {
         assert!(names.contains(&"mcp.connectors"));
         assert!(names.contains(&"mcp.add"));
         assert!(names.contains(&"agent.spawn"));
+    }
+
+    #[tokio::test]
+    async fn save_active_document_writes_the_buffer_to_disk() {
+        let dir = std::env::temp_dir().join(format!("dadhichi-save-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("note.txt");
+        std::fs::write(&file, "original").unwrap();
+
+        let mut ctrl = AppController::new(&dir).await;
+        ctrl.ui_mut().open_document(Some(file.clone()), "original");
+        // Edit the buffer, then save it.
+        if let Some(doc) = ctrl.ui_mut().active_document_mut() {
+            doc.insert(" edited");
+        }
+        assert!(ctrl.ui().active_document().unwrap().dirty);
+
+        let saved = ctrl.save_active_document().unwrap();
+        assert!(saved, "a buffer with a path saves");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), " editedoriginal");
+        assert!(
+            !ctrl.ui().active_document().unwrap().dirty,
+            "dirty flag cleared after save"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn save_active_document_noops_without_a_path() {
+        let mut ctrl = AppController::new(".").await;
+        ctrl.ui_mut().open_document(None, "scratch");
+        assert!(
+            !ctrl.save_active_document().unwrap(),
+            "a scratch buffer with no path is not saved"
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_specialist_delegation_reports_the_roster() {
+        let mut ctrl = AppController::new(".").await;
+        ctrl.start_delegation("bogus-agent", "do something");
+        ctrl.pump();
+        assert!(
+            ctrl.ui()
+                .chat
+                .iter()
+                .any(|l| l.contains("unknown specialist") && l.contains("code-agent")),
+            "unknown specialist is reported with the roster: {:?}",
+            ctrl.ui().chat
+        );
+        // No review was staged, and resolving is a safe no-op.
+        assert!(!ctrl.has_pending_delegation());
+        ctrl.resolve_delegation(false);
     }
 
     #[tokio::test]

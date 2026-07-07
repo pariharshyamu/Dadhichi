@@ -23,6 +23,14 @@ pub enum Command {
     Vault(VaultCommand),
     /// Manage the skill library (import a manifest, list installed skills).
     Skill(SkillCommand),
+    /// Delegate an isolated sub-task to a specialist that stages its work and
+    /// commits it to the branch after verification/approval.
+    Delegate {
+        /// The specialist to run (e.g. `code-agent`).
+        subagent: String,
+        /// The self-contained task description.
+        task: String,
+    },
     /// Boot the kernel and run the agent against `goal`.
     Run { goal: Option<String> },
 }
@@ -86,6 +94,19 @@ fn parse_vault(args: &[String]) -> VaultCommand {
     }
 }
 
+/// Parse the tokens following `delegate` into a [`Command::Delegate`]. Takes the
+/// specialist name, then the rest of the line as the task. Falls back to `Help`
+/// when either is missing.
+fn parse_delegate(args: &[String]) -> Command {
+    match (args.first(), args.get(1)) {
+        (Some(subagent), Some(_)) if !subagent.is_empty() => Command::Delegate {
+            subagent: subagent.clone(),
+            task: args[1..].join(" "),
+        },
+        _ => Command::Help,
+    }
+}
+
 /// The one-line version string, e.g. `dadhichi 0.1.0`.
 pub fn version_line() -> String {
     format!("{BIN_NAME} {VERSION}")
@@ -100,6 +121,7 @@ USAGE:
     {name} [OPTIONS] [GOAL]
     {name} vault <set NAME | list | remove NAME>
     {name} skill <import PATH | list>
+    {name} delegate <SUBAGENT> <TASK...>
 
 ARGS:
     <GOAL>    Natural-language goal for the built-in agent to plan and execute.
@@ -118,6 +140,9 @@ SUBCOMMANDS:
     skill import PATH    Validate a skill JSON manifest and install it into
                          ~/.dadhichi/skills so the agent console and TUI load it.
     skill list           List the available skills (built-ins plus on-disk).
+    delegate SUB TASK    Run specialist SUB on TASK in an isolated overlay; it
+                         stages file changes, which land on the current branch
+                         (git commit) only after verification or your approval.
 
 ENVIRONMENT:
     RUST_LOG              Tracing filter (e.g. `info`, `dadhichi=debug`). Defaults to `warn`.
@@ -166,6 +191,9 @@ where
     }
     if args.first().map(String::as_str) == Some("skill") {
         return Command::Skill(parse_skill(&args[1..]));
+    }
+    if args.first().map(String::as_str) == Some("delegate") {
+        return parse_delegate(&args[1..]);
     }
 
     let mut goal: Option<String> = None;
@@ -271,6 +299,20 @@ mod tests {
                 name: "openai".to_string()
             })
         );
+    }
+
+    #[test]
+    fn delegate_captures_subagent_and_task() {
+        assert_eq!(
+            parse(["delegate", "code-agent", "add", "a", "ring", "buffer"]),
+            Command::Delegate {
+                subagent: "code-agent".to_string(),
+                task: "add a ring buffer".to_string(),
+            }
+        );
+        // Missing task falls back to help.
+        assert_eq!(parse(["delegate", "code-agent"]), Command::Help);
+        assert_eq!(parse(["delegate"]), Command::Help);
     }
 
     #[test]

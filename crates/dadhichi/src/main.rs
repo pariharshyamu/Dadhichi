@@ -14,16 +14,18 @@
 //! dadhichi "your goal here"    # run the agent against your own goal
 //! ```
 
+mod approve;
 mod cli;
 mod console;
+mod delegate_cmd;
 mod skill;
 mod vault;
 
 use std::sync::Arc;
 
 use dadhichi_agent::{
-    Agent, AgentContext, ConversationalAgent, Orchestrator, SemanticMemory, SpecialistAgent,
-    Workflow,
+    Agent, AgentContext, ConversationalAgent, MemoryRecallTool, MemoryWriteTool, Orchestrator,
+    ReactAgent, SemanticMemory, SpecialistAgent, Workflow, shared_memory,
 };
 use dadhichi_ai::{MockEmbedder, ProviderPlan};
 use dadhichi_cache::RocksBlobCache;
@@ -31,7 +33,10 @@ use dadhichi_collab::Rga;
 use dadhichi_core::Kernel;
 use dadhichi_index::store::SqliteSymbolStore;
 use dadhichi_index::{Indexer, store::SymbolStore};
-use dadhichi_mcp::{EchoTool, GrantSet, Permission, ToolRegistry};
+use dadhichi_mcp::{
+    ApprovalPolicy, EchoTool, FsListTool, FsReadTool, FsWriteTool, GrantSet, Permission,
+    PermissionMode, StateStore, TerminalTool, ToolRegistry, WorkspaceStore,
+};
 use dadhichi_skill::{Skill, SkillAgent, SkillRegistry, SkillStep};
 use dadhichi_telemetry::Metrics;
 use dadhichi_wasm::WasmRuntime;
@@ -59,6 +64,11 @@ async fn main() {
             skill::run(cmd);
             return;
         }
+        cli::Command::Delegate { subagent, task } => {
+            init_tracing();
+            delegate_cmd::run(subagent, task).await;
+            return;
+        }
         cli::Command::Run { goal } => goal,
     };
 
@@ -80,14 +90,27 @@ async fn main() {
     let model_id = plan.default_model();
     let router = Arc::new(plan.build_router());
 
+    let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
+
+    // The tool registry the agent actually acts through. The shell is pinned to
+    // the workspace root, and the virtual filesystem is confined to it by a
+    // path-jail, so nothing the agent does can escape the project directory.
+    let fs_store: Arc<dyn StateStore> = Arc::new(WorkspaceStore::new(&cwd));
+    let cli_memory = shared_memory();
     let tools = {
         let t = ToolRegistry::new();
         t.register(Arc::new(EchoTool));
+        t.register(Arc::new(TerminalTool::in_dir(&cwd)));
+        t.register(Arc::new(FsReadTool::new(fs_store.clone())));
+        t.register(Arc::new(FsWriteTool::new(fs_store.clone())));
+        t.register(Arc::new(FsListTool::new(fs_store.clone())));
+        t.register(Arc::new(MemoryWriteTool::new(cli_memory.clone())));
+        t.register(Arc::new(MemoryRecallTool::new(cli_memory.clone())));
         Arc::new(t)
     };
 
     let mut workspace = Workspace::new();
-    workspace.add_root(std::env::current_dir().unwrap_or_else(|_| ".".into()));
+    workspace.add_root(cwd.clone());
 
     kernel.services().register(router.clone()).await;
     kernel.services().register(tools.clone()).await;
@@ -99,6 +122,55 @@ async fn main() {
 
     // 3. Attach the Agent Console to the event bus.
     let console = console::spawn(kernel.bus());
+
+    // 3a. When the user gave a concrete goal, run the tool-using ReAct agent so
+    //     it can actually *do* the task — gated by a stdin approval prompt for
+    //     shell commands and file writes — then exit. This short-circuits the
+    //     workspace-indexing and capability showcase below, which only run for
+    //     the bare `dadhichi` invocation, keeping a real goal run fast and quiet.
+    if let Some(goal) = goal_override {
+        println!("dadhichi ▸ goal: {goal}\n");
+
+        // Gate the consequential capabilities behind the terminal approver, then
+        // grant them: each shell command / file write pauses for a y/N before it
+        // runs. Read-only tool calls proceed silently.
+        tools.set_policy(
+            ApprovalPolicy::default()
+                .with(Permission::RunCommands, PermissionMode::Interrupt)
+                .with(Permission::WriteWorkspace, PermissionMode::Interrupt),
+        );
+        tools.set_approver(Arc::new(approve::CliApprover));
+
+        let mut ctx = AgentContext::new(
+            router.clone(),
+            tools.clone(),
+            GrantSet::from_iter([
+                Permission::ReadWorkspace,
+                Permission::WriteWorkspace,
+                Permission::RunCommands,
+            ]),
+            kernel.bus().clone(),
+        );
+
+        let agent = ReactAgent::new(&model_id);
+        match agent.run(&goal, &mut ctx).await {
+            Ok(outcome) => {
+                println!(
+                    "\ndadhichi ▸ {} finished ({:?})",
+                    agent.name(),
+                    outcome.status
+                );
+                println!("dadhichi ▸ answer: {}", outcome.summary);
+            }
+            Err(err) => eprintln!("\ndadhichi ▸ agent failed: {err}"),
+        }
+
+        // Drain the console and exit — skip the capability showcase.
+        drop(ctx);
+        drop(kernel);
+        let _ = console.await;
+        return;
+    }
 
     // 3b. Index the workspace: tree-sitter parse → SQLite store, incremental
     //     and event-emitting, with parse results memoised in a persistent
@@ -152,9 +224,8 @@ async fn main() {
         );
     }
 
-    // 4. Run an agent.
-    let goal = goal_override
-        .unwrap_or_else(|| "Explain what makes Dadhichi an agent-native IDE.".to_string());
+    // The bare-invocation demonstration goal.
+    let goal = "Explain what makes Dadhichi an agent-native IDE.".to_string();
     println!("dadhichi ▸ goal: {goal}\n");
 
     let mut ctx = AgentContext::new(

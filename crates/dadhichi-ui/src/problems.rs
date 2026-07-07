@@ -82,6 +82,31 @@ impl ProblemsPanel {
         self.by_file.values().flatten().cloned().collect()
     }
 
+    /// The most severe diagnostic on the 0-based `line` of the file at `path`,
+    /// if any, as a severity label. Diagnostics are keyed by LSP URI while the
+    /// editor knows a filesystem path, so the two are matched on a trailing
+    /// path-component boundary (`file:///a/b.rs` ↔ `/a/b.rs`). Used to mark the
+    /// editor gutter beside lines that have problems.
+    pub fn severity_on_line(&self, path: &str, line: u32) -> Option<&str> {
+        let mut best: Option<&str> = None;
+        for problems in self.by_file.values() {
+            for p in problems {
+                if p.line == line && paths_match(&p.file, path) {
+                    let rank = |s: &str| match s {
+                        "error" => 3,
+                        "warning" => 2,
+                        "information" => 1,
+                        _ => 0,
+                    };
+                    if best.is_none_or(|b| rank(&p.severity) > rank(b)) {
+                        best = Some(&p.severity);
+                    }
+                }
+            }
+        }
+        best
+    }
+
     /// Total problem count.
     pub fn count(&self) -> usize {
         self.by_file.values().map(Vec::len).sum()
@@ -109,6 +134,26 @@ impl ProblemsPanel {
         let n = self.count();
         if self.selected >= n {
             self.selected = n.saturating_sub(1);
+        }
+    }
+}
+
+/// Whether an LSP diagnostic's file (a `file://` URI or bare path) refers to the
+/// same file as the editor's `doc` path. Matches when they are equal after
+/// stripping the URI scheme, or when one is a suffix of the other on a path
+/// separator boundary (so a relative editor path lines up with an absolute URI).
+fn paths_match(diag_file: &str, doc: &str) -> bool {
+    let d = diag_file.strip_prefix("file://").unwrap_or(diag_file);
+    d == doc || ends_on_boundary(d, doc) || ends_on_boundary(doc, d)
+}
+
+/// `long` ends with `short` at a `/` boundary (or equals it).
+fn ends_on_boundary(long: &str, short: &str) -> bool {
+    match long.len().cmp(&short.len()) {
+        std::cmp::Ordering::Less => false,
+        std::cmp::Ordering::Equal => long == short,
+        std::cmp::Ordering::Greater => {
+            long.ends_with(short) && long[..long.len() - short.len()].ends_with('/')
         }
     }
 }
@@ -148,6 +193,33 @@ mod tests {
         panel.apply(&diag("file:///a.rs", 9, "error", "second"));
         assert_eq!(panel.count(), 1);
         assert_eq!(panel.all()[0].message, "second");
+    }
+
+    #[test]
+    fn severity_on_line_matches_uris_to_paths() {
+        let mut panel = ProblemsPanel::new();
+        panel.apply(&diag("file:///home/x/src/main.rs", 4, "warning", "unused"));
+        panel.apply(&diag(
+            "file:///home/x/src/main.rs",
+            4,
+            "error",
+            "type error",
+        ));
+
+        // The URI matches the editor's filesystem path, and error outranks warning.
+        assert_eq!(
+            panel.severity_on_line("/home/x/src/main.rs", 4),
+            Some("error")
+        );
+        // A relative path suffix also lines up on a separator boundary.
+        assert_eq!(
+            panel.severity_on_line("src/main.rs", 4),
+            Some("error"),
+            "relative suffix matches"
+        );
+        // No diagnostic on other lines, and no false match on a partial name.
+        assert_eq!(panel.severity_on_line("/home/x/src/main.rs", 5), None);
+        assert_eq!(panel.severity_on_line("ain.rs", 4), None, "not a boundary");
     }
 
     #[test]

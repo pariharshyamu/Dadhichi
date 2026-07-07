@@ -84,6 +84,30 @@ pub struct ApprovalPrompt {
     pub summary: String,
 }
 
+/// A finished delegation whose staged changes await the user's decision before
+/// they land on the branch. Raised by an `agent.delegation.review` event when a
+/// delegate's work does not clear the critic's confidence threshold, and cleared
+/// by `agent.delegation.resolved`. Drives the Review panel's `y/n` prompt.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DelegationReviewPrompt {
+    /// The specialist whose work is under review, e.g. `"code-agent"`.
+    pub subagent: String,
+    /// The one-line verdict (status, critic confidence vs threshold, notes).
+    pub verdict: String,
+    /// The files the delegate staged: `(path, is_deletion)`.
+    pub files: Vec<(String, bool)>,
+}
+
+/// The editor's incremental-find state: the query being typed and whether the
+/// find input line is currently capturing keystrokes.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FindState {
+    /// The current search query.
+    pub query: String,
+    /// Whether the find input line is active (capturing typed characters).
+    pub active: bool,
+}
+
 /// Which panel currently has keyboard focus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
@@ -140,8 +164,14 @@ pub struct App {
     /// A tool call awaiting the user's `y/n` approval, if any. `Some` between an
     /// `agent.approval` event and its `agent.approval.resolved`.
     pub approval: Option<ApprovalPrompt>,
+    /// A delegated sub-agent's staged work awaiting the user's decision to land
+    /// it on the branch. `Some` between an `agent.delegation.review` event and
+    /// its `agent.delegation.resolved`.
+    pub delegation_review: Option<DelegationReviewPrompt>,
     /// The status-bar message.
     pub status: String,
+    /// The editor's incremental-find state.
+    pub find: FindState,
     focus: Focus,
 }
 
@@ -158,7 +188,9 @@ impl Default for App {
             agent_running: false,
             plan: None,
             approval: None,
+            delegation_review: None,
             status: "ready".into(),
+            find: FindState::default(),
             // Land on the agent console so the goal input has focus at startup —
             // typing a goal and pressing Enter is the primary action.
             focus: Focus::Chat,
@@ -249,6 +281,58 @@ impl App {
         if goal.is_empty() { None } else { Some(goal) }
     }
 
+    /// Whether the editor's find input line is capturing keystrokes.
+    pub fn is_finding(&self) -> bool {
+        self.find.active
+    }
+
+    /// Open the editor find line, starting a fresh query.
+    pub fn find_begin(&mut self) {
+        self.find.active = true;
+        self.find.query.clear();
+    }
+
+    /// Append a character to the find query.
+    pub fn find_push(&mut self, c: char) {
+        self.find.query.push(c);
+    }
+
+    /// Delete the last character of the find query.
+    pub fn find_backspace(&mut self) {
+        self.find.query.pop();
+    }
+
+    /// Close the find input line, keeping the query so `n`/`N` can repeat it.
+    pub fn find_close(&mut self) {
+        self.find.active = false;
+    }
+
+    /// The current find query.
+    pub fn find_query(&self) -> &str {
+        &self.find.query
+    }
+
+    /// Search the active buffer for the current find query, moving the cursor to
+    /// the match, and report a result message on the status bar. `forward`
+    /// chooses direction. Returns whether a match was found.
+    pub fn find_run(&mut self, forward: bool) -> bool {
+        let query = self.find.query.clone();
+        if query.is_empty() {
+            return false;
+        }
+        let found = match self.active_document_mut() {
+            Some(doc) if forward => doc.find_next(&query),
+            Some(doc) => doc.find_prev(&query),
+            None => false,
+        };
+        self.status = if found {
+            format!("/{query}")
+        } else {
+            format!("/{query} — not found")
+        };
+        found
+    }
+
     /// Mark an agent run as in flight (or finished). The frontend sets this when
     /// it starts a run; terminal events clear it via `apply_event`.
     pub fn set_agent_running(&mut self, running: bool) {
@@ -264,6 +348,17 @@ impl App {
     /// Clear the pending approval prompt (after the user answers it).
     pub fn clear_approval(&mut self) {
         self.approval = None;
+    }
+
+    /// The delegation currently awaiting a land/discard decision, if any. The
+    /// frontend checks this to intercept the keystroke and render the Review panel.
+    pub fn pending_delegation_review(&self) -> Option<&DelegationReviewPrompt> {
+        self.delegation_review.as_ref()
+    }
+
+    /// Clear the pending delegation review (after the user decides).
+    pub fn clear_delegation_review(&mut self) {
+        self.delegation_review = None;
     }
 
     /// Apply a kernel event, routing it to the right view-model. This is the
@@ -360,6 +455,118 @@ impl App {
                 self.chat
                     .push(format!("[agent.approval.resolved] {decision}"));
             }
+            // A delegate's staged work needs a land/discard decision: raise the
+            // Review panel with its verdict and change set.
+            "agent.delegation.review" => {
+                let get = |k: &str| {
+                    event
+                        .payload
+                        .get(k)
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string()
+                };
+                let files = event
+                    .payload
+                    .get("files")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|f| {
+                                let path = f.get("path")?.as_str()?.to_string();
+                                let deleted =
+                                    f.get("deleted").and_then(|d| d.as_bool()).unwrap_or(false);
+                                Some((path, deleted))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let subagent = get("subagent");
+                let verdict = get("verdict");
+                self.chat.push(format!(
+                    "[agent.delegation.review] {subagent}: {verdict} — land? (y/n)"
+                ));
+                self.delegation_review = Some(DelegationReviewPrompt {
+                    subagent,
+                    verdict,
+                    files,
+                });
+            }
+            // The delegation decision was made (landed or discarded): clear the
+            // panel and log the outcome.
+            "agent.delegation.resolved" => {
+                let outcome = event
+                    .payload
+                    .get("outcome")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
+                self.delegation_review = None;
+                self.chat
+                    .push(format!("[agent.delegation.resolved] {outcome}"));
+            }
+            // A delegation landed and committed to the branch.
+            "agent.delegation.landed" => {
+                let commit = event
+                    .payload
+                    .get("commit")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let files = event
+                    .payload
+                    .get("files")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                self.delegation_review = None;
+                self.chat.push(format!(
+                    "[agent.delegation.landed] committed {commit} ({files} file(s))"
+                ));
+            }
+            // The model's actual reply. Render it prominently as its own block —
+            // a header line then the body split across chat lines so it wraps —
+            // rather than as a compacted `key=value` telemetry line.
+            "agent.message" => {
+                let content = event
+                    .payload
+                    .get("content")
+                    .and_then(|c| c.as_str())
+                    .unwrap_or("");
+                let role = event
+                    .payload
+                    .get("role")
+                    .and_then(|r| r.as_str())
+                    .unwrap_or("assistant");
+                self.chat.push(format!("‹{role}›"));
+                if content.trim().is_empty() {
+                    self.chat.push("(empty reply)".to_string());
+                } else {
+                    for line in content.lines() {
+                        self.chat.push(line.to_string());
+                    }
+                }
+            }
+            // A tool the agent decided to call: show it as an action line so the
+            // user can watch the agent work, not just see a token counter.
+            "agent.tool" => {
+                let tool = event
+                    .payload
+                    .get("tool")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("?");
+                let args = event.payload.get("args").map(compact).unwrap_or_default();
+                self.chat.push(format!("↳ {tool}({})", truncate(&args, 80)));
+            }
+            "agent.tool.result" => {
+                let result = event.payload.get("result").map(compact).unwrap_or_default();
+                self.chat.push(format!("  ✓ {}", truncate(&result, 100)));
+            }
+            "agent.tool.error" => {
+                let err = event
+                    .payload
+                    .get("error")
+                    .and_then(|e| e.as_str())
+                    .unwrap_or("");
+                self.chat.push(format!("  ✗ {}", truncate(err, 100)));
+            }
             t if t.starts_with("agent.")
                 || t.starts_with("skill.")
                 || t.starts_with("mcp.")
@@ -380,6 +587,17 @@ impl App {
             }
             _ => {}
         }
+    }
+}
+
+/// Clip `s` to at most `max` characters, appending an ellipsis when clipped, so
+/// a long tool result doesn't flood the console.
+fn truncate(s: &str, max: usize) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= max {
+        s.to_string()
+    } else {
+        format!("{}…", chars[..max].iter().collect::<String>())
     }
 }
 
@@ -415,6 +633,64 @@ mod tests {
     }
 
     #[test]
+    fn delegation_review_prompt_is_raised_and_cleared() {
+        let mut app = App::new();
+        assert!(app.pending_delegation_review().is_none());
+
+        app.apply_event(&dadhichi_core::Event::new(
+            "agent.delegation.review",
+            serde_json::json!({
+                "subagent": "code-agent",
+                "verdict": "Completed · critic confidence 40% vs threshold 75%",
+                "files": [
+                    { "path": "src/new.rs", "deleted": false },
+                    { "path": "old.rs", "deleted": true }
+                ]
+            }),
+        ));
+        let review = app.pending_delegation_review().expect("review raised");
+        assert_eq!(review.subagent, "code-agent");
+        assert!(review.verdict.contains("40%"));
+        assert_eq!(review.files.len(), 2);
+        assert_eq!(review.files[1], ("old.rs".to_string(), true));
+
+        // Resolving clears the panel.
+        app.apply_event(&dadhichi_core::Event::new(
+            "agent.delegation.resolved",
+            serde_json::json!({ "outcome": "discarded" }),
+        ));
+        assert!(app.pending_delegation_review().is_none());
+    }
+
+    #[test]
+    fn editor_find_moves_the_cursor_through_matches() {
+        let mut app = App::new();
+        app.open_document(Some("f.rs".into()), "let x = foo(); // foo again\nfoo");
+        // Type a query into the find line.
+        app.find_begin();
+        assert!(app.is_finding());
+        for c in "foo".chars() {
+            app.find_push(c);
+        }
+        assert_eq!(app.find_query(), "foo");
+
+        // Running the search jumps the cursor to the first match (offset 8).
+        assert!(app.find_run(true));
+        assert_eq!(app.active_document().unwrap().cursor(), 8);
+        // Repeating advances to the next occurrence.
+        assert!(app.find_run(true));
+        assert_eq!(app.active_document().unwrap().cursor(), 18);
+
+        // A miss reports not-found on the status bar.
+        app.find.query = "zzz".into();
+        assert!(!app.find_run(true));
+        assert!(app.status.contains("not found"));
+
+        app.find_close();
+        assert!(!app.is_finding());
+    }
+
+    #[test]
     fn take_prompt_trims_and_clears() {
         let mut app = App::new();
         assert_eq!(app.take_prompt(), None);
@@ -440,6 +716,34 @@ mod tests {
             serde_json::json!({ "status": "completed" }),
         ));
         assert!(!app.agent_running);
+    }
+
+    #[test]
+    fn agent_message_event_renders_the_reply_body() {
+        let mut app = App::new();
+        app.apply_event(&Event::new(
+            "agent.message",
+            serde_json::json!({ "role": "assistant", "content": "line one\nline two" }),
+        ));
+        // The reply body lands in the console verbatim (header + each line),
+        // not as a compacted `content=...` telemetry line.
+        assert!(app.chat.iter().any(|l| l.contains("‹assistant›")));
+        assert!(app.chat.iter().any(|l| l == "line one"));
+        assert!(app.chat.iter().any(|l| l == "line two"));
+        assert!(
+            !app.chat.iter().any(|l| l.contains("content=")),
+            "reply must not be rendered as a telemetry key=value line"
+        );
+    }
+
+    #[test]
+    fn agent_message_event_handles_empty_content() {
+        let mut app = App::new();
+        app.apply_event(&Event::new(
+            "agent.message",
+            serde_json::json!({ "role": "assistant", "content": "   " }),
+        ));
+        assert!(app.chat.iter().any(|l| l.contains("(empty reply)")));
     }
 
     #[test]

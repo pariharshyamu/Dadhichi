@@ -51,7 +51,9 @@ pub use protocol::{
 };
 pub use registry::{GrantSet, ToolRegistry};
 pub use shell::TerminalTool;
-pub use state::{MemStore, OverlayStore, PathJail, StateError, StateStore, WorkspaceStore};
+pub use state::{
+    MemStore, OverlayChange, OverlayStore, PathJail, StateError, StateStore, WorkspaceStore,
+};
 pub use tool::{EchoTool, Permission, Tool, ToolError, ToolResult, ToolSpec};
 
 #[cfg(test)]

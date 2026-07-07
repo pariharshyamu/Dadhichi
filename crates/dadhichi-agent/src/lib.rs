@@ -38,6 +38,7 @@
 pub mod agent;
 pub mod agents;
 pub mod compaction;
+pub mod delegate;
 pub mod memory;
 pub mod memory_tools;
 pub mod orchestrator;
@@ -51,8 +52,9 @@ pub mod workflow;
 mod test_support;
 
 pub use agent::{Agent, AgentContext, AgentError, AgentOutcome, AgentStatus};
-pub use agents::{ConversationalAgent, SpecialistAgent};
+pub use agents::{ConversationalAgent, ReactAgent, SpecialistAgent};
 pub use compaction::{CompactionPolicy, CompactionReport, estimate_tokens};
+pub use delegate::{Critic, CriticVerdict, DelegationReview, Delegator, ModelCritic, SubAgentSpec};
 pub use memory::{Memory, MemoryItem, Tier};
 pub use memory_tools::{MemoryRecallTool, MemoryWriteTool, SharedMemory, shared_memory};
 pub use orchestrator::{Checkpoint, Orchestrator};

@@ -17,7 +17,7 @@ use ratatui::{
 };
 
 /// Draw the entire IDE shell for `app` into `frame`.
-pub fn render(app: &App, frame: &mut Frame) {
+pub fn render(app: &mut App, frame: &mut Frame) {
     let area = frame.area();
     let root = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(area);
     let body = root[0];
@@ -34,6 +34,12 @@ pub fn render(app: &App, frame: &mut Frame) {
 
     let center =
         Layout::vertical([Constraint::Percentage(70), Constraint::Percentage(30)]).split(cols[1]);
+    // Scroll the active buffer so the cursor stays visible in the editor pane
+    // (its inner height is the area minus the top and bottom border rows).
+    let editor_rows = center[0].height.saturating_sub(2) as usize;
+    if let Some(doc) = app.active_document_mut() {
+        doc.ensure_visible(editor_rows);
+    }
     render_editor(app, frame, center[0]);
     render_problems(app, frame, center[1]);
 
@@ -52,6 +58,75 @@ pub fn render(app: &App, frame: &mut Frame) {
     if app.palette.is_open() {
         render_palette(app, frame, area);
     }
+    // The delegation Review panel is a modal that sits above everything else.
+    if app.pending_delegation_review().is_some() {
+        render_delegation_review(app, frame, area);
+    }
+}
+
+/// A modal Review panel for a delegated sub-agent's staged work: its verdict and
+/// the files it changed, with a `y`/`n` prompt to land it on the branch or
+/// discard it.
+fn render_delegation_review(app: &App, frame: &mut Frame, area: Rect) {
+    let Some(review) = app.pending_delegation_review() else {
+        return;
+    };
+    // A centred box: 70% wide, up to ~60% tall.
+    let w = (area.width as f32 * 0.7) as u16;
+    let h = ((review.files.len() as u16) + 7).min((area.height as f32 * 0.6) as u16);
+    let x = area.x + (area.width.saturating_sub(w)) / 2;
+    let y = area.y + (area.height.saturating_sub(h)) / 2;
+    let modal = Rect {
+        x,
+        y,
+        width: w.max(20),
+        height: h.max(7),
+    };
+    frame.render_widget(Clear, modal);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(format!(" Delegation Review — {} ", review.subagent))
+        .border_style(
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        );
+
+    let mut lines = vec![
+        Line::from(Span::styled(
+            review.verdict.clone(),
+            Style::default().fg(Color::Yellow),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Staged changes:",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+    ];
+    for (path, deleted) in &review.files {
+        let (mark, color) = if *deleted {
+            ("D", Color::Red)
+        } else {
+            ("M", Color::Green)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {mark} "), Style::default().fg(color)),
+            Span::raw(path.clone()),
+        ]));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "Land on the branch?  y = commit   ·   n/Esc = discard",
+        Style::default()
+            .fg(Color::Magenta)
+            .add_modifier(Modifier::BOLD),
+    )));
+
+    frame.render_widget(
+        Paragraph::new(lines).block(block).wrap(Wrap { trim: true }),
+        modal,
+    );
 }
 
 /// A bordered block whose title highlights when `focused`.
@@ -99,19 +174,54 @@ fn render_editor(app: &App, frame: &mut Frame, area: Rect) {
     let heading = format!("Editor — {title}");
     let block = panel(&heading, app.focus() == Focus::Editor);
 
+    // Render the slice of lines currently scrolled into view, numbered by their
+    // absolute position so the gutter stays truthful as the buffer scrolls. Lines
+    // that carry an LSP diagnostic get a coloured marker in the gutter (● error,
+    // ▲ warning) so problems are visible where they occur, not only in the panel.
+    let rows = area.height.saturating_sub(2) as usize;
+    let doc_path = app
+        .active_document()
+        .and_then(|d| d.path.as_ref())
+        .map(|p| p.display().to_string());
     let lines: Vec<Line> = match app.active_document() {
-        Some(doc) => (0..doc.line_count().min(area.height as usize))
-            .map(|n| {
-                let text = doc.line(n).unwrap_or_default();
-                Line::from(vec![
-                    Span::styled(
-                        format!("{:>4} ", n + 1),
-                        Style::default().fg(Color::DarkGray),
-                    ),
-                    Span::raw(text),
-                ])
-            })
-            .collect(),
+        Some(doc) => {
+            let top = doc.scroll();
+            let cursor_line = doc.cursor_line_col().0;
+            (top..(top + rows).min(doc.line_count()))
+                .map(|n| {
+                    let text = doc.line(n).unwrap_or_default();
+                    let (marker, marker_style) = match doc_path
+                        .as_deref()
+                        .and_then(|p| app.problems.severity_on_line(p, n as u32))
+                    {
+                        Some("error") => ("●", Style::default().fg(Color::Red)),
+                        Some("warning") => ("▲", Style::default().fg(Color::Yellow)),
+                        Some(_) => ("•", Style::default().fg(Color::Cyan)),
+                        None => (" ", Style::default()),
+                    };
+                    // Highlight the cursor's line so navigation and find jumps are
+                    // visible even without a blinking caret.
+                    let on_cursor = n == cursor_line;
+                    let gutter_style = if on_cursor {
+                        Style::default()
+                            .fg(Color::White)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::DarkGray)
+                    };
+                    let text_span = if on_cursor {
+                        Span::styled(text, Style::default().add_modifier(Modifier::BOLD))
+                    } else {
+                        Span::raw(text)
+                    };
+                    Line::from(vec![
+                        Span::styled(marker, marker_style),
+                        Span::styled(format!("{:>4} ", n + 1), gutter_style),
+                        text_span,
+                    ])
+                })
+                .collect()
+        }
         None => vec![Line::from("(no file open)")],
     };
     frame.render_widget(Paragraph::new(lines).block(block), area);
@@ -293,7 +403,9 @@ fn render_status(app: &App, frame: &mut Frame, area: Rect) {
         ),
         Span::raw(format!(" {} ", app.status)),
         Span::styled(format!("[{focus}]"), Style::default().fg(Color::DarkGray)),
-        Span::raw("  Enter run goal · Ctrl-P palette · Tab focus · Ctrl-Q quit"),
+        Span::raw(
+            "  Enter run goal · Ctrl-P palette · Ctrl-S save · Ctrl-F find · Tab focus · Ctrl-Q quit",
+        ),
     ]);
     frame.render_widget(Paragraph::new(line), area);
 }
@@ -406,10 +518,45 @@ mod tests {
     }
 
     #[test]
+    fn renders_delegation_review_panel() {
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let mut app = demo_app();
+        app.apply_event(&dadhichi_core::Event::new(
+            "agent.delegation.review",
+            serde_json::json!({
+                "subagent": "code-agent",
+                "verdict": "Completed · critic confidence 40% vs threshold 75%",
+                "files": [{ "path": "src/added.rs", "deleted": false }]
+            }),
+        ));
+        terminal.draw(|f| render(&mut app, f)).unwrap();
+
+        let text = buffer_text(&terminal);
+        assert!(text.contains("Delegation Review"), "review modal drawn");
+        assert!(text.contains("src/added.rs"), "staged file listed");
+        assert!(text.contains("y = commit"), "land prompt shown");
+    }
+
+    #[test]
+    fn renders_inline_diagnostic_marker_in_the_editor() {
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        // demo_app opens src/main.rs with a warning on line 1 (0-based).
+        let mut app = demo_app();
+        app.set_focus(Focus::Editor);
+        terminal.draw(|f| render(&mut app, f)).unwrap();
+
+        let text = buffer_text(&terminal);
+        assert!(
+            text.contains('▲'),
+            "warning marker drawn in the editor gutter"
+        );
+    }
+
+    #[test]
     fn renders_all_panels() {
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
-        let app = demo_app();
-        terminal.draw(|f| render(&app, f)).unwrap();
+        let mut app = demo_app();
+        terminal.draw(|f| render(&mut app, f)).unwrap();
 
         let text = buffer_text(&terminal);
         assert!(text.contains("Explorer"), "explorer panel drawn");
@@ -434,7 +581,7 @@ mod tests {
                 ]
             }),
         ));
-        terminal.draw(|f| render(&app, f)).unwrap();
+        terminal.draw(|f| render(&mut app, f)).unwrap();
 
         let text = buffer_text(&terminal);
         assert!(text.contains("Plan (50%)"), "plan header with progress");
@@ -449,7 +596,7 @@ mod tests {
         app.prompt_push('f');
         app.prompt_push('i');
         app.prompt_push('x');
-        terminal.draw(|f| render(&app, f)).unwrap();
+        terminal.draw(|f| render(&mut app, f)).unwrap();
 
         let text = buffer_text(&terminal);
         assert!(text.contains("❯ fix"), "typed goal shown in the input line");
@@ -460,7 +607,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
         let mut app = demo_app();
         app.set_focus(Focus::Editor); // move focus off the console
-        terminal.draw(|f| render(&app, f)).unwrap();
+        terminal.draw(|f| render(&mut app, f)).unwrap();
 
         let text = buffer_text(&terminal);
         assert!(
@@ -475,7 +622,7 @@ mod tests {
         let mut app = demo_app();
         app.toggle_palette();
         app.palette.push('a');
-        terminal.draw(|f| render(&app, f)).unwrap();
+        terminal.draw(|f| render(&mut app, f)).unwrap();
 
         let text = buffer_text(&terminal);
         assert!(text.contains("Command Palette"), "palette overlay drawn");
@@ -493,7 +640,7 @@ mod tests {
         }]);
         app.toggle_palette();
         app.palette.push('>'); // enter skill mode
-        terminal.draw(|f| render(&app, f)).unwrap();
+        terminal.draw(|f| render(&mut app, f)).unwrap();
 
         let text = buffer_text(&terminal);
         assert!(text.contains("Skills"), "skill-mode title drawn");

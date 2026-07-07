@@ -67,7 +67,9 @@ fn main() {
 
     let (w, h) = (100u16, 26u16);
     let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
-    terminal.draw(|f| dadhichi_tui::render(&app, f)).unwrap();
+    terminal
+        .draw(|f| dadhichi_tui::render(&mut app, f))
+        .unwrap();
 
     let buffer = terminal.backend().buffer();
     let border = "─".repeat(w as usize);

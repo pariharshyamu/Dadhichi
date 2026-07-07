@@ -80,6 +80,13 @@ impl Agent for ConversationalAgent {
             "agent.tokens",
             serde_json::json!({ "total": completion.usage.total() }),
         );
+        // Surface the model's actual reply on the bus so a frontend can show it.
+        // Without this the console only sees telemetry (status/plan/tokens) and
+        // the answer — the whole point of the run — never reaches the screen.
+        ctx.emit(
+            "agent.message",
+            serde_json::json!({ "role": "assistant", "content": completion.content }),
+        );
         ctx.memory
             .remember(Tier::Conversation, completion.content.clone());
         // Keep the run inside the context window: compact the conversation once
