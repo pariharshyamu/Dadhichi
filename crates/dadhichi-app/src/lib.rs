@@ -25,9 +25,9 @@ use dadhichi_git::GitRepo;
 use dadhichi_index::Indexer;
 use dadhichi_index::store::SqliteSymbolStore;
 use dadhichi_mcp::{
-    ApprovalPolicy, EchoTool, FsListTool, FsReadTool, FsWriteTool, GrantSet, McpConnection,
-    McpConnections, McpServersConfig, Permission, PermissionMode, StateStore, TerminalTool,
-    ToolRegistry, WorkspaceStore, connect_servers, connector,
+    ApprovalPolicy, EchoTool, FsGlobTool, FsGrepTool, FsListTool, FsReadTool, FsWriteTool, GrantSet,
+    McpConnection, McpConnections, McpServersConfig, Permission, PermissionMode, StateStore,
+    TerminalTool, ToolRegistry, WorkspaceStore, connect_servers, connector,
 };
 use dadhichi_security::{SecretResolver, Vault, VaultData};
 use dadhichi_skill::{
@@ -224,6 +224,9 @@ impl AppController {
             t.register(Arc::new(FsReadTool::new(fs_store.clone())));
             t.register(Arc::new(FsWriteTool::new(fs_store.clone())));
             t.register(Arc::new(FsListTool::new(fs_store.clone())));
+            // Search tools: content grep and filename glob over the sandbox.
+            t.register(Arc::new(FsGrepTool::new(fs_store.clone())));
+            t.register(Arc::new(FsGlobTool::new(fs_store.clone())));
             // Memory-access tools over the shared store.
             t.register(Arc::new(MemoryWriteTool::new(agent_memory.clone())));
             t.register(Arc::new(MemoryRecallTool::new(agent_memory.clone())));
@@ -2110,19 +2113,25 @@ mod tests {
         ctrl.start_agent_goal("explain ownership");
 
         // Drain events as they arrive, yielding to let the spawned task progress.
+        // The tool-using ReAct agent emits its events across several phases
+        // (planning → running → completed), so keep pumping until the run reaches
+        // its terminal state rather than stopping at the first `agent.` line.
         let mut saw_agent_event = false;
-        for _ in 0..50 {
+        for _ in 0..200 {
             tokio::task::yield_now().await;
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             ctrl.pump();
             if ctrl.ui().chat.iter().any(|l| l.contains("agent.")) {
                 saw_agent_event = true;
+            }
+            // Stop once the busy flag clears — the terminal status has landed.
+            if saw_agent_event && !ctrl.ui().agent_running {
                 break;
             }
         }
         assert!(saw_agent_event, "chat: {:?}", ctrl.ui().chat);
         // A terminal status cleared the busy flag.
-        assert!(!ctrl.ui().agent_running);
+        assert!(!ctrl.ui().agent_running, "chat: {:?}", ctrl.ui().chat);
     }
 
     #[tokio::test]

@@ -44,7 +44,7 @@ pub use connector::{
     ConnectReport, ConnectedServer, McpConnections, McpServerConfig, McpServersConfig, ServerError,
     connect_servers, resolve_env,
 };
-pub use fs::{FsListTool, FsReadTool, FsWriteTool};
+pub use fs::{FsGlobTool, FsGrepTool, FsListTool, FsReadTool, FsWriteTool};
 pub use protocol::{
     McpClient, McpError, PromptArgument, PromptSpec, ResourceSpec, RpcErrorObject, RpcRequest,
     RpcResponse, ServerCapabilities,

@@ -102,6 +102,11 @@ async fn handle_key(ctrl: &mut AppController, code: KeyCode, mods: KeyModifiers)
             return false;
         }
         (KeyCode::Char('q'), KeyModifiers::CONTROL) => return true,
+        // Ctrl-B collapses/expands the Explorer to reclaim its width.
+        (KeyCode::Char('b'), KeyModifiers::CONTROL) => {
+            ctrl.ui_mut().toggle_explorer();
+            return false;
+        }
         // Ctrl-S saves the active editor buffer to disk.
         (KeyCode::Char('s'), KeyModifiers::CONTROL) => {
             if let Err(err) = ctrl.save_active_document() {
@@ -177,12 +182,18 @@ async fn handle_key(ctrl: &mut AppController, code: KeyCode, mods: KeyModifiers)
     }
 
     // The agent console owns free text: letters build the goal, Enter runs it.
+    // PageUp/PageDown (and Ctrl-Up/Down for line-at-a-time) scroll the transcript
+    // back through history; new output snaps it back to the tail.
     if ctrl.ui().focus() == Focus::Chat {
-        match code {
-            KeyCode::Enter => submit_goal(ctrl),
-            KeyCode::Backspace => ctrl.ui_mut().prompt_backspace(),
-            KeyCode::Tab => ctrl.ui_mut().cycle_focus(),
-            KeyCode::Char(c) => ctrl.ui_mut().prompt_push(c),
+        match (code, mods) {
+            (KeyCode::PageUp, _) => ctrl.ui_mut().chat_scroll_up(10),
+            (KeyCode::PageDown, _) => ctrl.ui_mut().chat_scroll_down(10),
+            (KeyCode::Up, KeyModifiers::CONTROL) => ctrl.ui_mut().chat_scroll_up(1),
+            (KeyCode::Down, KeyModifiers::CONTROL) => ctrl.ui_mut().chat_scroll_down(1),
+            (KeyCode::Enter, _) => submit_goal(ctrl),
+            (KeyCode::Backspace, _) => ctrl.ui_mut().prompt_backspace(),
+            (KeyCode::Tab, _) => ctrl.ui_mut().cycle_focus(),
+            (KeyCode::Char(c), _) => ctrl.ui_mut().prompt_push(c),
             _ => {}
         }
         return false;

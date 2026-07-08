@@ -112,15 +112,19 @@ mod tests {
     #[tokio::test]
     async fn in_dir_pins_the_working_directory() {
         let dir = tempfile::tempdir().unwrap();
+        // Print the working directory portably: `cd` with no args does this on
+        // cmd.exe (Windows), where `pwd` is not a builtin; `pwd` does it on the
+        // POSIX shells used elsewhere.
+        let print_cwd = if cfg!(windows) { "cd" } else { "pwd" };
         let out = TerminalTool::in_dir(dir.path())
-            .invoke(serde_json::json!({ "command": "pwd" }))
+            .invoke(serde_json::json!({ "command": print_cwd }))
             .await
             .unwrap();
         let shown = out["stdout"].as_str().unwrap();
         // The command ran inside the sandbox root (allowing for /private symlink
         // on macOS by matching the final path component).
         let leaf = dir.path().file_name().unwrap().to_string_lossy();
-        assert!(shown.contains(leaf.as_ref()), "pwd={shown}");
+        assert!(shown.contains(leaf.as_ref()), "cwd={shown}");
     }
 
     #[tokio::test]

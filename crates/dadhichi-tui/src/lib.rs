@@ -13,7 +13,10 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
+    widgets::{
+        Block, Borders, Clear, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation,
+        ScrollbarState, Wrap,
+    },
 };
 
 /// Draw the entire IDE shell for `app` into `frame`.
@@ -23,17 +26,29 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     let body = root[0];
     let status = root[1];
 
-    let cols = Layout::horizontal([
-        Constraint::Percentage(22),
-        Constraint::Percentage(50),
-        Constraint::Percentage(28),
-    ])
-    .split(body);
+    // The Explorer is collapsible (Ctrl-B). When hidden, the editor and console
+    // reclaim its width — valuable on narrow terminals. The column indices shift
+    // accordingly, so bind them by name rather than a fixed offset.
+    let (explorer_col, center_col, right_col) = if app.explorer_visible() {
+        let cols = Layout::horizontal([
+            Constraint::Percentage(22),
+            Constraint::Percentage(50),
+            Constraint::Percentage(28),
+        ])
+        .split(body);
+        (Some(cols[0]), cols[1], cols[2])
+    } else {
+        let cols =
+            Layout::horizontal([Constraint::Percentage(64), Constraint::Percentage(36)]).split(body);
+        (None, cols[0], cols[1])
+    };
 
-    render_explorer(app, frame, cols[0]);
+    if let Some(area) = explorer_col {
+        render_explorer(app, frame, area);
+    }
 
-    let center =
-        Layout::vertical([Constraint::Percentage(70), Constraint::Percentage(30)]).split(cols[1]);
+    let center = Layout::vertical([Constraint::Percentage(70), Constraint::Percentage(30)])
+        .split(center_col);
     // Scroll the active buffer so the cursor stays visible in the editor pane
     // (its inner height is the area minus the top and bottom border rows).
     let editor_rows = center[0].height.saturating_sub(2) as usize;
@@ -47,11 +62,11 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     // stacked above it once the agent has produced a plan.
     if app.plan.is_some() {
         let right = Layout::vertical([Constraint::Percentage(40), Constraint::Percentage(60)])
-            .split(cols[2]);
+            .split(right_col);
         render_plan(app, frame, right[0]);
         render_chat(app, frame, right[1]);
     } else {
-        render_chat(app, frame, cols[2]);
+        render_chat(app, frame, right_col);
     }
     render_status(app, frame, status);
 
@@ -323,15 +338,46 @@ fn render_chat(app: &App, frame: &mut Frame, area: Rect) {
     ])
     .split(inner);
 
-    // Keep the newest transcript lines visible by scrolling to the tail.
+    // The transcript follows the tail by default, but the user can scroll back
+    // through history (PageUp/PageDown when the console is focused). `chat_scroll`
+    // is the offset up from the bottom; subtract it from the tail-pinned offset.
+    let total = app.chat.len();
+    let viewport = rows[0].height as usize;
+    let overflowing = total > viewport;
+
+    // When the transcript overflows, reserve the rightmost column for a scrollbar
+    // so it never paints over the text; otherwise the text uses the full width.
+    let (text_area, scrollbar_area) = if overflowing {
+        let split =
+            Layout::horizontal([Constraint::Min(1), Constraint::Length(1)]).split(rows[0]);
+        (split[0], Some(split[1]))
+    } else {
+        (rows[0], None)
+    };
+
+    let max_offset = total.saturating_sub(viewport);
+    let back = app.chat_scroll().min(max_offset);
+    let offset = max_offset.saturating_sub(back) as u16;
     let text: Vec<Line> = app.chat.iter().map(|l| Line::from(l.as_str())).collect();
-    let overflow = text.len().saturating_sub(rows[0].height as usize) as u16;
     frame.render_widget(
-        Paragraph::new(text)
-            .wrap(Wrap { trim: false })
-            .scroll((overflow, 0)),
-        rows[0],
+        Paragraph::new(text).scroll((offset, 0)),
+        text_area,
     );
+
+    // A scrollbar in the reserved column shows position and that there's more
+    // history above/below — drawn only when the content overflows the pane.
+    if let Some(sb_area) = scrollbar_area {
+        let mut sb_state = ScrollbarState::new(max_offset).position(offset as usize);
+        frame.render_stateful_widget(
+            Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(Some("↑"))
+                .end_symbol(Some("↓"))
+                .thumb_symbol("█")
+                .track_symbol(Some("│")),
+            sb_area,
+            &mut sb_state,
+        );
+    }
 
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
@@ -404,7 +450,7 @@ fn render_status(app: &App, frame: &mut Frame, area: Rect) {
         Span::raw(format!(" {} ", app.status)),
         Span::styled(format!("[{focus}]"), Style::default().fg(Color::DarkGray)),
         Span::raw(
-            "  Enter run goal · Ctrl-P palette · Ctrl-S save · Ctrl-F find · Tab focus · Ctrl-Q quit",
+            "  Enter run · Ctrl-P palette · Ctrl-B explorer · PgUp/PgDn scroll · Tab focus · Ctrl-Q quit",
         ),
     ]);
     frame.render_widget(Paragraph::new(line), area);
@@ -565,6 +611,48 @@ mod tests {
         assert!(text.contains("Agent Console"), "chat panel drawn");
         assert!(text.contains("fn main()"), "editor content shown");
         assert!(text.contains("dadhichi"), "status bar drawn");
+    }
+
+    #[test]
+    fn hiding_the_explorer_reclaims_its_width() {
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let mut app = demo_app();
+        app.toggle_explorer(); // hide it
+        terminal.draw(|f| render(&mut app, f)).unwrap();
+
+        let text = buffer_text(&terminal);
+        assert!(!text.contains("Explorer"), "explorer pane is gone");
+        // The other panels are still drawn in the reclaimed space.
+        assert!(text.contains("Editor"), "editor still drawn");
+        assert!(text.contains("Agent Console"), "console still drawn");
+    }
+
+    #[test]
+    fn scrolls_the_console_transcript_and_draws_a_scrollbar() {
+        // A tall-enough terminal with far more transcript lines than fit forces
+        // overflow. Hide the explorer so the console has ample width.
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        let mut app = demo_app();
+        app.toggle_explorer();
+        for i in 0..60 {
+            app.push_chat(format!("row{i:02}"));
+        }
+        // Pinned to the tail: the newest line is visible, the oldest is not.
+        terminal.draw(|f| render(&mut app, f)).unwrap();
+        let tail = buffer_text(&terminal);
+        assert!(tail.contains("row59"), "newest line visible at the tail");
+        assert!(!tail.contains("row00"), "oldest line scrolled off at the tail");
+
+        // Scroll all the way back into history: the oldest line comes into view
+        // and the scrollbar thumb is drawn.
+        app.chat_scroll_up(60);
+        terminal.draw(|f| render(&mut app, f)).unwrap();
+        let scrolled = buffer_text(&terminal);
+        assert!(scrolled.contains('█'), "scrollbar thumb drawn on overflow");
+        assert!(
+            scrolled.contains("row00"),
+            "oldest history is visible after scrolling to the top"
+        );
     }
 
     #[test]

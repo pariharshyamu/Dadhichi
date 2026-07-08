@@ -172,6 +172,13 @@ pub struct App {
     pub status: String,
     /// The editor's incremental-find state.
     pub find: FindState,
+    /// How many lines the agent-console transcript is scrolled up from the tail.
+    /// `0` pins to the newest line (the default); a positive value scrolls back
+    /// into history. Any new chat line resets it to `0` so live output follows.
+    chat_scroll: usize,
+    /// Whether the file Explorer pane is shown. Hiding it (Ctrl-B) gives the
+    /// editor and agent console the full width — useful on narrow terminals.
+    explorer_visible: bool,
     focus: Focus,
 }
 
@@ -191,6 +198,8 @@ impl Default for App {
             delegation_review: None,
             status: "ready".into(),
             find: FindState::default(),
+            chat_scroll: 0,
+            explorer_visible: true,
             // Land on the agent console so the goal input has focus at startup —
             // typing a goal and pressing Enter is the primary action.
             focus: Focus::Chat,
@@ -244,9 +253,14 @@ impl App {
         self.focus = focus;
     }
 
-    /// Advance focus to the next panel (Tab).
+    /// Advance focus to the next panel (Tab). Skips the Explorer while it's
+    /// hidden so Tab never lands on an invisible pane.
     pub fn cycle_focus(&mut self) {
-        self.focus = self.focus().next();
+        let mut next = self.focus().next();
+        if next == Focus::Explorer && !self.explorer_visible {
+            next = next.next();
+        }
+        self.focus = next;
     }
 
     /// Toggle the command palette overlay.
@@ -258,9 +272,44 @@ impl App {
         }
     }
 
-    /// Append a line to the chat / agent console.
+    /// Append a line to the chat / agent console. Snapping back to the tail so
+    /// live agent output stays in view even if the user had scrolled up.
     pub fn push_chat(&mut self, line: impl Into<String>) {
         self.chat.push(line.into());
+        self.chat_scroll = 0;
+    }
+
+    /// How far the console transcript is scrolled back from the newest line.
+    /// `0` means pinned to the tail (following live output).
+    pub fn chat_scroll(&self) -> usize {
+        self.chat_scroll
+    }
+
+    /// Scroll the console transcript up (into older history) by `lines`, saturating
+    /// at the oldest line so it can't scroll into emptiness.
+    pub fn chat_scroll_up(&mut self, lines: usize) {
+        let max = self.chat.len().saturating_sub(1);
+        self.chat_scroll = (self.chat_scroll + lines).min(max);
+    }
+
+    /// Scroll the console transcript down (toward the newest line) by `lines`.
+    /// Reaching `0` re-pins it to the tail.
+    pub fn chat_scroll_down(&mut self, lines: usize) {
+        self.chat_scroll = self.chat_scroll.saturating_sub(lines);
+    }
+
+    /// Whether the file Explorer pane is currently shown.
+    pub fn explorer_visible(&self) -> bool {
+        self.explorer_visible
+    }
+
+    /// Show or hide the Explorer pane. When hiding it while it holds focus, move
+    /// focus to the editor so keystrokes still land somewhere sensible.
+    pub fn toggle_explorer(&mut self) {
+        self.explorer_visible = !self.explorer_visible;
+        if !self.explorer_visible && self.focus == Focus::Explorer {
+            self.focus = Focus::Editor;
+        }
     }
 
     /// Append a character to the agent-console goal input.
@@ -630,6 +679,50 @@ mod tests {
         assert_eq!(app.focus(), Focus::Problems);
         app.cycle_focus();
         assert_eq!(app.focus(), Focus::Chat);
+    }
+
+    #[test]
+    fn tab_skips_the_explorer_while_it_is_hidden() {
+        let mut app = App::new(); // focus starts on Chat
+        app.toggle_explorer(); // hide the explorer
+        assert!(!app.explorer_visible());
+        // Chat → (Explorer skipped) → Editor.
+        app.cycle_focus();
+        assert_eq!(app.focus(), Focus::Editor);
+    }
+
+    #[test]
+    fn hiding_the_explorer_while_focused_moves_focus_to_the_editor() {
+        let mut app = App::new();
+        app.set_focus(Focus::Explorer);
+        app.toggle_explorer();
+        assert!(!app.explorer_visible());
+        assert_eq!(app.focus(), Focus::Editor, "focus left the hidden pane");
+    }
+
+    #[test]
+    fn console_scroll_offset_clamps_and_new_output_snaps_to_tail() {
+        let mut app = App::new();
+        for i in 0..5 {
+            app.push_chat(format!("l{i}"));
+        }
+        assert_eq!(app.chat_scroll(), 0, "starts pinned to the tail");
+
+        // Scroll up past the history: it saturates, never exceeding len-1.
+        app.chat_scroll_up(100);
+        assert_eq!(app.chat_scroll(), 4);
+
+        // Scrolling down returns toward the tail and can't go negative.
+        app.chat_scroll_down(2);
+        assert_eq!(app.chat_scroll(), 2);
+        app.chat_scroll_down(100);
+        assert_eq!(app.chat_scroll(), 0);
+
+        // A new line while scrolled back snaps the view to the tail.
+        app.chat_scroll_up(3);
+        assert_eq!(app.chat_scroll(), 3);
+        app.push_chat("new");
+        assert_eq!(app.chat_scroll(), 0, "live output re-pins to the tail");
     }
 
     #[test]

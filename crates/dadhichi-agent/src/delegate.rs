@@ -18,8 +18,8 @@ use async_trait::async_trait;
 use dadhichi_ai::{CompletionRequest, Message, ModelRouter};
 use dadhichi_core::{Event, EventBus};
 use dadhichi_mcp::{
-    FsListTool, FsReadTool, FsWriteTool, GrantSet, OverlayChange, OverlayStore, Permission,
-    StateError, StateStore, TerminalTool, ToolRegistry,
+    FsGlobTool, FsGrepTool, FsListTool, FsReadTool, FsWriteTool, GrantSet, OverlayChange,
+    OverlayStore, Permission, StateError, StateStore, TerminalTool, ToolRegistry,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -373,6 +373,9 @@ impl Delegator {
         let tools = ToolRegistry::new();
         tools.register(Arc::new(FsReadTool::new(store.clone())));
         tools.register(Arc::new(FsListTool::new(store.clone())));
+        // Read-only search tools every specialist can use to explore the code.
+        tools.register(Arc::new(FsGrepTool::new(store.clone())));
+        tools.register(Arc::new(FsGlobTool::new(store.clone())));
         if spec.grants(Permission::WriteWorkspace) {
             tools.register(Arc::new(FsWriteTool::new(store.clone())));
         }
