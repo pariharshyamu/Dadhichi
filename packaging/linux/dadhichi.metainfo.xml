@@ -32,6 +32,15 @@
   </provides>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.1.11" date="2026-07-08">
+      <description>
+        <p>Agent Console polish: sticky scroll that stays put while you read
+        history during a live run, an animated phase indicator (spinner plus
+        thinking/running/delegated label), and colour-coded transcript lines.
+        Plus dependency-free editor syntax highlighting and a visible, scrolling
+        Explorer selection.</p>
+      </description>
+    </release>
     <release version="0.1.10" date="2026-07-07">
       <description>
         <p>TUI polish and richer agent tools: a scrollable Agent Console with a
