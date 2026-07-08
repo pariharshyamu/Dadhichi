@@ -58,11 +58,19 @@ async fn run_loop(
 ) -> io::Result<()> {
     loop {
         // Drain live bus events (agent progress, diagnostics, indexing) into the
-        // view-models, then draw.
+        // view-models, advance the animation frame, then draw.
         controller.pump();
+        controller.ui_mut().tick();
         terminal.draw(|f| dadhichi_tui::render(controller.ui_mut(), f))?;
 
-        if event::poll(Duration::from_millis(150))?
+        // Poll faster while the agent is active so the spinner animates smoothly;
+        // fall back to a lazy tick when idle to keep the app near-zero-CPU.
+        let poll = if controller.ui().agent_phase().is_active() {
+            Duration::from_millis(80)
+        } else {
+            Duration::from_millis(200)
+        };
+        if event::poll(poll)?
             && let Event::Key(key) = event::read()?
         {
             if key.kind != KeyEventKind::Press {

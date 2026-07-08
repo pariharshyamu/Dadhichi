@@ -7,15 +7,15 @@
 //! `App`. Rendering to `ratatui`'s `TestBackend` makes the whole layout
 //! verifiable headlessly.
 
-use dadhichi_ui::{App, Focus};
+use dadhichi_ui::{AgentPhase, App, Focus};
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{
-        Block, Borders, Clear, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation,
-        ScrollbarState, Wrap,
+        Block, Borders, Clear, List, ListItem, ListState, Paragraph, Scrollbar,
+        ScrollbarOrientation, ScrollbarState, Wrap,
     },
 };
 
@@ -160,24 +160,57 @@ fn panel(title: &str, focused: bool) -> Block<'_> {
 }
 
 fn render_explorer(app: &App, frame: &mut Frame, area: Rect) {
-    let block = panel("Explorer", app.focus() == Focus::Explorer);
-    let items: Vec<ListItem> = match &app.explorer {
-        Some(explorer) => explorer
-            .rows()
-            .into_iter()
-            .map(|row| {
-                let prefix = "  ".repeat(row.depth);
-                let marker = if row.is_dir {
-                    if row.expanded { "▾ " } else { "▸ " }
-                } else {
-                    "  "
-                };
-                ListItem::new(format!("{prefix}{marker}{}", row.name))
-            })
-            .collect(),
-        None => vec![ListItem::new("(no workspace open)")],
+    let focused = app.focus() == Focus::Explorer;
+    let block = panel("Explorer", focused);
+    let (items, selected): (Vec<ListItem>, Option<usize>) = match &app.explorer {
+        Some(explorer) => {
+            let items = explorer
+                .rows()
+                .into_iter()
+                .map(|row| {
+                    let prefix = "  ".repeat(row.depth);
+                    let marker = if row.is_dir {
+                        if row.expanded { "▾ " } else { "▸ " }
+                    } else {
+                        "  "
+                    };
+                    // Directories in a distinct colour so the tree structure reads
+                    // even when nothing is selected.
+                    let style = if row.is_dir {
+                        Style::default()
+                            .fg(Color::Blue)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::Gray)
+                    };
+                    ListItem::new(Span::styled(format!("{prefix}{marker}{}", row.name), style))
+                })
+                .collect();
+            (items, Some(explorer.selected_index()))
+        }
+        None => (vec![ListItem::new("(no workspace open)")], None),
     };
-    frame.render_widget(List::new(items).block(block), area);
+
+    // A stateful List highlights the selected row and scrolls to keep it in view,
+    // so navigating a long tree stays visible. The highlight is bright when the
+    // pane is focused and muted otherwise, so the selection never disappears.
+    let highlight = if focused {
+        Style::default()
+            .bg(Color::Green)
+            .fg(Color::Black)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+            .bg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD)
+    };
+    let list = List::new(items)
+        .block(block)
+        .highlight_style(highlight)
+        .highlight_symbol("▏");
+    let mut state = ListState::default();
+    state.select(selected);
+    frame.render_stateful_widget(list, area, &mut state);
 }
 
 fn render_editor(app: &App, frame: &mut Frame, area: Rect) {
@@ -224,16 +257,14 @@ fn render_editor(app: &App, frame: &mut Frame, area: Rect) {
                     } else {
                         Style::default().fg(Color::DarkGray)
                     };
-                    let text_span = if on_cursor {
-                        Span::styled(text, Style::default().add_modifier(Modifier::BOLD))
-                    } else {
-                        Span::raw(text)
-                    };
-                    Line::from(vec![
+                    // Syntax-colour the code so tokens are legible instead of a
+                    // flat monochrome wall; the cursor line is additionally bold.
+                    let mut spans = vec![
                         Span::styled(marker, marker_style),
                         Span::styled(format!("{:>4} ", n + 1), gutter_style),
-                        text_span,
-                    ])
+                    ];
+                    spans.extend(highlight_code(&text, on_cursor));
+                    Line::from(spans)
                 })
                 .collect()
         }
@@ -320,12 +351,49 @@ fn render_plan(app: &App, frame: &mut Frame, area: Rect) {
 
 fn render_chat(app: &App, frame: &mut Frame, area: Rect) {
     let focused = app.focus() == Focus::Chat;
-    let title = if app.agent_running {
-        "Agent Console  ⋯ running"
+    // The title carries an animated indicator that reflects the agent's phase:
+    // a spinning braille glyph plus a phase label (thinking / running / delegated)
+    // and a pulsing dot trail, so the console visibly "breathes" while it works.
+    let phase = app.agent_phase();
+    let title_line = if phase.is_active() {
+        let colour = match phase {
+            AgentPhase::Thinking => Color::Cyan,
+            AgentPhase::Running => Color::Green,
+            AgentPhase::Spawned => Color::Magenta,
+            AgentPhase::Idle => Color::DarkGray,
+        };
+        Line::from(vec![
+            Span::styled(
+                " Agent Console ",
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("{} ", app.spinner()),
+                Style::default().fg(colour).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                phase.label(),
+                Style::default().fg(colour).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(app.pulse(), Style::default().fg(colour)),
+        ])
     } else {
-        "Agent Console"
+        Line::from(Span::styled(
+            " Agent Console ",
+            Style::default().add_modifier(Modifier::BOLD),
+        ))
     };
-    let block = panel(title, focused);
+    let border_style = if focused {
+        Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title_line)
+        .border_style(border_style);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -358,11 +426,11 @@ fn render_chat(app: &App, frame: &mut Frame, area: Rect) {
     let max_offset = total.saturating_sub(viewport);
     let back = app.chat_scroll().min(max_offset);
     let offset = max_offset.saturating_sub(back) as u16;
-    let text: Vec<Line> = app.chat.iter().map(|l| Line::from(l.as_str())).collect();
-    frame.render_widget(
-        Paragraph::new(text).scroll((offset, 0)),
-        text_area,
-    );
+    // Colour-code each transcript line by its kind so the eye can separate the
+    // model's answers from tool activity and dim telemetry at a glance — the
+    // legibility fix a terminal can offer in place of a smaller font.
+    let text: Vec<Line> = app.chat.iter().map(|l| style_chat_line(l)).collect();
+    frame.render_widget(Paragraph::new(text).scroll((offset, 0)), text_area);
 
     // A scrollbar in the reserved column shows position and that there's more
     // history above/below — drawn only when the content overflows the pane.
@@ -527,6 +595,138 @@ fn short_file(uri: &str) -> String {
     uri.rsplit(['/', '\\']).next().unwrap_or(uri).to_string()
 }
 
+/// A small, language-agnostic syntax highlighter for one line of code. It has no
+/// dependency on a grammar: it colours line comments, string/char literals,
+/// numbers, and a common set of keywords by scanning characters. That's enough to
+/// give the editor legible colour across Rust/TS/Python/etc. without a heavyweight
+/// parser. `bold` bolds every span (used for the cursor line).
+fn highlight_code(text: &str, bold: bool) -> Vec<Span<'static>> {
+    // A shared keyword set across curly-brace and Python-ish languages. Matching a
+    // superset is fine — a stray highlight is far better than none.
+    const KEYWORDS: &[&str] = &[
+        "fn", "let", "mut", "const", "static", "struct", "enum", "trait", "impl", "pub", "use",
+        "mod", "match", "if", "else", "for", "while", "loop", "return", "break", "continue",
+        "async", "await", "move", "ref", "where", "as", "dyn", "self", "Self", "super", "crate",
+        "type", "def", "class", "import", "from", "func", "var", "function", "public", "private",
+        "protected", "new", "null", "true", "false", "None", "True", "False", "and", "or", "not",
+        "in", "is", "with", "try", "catch", "except", "finally", "throw", "raise", "yield",
+    ];
+    let base = if bold { Modifier::BOLD } else { Modifier::empty() };
+    let mk = |s: &str, colour: Color| {
+        Span::styled(s.to_string(), Style::default().fg(colour).add_modifier(base))
+    };
+
+    // A whole-line comment (covers // and #). Cheap and common.
+    let lead = text.trim_start();
+    if lead.starts_with("//") || lead.starts_with('#') {
+        return vec![mk(text, Color::DarkGray)];
+    }
+
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let chars: Vec<char> = text.chars().collect();
+    let mut i = 0;
+    let mut word = String::new();
+
+    // Flush an accumulated identifier/number as a styled span.
+    fn flush(word: &mut String, spans: &mut Vec<Span<'static>>, base: Modifier, keywords: &[&str]) {
+        if word.is_empty() {
+            return;
+        }
+        let colour = if keywords.contains(&word.as_str()) {
+            Color::Magenta
+        } else if word.chars().all(|c| c.is_ascii_digit() || c == '.' || c == '_')
+            && word.chars().any(|c| c.is_ascii_digit())
+        {
+            Color::Yellow
+        } else {
+            Color::Reset
+        };
+        spans.push(Span::styled(
+            std::mem::take(word),
+            Style::default().fg(colour).add_modifier(base),
+        ));
+    }
+
+    while i < chars.len() {
+        let c = chars[i];
+        // A string or char literal runs to its closing quote (respecting escapes).
+        if c == '"' || c == '\'' || c == '`' {
+            flush(&mut word, &mut spans, base, KEYWORDS);
+            let quote = c;
+            let mut lit = String::from(c);
+            i += 1;
+            while i < chars.len() {
+                let d = chars[i];
+                lit.push(d);
+                i += 1;
+                if d == '\\' && i < chars.len() {
+                    lit.push(chars[i]);
+                    i += 1;
+                    continue;
+                }
+                if d == quote {
+                    break;
+                }
+            }
+            spans.push(Span::styled(
+                lit,
+                Style::default().fg(Color::Green).add_modifier(base),
+            ));
+            continue;
+        }
+        if c.is_alphanumeric() || c == '_' || c == '.' && word.chars().next().is_some_and(|w| w.is_ascii_digit()) {
+            word.push(c);
+        } else {
+            flush(&mut word, &mut spans, base, KEYWORDS);
+            spans.push(Span::styled(
+                c.to_string(),
+                Style::default().add_modifier(base),
+            ));
+        }
+        i += 1;
+    }
+    flush(&mut word, &mut spans, base, KEYWORDS);
+    if spans.is_empty() {
+        spans.push(Span::styled(String::new(), Style::default().add_modifier(base)));
+    }
+    spans
+}
+
+/// Style one agent-console transcript line by its kind, so the model's answers
+/// read clearly while tool activity and telemetry recede. The prefixes match the
+/// markers `dadhichi-ui` writes into the chat buffer (`❯`, `↳`, `✓`, `✗`, `‹…›`,
+/// `[event]`, `$`, `⇥`).
+fn style_chat_line(line: &str) -> Line<'_> {
+    let trimmed = line.trim_start();
+    let (fg, modifier) = if trimmed.starts_with('❯') || trimmed.starts_with('$') {
+        // The user's own goal / shell command echo — bright and bold.
+        (Color::White, Modifier::BOLD)
+    } else if trimmed.starts_with('↳') {
+        // A tool call the agent is making.
+        (Color::Cyan, Modifier::empty())
+    } else if trimmed.starts_with('✓') {
+        (Color::Green, Modifier::empty())
+    } else if trimmed.starts_with('✗') {
+        (Color::Red, Modifier::BOLD)
+    } else if trimmed.starts_with('‹') {
+        // The model-reply header line (‹assistant›).
+        (Color::Yellow, Modifier::BOLD)
+    } else if trimmed.starts_with('⇥') {
+        // A delegation announcement.
+        (Color::Magenta, Modifier::BOLD)
+    } else if trimmed.starts_with('[') {
+        // `[event.name] key=value` telemetry — dim so it doesn't shout.
+        (Color::DarkGray, Modifier::empty())
+    } else {
+        // Model-reply body and everything else — the default readable foreground.
+        (Color::Reset, Modifier::empty())
+    };
+    Line::from(Span::styled(
+        line.to_string(),
+        Style::default().fg(fg).add_modifier(modifier),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -542,6 +742,27 @@ mod tests {
             .iter()
             .map(|c| c.symbol())
             .collect()
+    }
+
+    /// Whether any cell in the rendered buffer uses `fg` as its foreground colour
+    /// — used to assert that colouring (syntax, selection, phase) actually landed.
+    fn buffer_uses_fg(terminal: &Terminal<TestBackend>, fg: Color) -> bool {
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .any(|c| c.fg == fg)
+    }
+
+    /// Whether any cell uses `bg` as its background colour.
+    fn buffer_uses_bg(terminal: &Terminal<TestBackend>, bg: Color) -> bool {
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .any(|c| c.bg == bg)
     }
 
     fn demo_app() -> App {
@@ -734,5 +955,93 @@ mod tests {
         assert!(text.contains("Skills"), "skill-mode title drawn");
         assert!(text.contains("code-review"), "skill listed");
         assert!(text.contains("read_workspace"), "capability detail shown");
+    }
+
+    #[test]
+    fn editor_syntax_highlights_keywords_strings_and_numbers() {
+        // `let x = "hi" + 42;` exercises a keyword, a string literal, and a number.
+        let mut spans = highlight_code(r#"let x = "hi" + 42;"#, false);
+        // Collect (text, fg) pairs to assert each token got its colour.
+        let colours: Vec<(String, Color)> = spans
+            .drain(..)
+            .map(|s| (s.content.into_owned(), s.style.fg.unwrap_or(Color::Reset)))
+            .collect();
+        assert!(
+            colours.iter().any(|(t, c)| t == "let" && *c == Color::Magenta),
+            "keyword coloured: {colours:?}"
+        );
+        assert!(
+            colours.iter().any(|(t, c)| t == "\"hi\"" && *c == Color::Green),
+            "string literal coloured: {colours:?}"
+        );
+        assert!(
+            colours.iter().any(|(t, c)| t == "42" && *c == Color::Yellow),
+            "number coloured: {colours:?}"
+        );
+    }
+
+    #[test]
+    fn editor_pane_actually_renders_colour() {
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let mut app = demo_app(); // opens src/main.rs containing `fn main()`
+        app.set_focus(Focus::Editor);
+        terminal.draw(|f| render(&mut app, f)).unwrap();
+        // `fn` is a keyword → magenta must appear somewhere in the buffer.
+        assert!(
+            buffer_uses_fg(&terminal, Color::Magenta),
+            "editor renders syntax colour for keywords"
+        );
+    }
+
+    #[test]
+    fn explorer_selection_is_highlighted() {
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let mut app = demo_app();
+        app.open_workspace("/proj");
+        // Rebuild a deterministic tree and focus the explorer.
+        app.explorer = Some(dadhichi_ui::Explorer::from_paths(
+            "/proj",
+            &["src/main.rs", "README.md"],
+        ));
+        app.set_focus(Focus::Explorer);
+        terminal.draw(|f| render(&mut app, f)).unwrap();
+        // The focused selection paints a green highlight background.
+        assert!(
+            buffer_uses_bg(&terminal, Color::Green),
+            "selected explorer row is highlighted"
+        );
+        // The highlight symbol marks the row.
+        assert!(
+            buffer_text(&terminal).contains('▏'),
+            "selection marker drawn"
+        );
+    }
+
+    #[test]
+    fn console_shows_an_animated_indicator_while_the_agent_works() {
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let mut app = demo_app();
+        app.set_agent_running(true); // enters Thinking
+        terminal.draw(|f| render(&mut app, f)).unwrap();
+        let text = buffer_text(&terminal);
+        // The phase label and a braille spinner glyph appear in the console title.
+        assert!(text.contains("thinking"), "phase label shown: {text:?}");
+        assert!(
+            "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏".chars().any(|g| text.contains(g)),
+            "a spinner glyph is drawn"
+        );
+    }
+
+    #[test]
+    fn console_transcript_is_colour_coded_by_line_kind() {
+        // The model-reply header is yellow+bold.
+        let header = style_chat_line("‹assistant›");
+        assert_eq!(header.spans[0].style.fg, Some(Color::Yellow));
+        // A tool call is cyan.
+        let tool = style_chat_line("↳ fs.read({...})");
+        assert_eq!(tool.spans[0].style.fg, Some(Color::Cyan));
+        // Telemetry is dimmed.
+        let telem = style_chat_line("[agent.status] status=running");
+        assert_eq!(telem.spans[0].style.fg, Some(Color::DarkGray));
     }
 }

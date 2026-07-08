@@ -43,9 +43,11 @@ fn main() {
             ]
         }),
     ));
+    // Leave the run mid-flight (a tool call in progress) so the console shows its
+    // animated "running" indicator in this snapshot.
     app.apply_event(&dadhichi_core::Event::new(
-        "agent.status",
-        serde_json::json!({ "status": "completed", "confidence": 0.9 }),
+        "agent.tool",
+        serde_json::json!({ "tool": "fs.read", "args": { "path": "src/http.rs" } }),
     ));
     // Context compaction fired mid-run: it logs a concise console line.
     app.apply_event(&dadhichi_core::Event::new(
@@ -77,9 +79,53 @@ fn main() {
     for y in 0..h {
         let mut row = String::new();
         for x in 0..w {
-            row.push_str(buffer[(x, y)].symbol());
+            let cell = &buffer[(x, y)];
+            // Emit ANSI so the colour work (syntax, selection, phase) is visible
+            // when this snapshot is printed to a real terminal.
+            row.push_str(&ansi(cell));
         }
-        println!("│{row}│");
+        // Reset at end of line so colour never bleeds past the frame.
+        println!("│{row}\x1b[0m│");
     }
     println!("└{border}┘");
+}
+
+/// Render a ratatui cell as an ANSI-escaped string (fg colour + bold).
+fn ansi(cell: &ratatui::buffer::Cell) -> String {
+    use ratatui::style::{Color, Modifier};
+    let mut codes: Vec<String> = Vec::new();
+    if cell.modifier.contains(Modifier::BOLD) {
+        codes.push("1".into());
+    }
+    let fg = match cell.fg {
+        Color::Reset => None,
+        Color::Black => Some(30),
+        Color::Red => Some(31),
+        Color::Green => Some(32),
+        Color::Yellow => Some(33),
+        Color::Blue => Some(34),
+        Color::Magenta => Some(35),
+        Color::Cyan => Some(36),
+        Color::Gray => Some(37),
+        Color::DarkGray => Some(90),
+        Color::White => Some(97),
+        _ => None,
+    };
+    if let Some(code) = fg {
+        codes.push(code.to_string());
+    }
+    let bg = match cell.bg {
+        Color::Green => Some(42),
+        Color::DarkGray => Some(100),
+        Color::Yellow => Some(43),
+        _ => None,
+    };
+    if let Some(code) = bg {
+        codes.push(code.to_string());
+    }
+    if codes.is_empty() {
+        cell.symbol().to_string()
+    } else {
+        format!("\x1b[{}m{}\x1b[0m", codes.join(";"), cell.symbol())
+    }
 }

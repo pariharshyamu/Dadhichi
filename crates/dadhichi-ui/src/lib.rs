@@ -137,6 +137,39 @@ impl Focus {
     }
 }
 
+/// What the agent is doing right now, driving the animated status indicator in
+/// the Agent Console. Derived from the run's `agent.*` events.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AgentPhase {
+    /// No run in flight — the console is idle.
+    #[default]
+    Idle,
+    /// Planning / consulting the model (between `planning` and the first tool).
+    Thinking,
+    /// Actively running: a tool call is in flight.
+    Running,
+    /// A sub-agent has been delegated / spawned and is working in isolation.
+    Spawned,
+}
+
+impl AgentPhase {
+    /// A short label for the status line, e.g. `thinking`.
+    pub fn label(self) -> &'static str {
+        match self {
+            AgentPhase::Idle => "idle",
+            AgentPhase::Thinking => "thinking",
+            AgentPhase::Running => "running",
+            AgentPhase::Spawned => "delegated",
+        }
+    }
+
+    /// Whether a run is active (any non-idle phase), so the frontend knows to
+    /// keep animating and redrawing.
+    pub fn is_active(self) -> bool {
+        !matches!(self, AgentPhase::Idle)
+    }
+}
+
 /// The whole IDE shell's view state.
 #[derive(Debug)]
 pub struct App {
@@ -179,6 +212,11 @@ pub struct App {
     /// Whether the file Explorer pane is shown. Hiding it (Ctrl-B) gives the
     /// editor and agent console the full width — useful on narrow terminals.
     explorer_visible: bool,
+    /// What the agent is currently doing, driving the animated console indicator.
+    agent_phase: AgentPhase,
+    /// A monotonically increasing frame counter the frontend advances each redraw
+    /// (via [`App::tick`]) to animate the spinner without any wall-clock state.
+    anim_frame: u64,
     focus: Focus,
 }
 
@@ -200,6 +238,8 @@ impl Default for App {
             find: FindState::default(),
             chat_scroll: 0,
             explorer_visible: true,
+            agent_phase: AgentPhase::Idle,
+            anim_frame: 0,
             // Land on the agent console so the goal input has focus at startup —
             // typing a goal and pressing Enter is the primary action.
             focus: Focus::Chat,
@@ -272,11 +312,18 @@ impl App {
         }
     }
 
-    /// Append a line to the chat / agent console. Snapping back to the tail so
-    /// live agent output stays in view even if the user had scrolled up.
+    /// Append a line to the chat / agent console.
+    ///
+    /// Uses **sticky scroll**: if the user is pinned to the tail
+    /// (`chat_scroll == 0`) the view follows the new line; but if they have
+    /// scrolled up to read history, the offset is bumped so their viewport stays
+    /// anchored on the same content instead of being yanked back to the bottom on
+    /// every streamed agent event.
     pub fn push_chat(&mut self, line: impl Into<String>) {
         self.chat.push(line.into());
-        self.chat_scroll = 0;
+        if self.chat_scroll > 0 {
+            self.chat_scroll += 1;
+        }
     }
 
     /// How far the console transcript is scrolled back from the newest line.
@@ -310,6 +357,32 @@ impl App {
         if !self.explorer_visible && self.focus == Focus::Explorer {
             self.focus = Focus::Editor;
         }
+    }
+
+    /// The agent's current phase (idle/thinking/running/delegated).
+    pub fn agent_phase(&self) -> AgentPhase {
+        self.agent_phase
+    }
+
+    /// Advance the animation frame counter by one. The frontend calls this once
+    /// per redraw so the console spinner animates; it's a no-op semantically
+    /// beyond driving [`App::spinner`].
+    pub fn tick(&mut self) {
+        self.anim_frame = self.anim_frame.wrapping_add(1);
+    }
+
+    /// The current spinner glyph for the active phase, cycled by the frame
+    /// counter. Braille dots give a smooth spin in a single cell.
+    pub fn spinner(&self) -> char {
+        const FRAMES: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+        FRAMES[(self.anim_frame as usize) % FRAMES.len()]
+    }
+
+    /// A short animated progress bar (three dots that fill and empty) for the
+    /// console header, giving motion even where a spinner is too subtle.
+    pub fn pulse(&self) -> &'static str {
+        const FRAMES: [&str; 4] = ["·  ", "·· ", "···", " ··"];
+        FRAMES[(self.anim_frame as usize / 2) % FRAMES.len()]
     }
 
     /// Append a character to the agent-console goal input.
@@ -383,9 +456,16 @@ impl App {
     }
 
     /// Mark an agent run as in flight (or finished). The frontend sets this when
-    /// it starts a run; terminal events clear it via `apply_event`.
+    /// it starts a run; terminal events clear it via `apply_event`. Starting a run
+    /// enters the `Thinking` phase so the console animates immediately, before the
+    /// first `agent.*` event arrives.
     pub fn set_agent_running(&mut self, running: bool) {
         self.agent_running = running;
+        if running {
+            self.agent_phase = AgentPhase::Thinking;
+        } else {
+            self.agent_phase = AgentPhase::Idle;
+        }
     }
 
     /// The tool call currently awaiting the user's `y/n`, if any. The frontend
@@ -596,6 +676,7 @@ impl App {
             // A tool the agent decided to call: show it as an action line so the
             // user can watch the agent work, not just see a token counter.
             "agent.tool" => {
+                self.agent_phase = AgentPhase::Running;
                 let tool = event
                     .payload
                     .get("tool")
@@ -622,13 +703,28 @@ impl App {
                 || t.starts_with("terminal.") =>
             {
                 // Clear the busy indicator when a run reaches a terminal state or
-                // errors out, so the console stops showing "running".
+                // errors out, so the console stops showing "running". Track the
+                // agent phase off the same events so the console can animate it.
                 if t == "agent.error" {
                     self.agent_running = false;
+                    self.agent_phase = AgentPhase::Idle;
+                } else if t == "agent.delegated" {
+                    // A sub-agent was spawned to work in isolation.
+                    self.agent_phase = AgentPhase::Spawned;
                 } else if t == "agent.status" {
                     let status = event.payload.get("status").and_then(|s| s.as_str());
-                    if matches!(status, Some("completed" | "failed" | "error" | "idle")) {
-                        self.agent_running = false;
+                    match status {
+                        Some("completed" | "failed" | "error" | "idle") => {
+                            self.agent_running = false;
+                            self.agent_phase = AgentPhase::Idle;
+                        }
+                        Some("planning") => self.agent_phase = AgentPhase::Thinking,
+                        // Don't downgrade Running (a tool call) back to Thinking on
+                        // a stray "running" status; only lift Idle up to Thinking.
+                        Some("running") if self.agent_phase == AgentPhase::Idle => {
+                            self.agent_phase = AgentPhase::Thinking;
+                        }
+                        _ => {}
                     }
                 }
                 self.chat
@@ -701,7 +797,7 @@ mod tests {
     }
 
     #[test]
-    fn console_scroll_offset_clamps_and_new_output_snaps_to_tail() {
+    fn console_scroll_offset_clamps_and_sticks_while_reading_history() {
         let mut app = App::new();
         for i in 0..5 {
             app.push_chat(format!("l{i}"));
@@ -718,11 +814,67 @@ mod tests {
         app.chat_scroll_down(100);
         assert_eq!(app.chat_scroll(), 0);
 
-        // A new line while scrolled back snaps the view to the tail.
+        // While pinned to the tail, new output keeps following it.
+        app.push_chat("newest");
+        assert_eq!(app.chat_scroll(), 0, "at the tail, the view follows new output");
+
+        // But once the user scrolls up to read history, streamed lines DON'T yank
+        // the view down — the offset grows to keep the same content in view.
         app.chat_scroll_up(3);
         assert_eq!(app.chat_scroll(), 3);
-        app.push_chat("new");
-        assert_eq!(app.chat_scroll(), 0, "live output re-pins to the tail");
+        app.push_chat("streamed-1");
+        app.push_chat("streamed-2");
+        assert_eq!(app.chat_scroll(), 5, "sticky scroll preserves the read position");
+    }
+
+    #[test]
+    fn agent_phase_tracks_run_lifecycle_and_animates() {
+        let mut app = App::new();
+        assert_eq!(app.agent_phase(), AgentPhase::Idle);
+
+        // Starting a run enters Thinking so the console animates immediately.
+        app.set_agent_running(true);
+        assert_eq!(app.agent_phase(), AgentPhase::Thinking);
+
+        // A planning status keeps it Thinking; a tool call flips to Running.
+        app.apply_event(&Event::new(
+            "agent.status",
+            serde_json::json!({ "status": "planning" }),
+        ));
+        assert_eq!(app.agent_phase(), AgentPhase::Thinking);
+        app.apply_event(&Event::new(
+            "agent.tool",
+            serde_json::json!({ "tool": "fs.read", "args": {} }),
+        ));
+        assert_eq!(app.agent_phase(), AgentPhase::Running);
+
+        // A completed status returns to Idle and clears the busy flag.
+        app.apply_event(&Event::new(
+            "agent.status",
+            serde_json::json!({ "status": "completed" }),
+        ));
+        assert_eq!(app.agent_phase(), AgentPhase::Idle);
+        assert!(!app.agent_running);
+
+        // The spinner glyph advances as frames tick, and the phase reports active.
+        app.set_agent_running(true);
+        assert!(app.agent_phase().is_active());
+        let a = app.spinner();
+        app.tick();
+        let b = app.spinner();
+        assert_ne!(a, b, "the spinner advances between frames");
+    }
+
+    #[test]
+    fn delegation_sets_the_spawned_phase() {
+        let mut app = App::new();
+        app.set_agent_running(true);
+        app.apply_event(&Event::new(
+            "agent.delegated",
+            serde_json::json!({ "subagent": "test-agent", "task": "cover the parser" }),
+        ));
+        assert_eq!(app.agent_phase(), AgentPhase::Spawned);
+        assert_eq!(app.agent_phase().label(), "delegated");
     }
 
     #[test]
