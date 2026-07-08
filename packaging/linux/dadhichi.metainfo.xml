@@ -32,6 +32,14 @@
   </provides>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.1.10" date="2026-07-07">
+      <description>
+        <p>TUI polish and richer agent tools: a scrollable Agent Console with a
+        scrollbar and PageUp/PageDown history, a collapsible Explorer (Ctrl-B),
+        and new fs.grep / fs.glob search tools available to the ReAct agent and
+        every delegated specialist.</p>
+      </description>
+    </release>
     <release version="0.1.9" date="2026-07-07">
       <description>
         <p>Fix: the TUI agent now uses the tool-enabled ReAct agent for ordinary
