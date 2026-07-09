@@ -25,9 +25,10 @@ use dadhichi_git::GitRepo;
 use dadhichi_index::Indexer;
 use dadhichi_index::store::SqliteSymbolStore;
 use dadhichi_mcp::{
-    ApprovalPolicy, EchoTool, FsGlobTool, FsGrepTool, FsListTool, FsReadTool, FsWriteTool, GrantSet,
-    McpConnection, McpConnections, McpServersConfig, Permission, PermissionMode, StateStore,
-    TerminalTool, ToolRegistry, WorkspaceStore, connect_servers, connector,
+    ApprovalPolicy, BuildTool, DbQueryTool, EchoTool, FsGlobTool, FsGrepTool, FsListTool,
+    FsReadTool, FsWriteTool, GrantSet, McpConnection, McpConnections, McpServersConfig, Permission,
+    PermissionMode, ScaffoldTool, StateStore, TerminalTool, TestRunnerTool, ToolRegistry,
+    WorkspaceStore, connect_servers, connector,
 };
 use dadhichi_security::{SecretResolver, Vault, VaultData};
 use dadhichi_skill::{
@@ -227,6 +228,12 @@ impl AppController {
             // Search tools: content grep and filename glob over the sandbox.
             t.register(Arc::new(FsGrepTool::new(fs_store.clone())));
             t.register(Arc::new(FsGlobTool::new(fs_store.clone())));
+            // Full-stack dev tools: scaffold projects, build, test, and query a
+            // database — all pinned to the sandbox root and gated on RunCommands.
+            t.register(Arc::new(ScaffoldTool::new(&root)));
+            t.register(Arc::new(BuildTool::new(&root)));
+            t.register(Arc::new(TestRunnerTool::new(&root)));
+            t.register(Arc::new(DbQueryTool::new(&root)));
             // Memory-access tools over the shared store.
             t.register(Arc::new(MemoryWriteTool::new(agent_memory.clone())));
             t.register(Arc::new(MemoryRecallTool::new(agent_memory.clone())));
@@ -302,6 +309,10 @@ impl AppController {
                 SpecialistAgent::review(),
                 SpecialistAgent::git(),
                 SpecialistAgent::security(),
+                // Full-stack roles for frontend, backend, and database work.
+                SpecialistAgent::frontend(),
+                SpecialistAgent::backend(),
+                SpecialistAgent::database(),
             ] {
                 orch.register(Arc::new(agent.with_model(&model_id)));
             }

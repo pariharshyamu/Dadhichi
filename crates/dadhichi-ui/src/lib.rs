@@ -718,7 +718,11 @@ impl App {
                             self.agent_running = false;
                             self.agent_phase = AgentPhase::Idle;
                         }
-                        Some("planning") => self.agent_phase = AgentPhase::Thinking,
+                        // Planning and re-planning between rounds both read as the
+                        // Thinking phase (the agent is reasoning, not calling a tool).
+                        Some("planning" | "replanning") => {
+                            self.agent_phase = AgentPhase::Thinking;
+                        }
                         // Don't downgrade Running (a tool call) back to Thinking on
                         // a stray "running" status; only lift Idle up to Thinking.
                         Some("running") if self.agent_phase == AgentPhase::Idle => {

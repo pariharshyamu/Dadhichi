@@ -18,8 +18,9 @@ use async_trait::async_trait;
 use dadhichi_ai::{CompletionRequest, Message, ModelRouter};
 use dadhichi_core::{Event, EventBus};
 use dadhichi_mcp::{
-    FsGlobTool, FsGrepTool, FsListTool, FsReadTool, FsWriteTool, GrantSet, OverlayChange,
-    OverlayStore, Permission, StateError, StateStore, TerminalTool, ToolRegistry,
+    BuildTool, DbQueryTool, FsGlobTool, FsGrepTool, FsListTool, FsReadTool, FsWriteTool, GrantSet,
+    OverlayChange, OverlayStore, Permission, ScaffoldTool, StateError, StateStore, TerminalTool,
+    TestRunnerTool, ToolRegistry,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -380,7 +381,15 @@ impl Delegator {
             tools.register(Arc::new(FsWriteTool::new(store.clone())));
         }
         if spec.grants(Permission::RunCommands) {
-            tools.register(Arc::new(TerminalTool::in_dir(cwd)));
+            // Shell and the full-stack dev tools share the RunCommands gate. They
+            // act on the real `cwd` (scaffold/build/test/db all shell out), so a
+            // delegate granted RunCommands can build and verify a real project.
+            let cwd: PathBuf = cwd.into();
+            tools.register(Arc::new(TerminalTool::in_dir(&cwd)));
+            tools.register(Arc::new(ScaffoldTool::new(&cwd)));
+            tools.register(Arc::new(BuildTool::new(&cwd)));
+            tools.register(Arc::new(TestRunnerTool::new(&cwd)));
+            tools.register(Arc::new(DbQueryTool::new(&cwd)));
         }
         let tools = Arc::new(tools);
 

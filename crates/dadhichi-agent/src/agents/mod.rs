@@ -9,5 +9,5 @@ mod react;
 mod specialists;
 
 pub use conversational::ConversationalAgent;
-pub use react::ReactAgent;
+pub use react::{ReactAgent, full_stack_system_prompt};
 pub use specialists::SpecialistAgent;
