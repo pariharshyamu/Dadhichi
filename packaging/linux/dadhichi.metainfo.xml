@@ -32,6 +32,18 @@
   </provides>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.1.12" date="2026-07-10">
+      <description>
+        <p>Coherent agent coordination: the tool-use loop now continues across
+        re-planning rounds instead of stopping after a fixed number of tool
+        calls, with a stall guard. Specialists are unified onto the one ReAct
+        engine (no conflict), and native full-stack tools were added — project
+        scaffolding (React/Vite, Angular, Next, Vue, Svelte, Express, FastAPI,
+        Flask, Axum), build/test runners, and SQLite/Postgres queries — plus
+        frontend, backend, and database specialists and a full-stack system
+        prompt.</p>
+      </description>
+    </release>
     <release version="0.1.11" date="2026-07-08">
       <description>
         <p>Agent Console polish: sticky scroll that stays put while you read

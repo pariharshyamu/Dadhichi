@@ -358,7 +358,7 @@ dependencies = [
 
 [[package]]
 name = "dadhichi"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "async-trait",
  "dadhichi-agent",
@@ -385,7 +385,7 @@ dependencies = [
 
 [[package]]
 name = "dadhichi-agent"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "async-trait",
  "dadhichi-ai",
@@ -402,7 +402,7 @@ dependencies = [
 
 [[package]]
 name = "dadhichi-ai"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "async-trait",
  "bytes",
@@ -417,7 +417,7 @@ dependencies = [
 
 [[package]]
 name = "dadhichi-app"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "async-trait",
  "dadhichi-agent",
@@ -439,7 +439,7 @@ dependencies = [
 
 [[package]]
 name = "dadhichi-cache"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "rocksdb",
  "tempfile",
@@ -448,7 +448,7 @@ dependencies = [
 
 [[package]]
 name = "dadhichi-collab"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "serde",
  "serde_json",
@@ -456,7 +456,7 @@ dependencies = [
 
 [[package]]
 name = "dadhichi-core"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "async-trait",
  "serde",
@@ -469,7 +469,7 @@ dependencies = [
 
 [[package]]
 name = "dadhichi-dap"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "dadhichi-core",
  "serde",
@@ -481,7 +481,7 @@ dependencies = [
 
 [[package]]
 name = "dadhichi-git"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "git2",
  "tempfile",
@@ -490,7 +490,7 @@ dependencies = [
 
 [[package]]
 name = "dadhichi-index"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "dadhichi-cache",
  "dadhichi-core",
@@ -507,7 +507,7 @@ dependencies = [
 
 [[package]]
 name = "dadhichi-lsp"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "dadhichi-core",
  "serde",
@@ -519,7 +519,7 @@ dependencies = [
 
 [[package]]
 name = "dadhichi-mcp"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "async-trait",
  "futures",
@@ -535,7 +535,7 @@ dependencies = [
 
 [[package]]
 name = "dadhichi-parse"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "dadhichi-workspace",
  "serde",
@@ -545,7 +545,7 @@ dependencies = [
 
 [[package]]
 name = "dadhichi-plugin"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "async-trait",
  "dadhichi-core",
@@ -559,7 +559,7 @@ dependencies = [
 
 [[package]]
 name = "dadhichi-security"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "chacha20poly1305",
  "serde",
@@ -570,7 +570,7 @@ dependencies = [
 
 [[package]]
 name = "dadhichi-skill"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "async-trait",
  "dadhichi-agent",
@@ -587,7 +587,7 @@ dependencies = [
 
 [[package]]
 name = "dadhichi-telemetry"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "serde",
  "serde_json",
@@ -595,7 +595,7 @@ dependencies = [
 
 [[package]]
 name = "dadhichi-term"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "portable-pty",
  "thiserror 2.0.18",
@@ -603,7 +603,7 @@ dependencies = [
 
 [[package]]
 name = "dadhichi-tui"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "crossterm",
  "dadhichi-app",
@@ -617,7 +617,7 @@ dependencies = [
 
 [[package]]
 name = "dadhichi-ui"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "dadhichi-core",
  "ropey",
@@ -626,7 +626,7 @@ dependencies = [
 
 [[package]]
 name = "dadhichi-vector"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "serde",
  "serde_json",
@@ -635,7 +635,7 @@ dependencies = [
 
 [[package]]
 name = "dadhichi-wasm"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "thiserror 2.0.18",
  "wasmi",
@@ -644,7 +644,7 @@ dependencies = [
 
 [[package]]
 name = "dadhichi-workspace"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "serde",
  "serde_json",
