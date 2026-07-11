@@ -32,6 +32,15 @@
   </provides>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.1.13" date="2026-07-10">
+      <description>
+        <p>CLI usability: unquoted multi-word goals are no longer truncated to the
+        first word, context now persists across runs in a folder
+        (.dadhichi/session.json) so follow-up commands remember what was built, a
+        new interactive `dadhichi chat` gives a genuine multi-turn session, and the
+        agent is steered to use its recall/write memory tools.</p>
+      </description>
+    </release>
     <release version="0.1.12" date="2026-07-10">
       <description>
         <p>Coherent agent coordination: the tool-use loop now continues across
