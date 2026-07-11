@@ -33,6 +33,9 @@ pub enum Command {
     },
     /// Boot the kernel and run the agent against `goal`.
     Run { goal: Option<String> },
+    /// Start an interactive multi-turn chat session (a persistent kernel and
+    /// agent context that remembers the whole conversation until you exit).
+    Chat,
 }
 
 /// A `dadhichi skill …` subcommand for managing the on-disk skill library that
@@ -118,20 +121,29 @@ pub fn help_text() -> String {
         "{name} {version} — a modern, AI-first, agent-native IDE written in Rust.
 
 USAGE:
-    {name} [OPTIONS] [GOAL]
+    {name} [OPTIONS] GOAL...
+    {name} chat
     {name} vault <set NAME | list | remove NAME>
     {name} skill <import PATH | list>
     {name} delegate <SUBAGENT> <TASK...>
 
 ARGS:
-    <GOAL>    Natural-language goal for the built-in agent to plan and execute.
-              When omitted, a demonstration goal is used.
+    <GOAL...>  Natural-language goal for the agent to plan and execute. Multiple
+               words are joined, so quoting is optional:
+                   {name} write a tic tac toe game in html
+               Context is remembered across runs in the same folder (stored in
+               .dadhichi/session.json), so a follow-up like
+                   {name} now add a scoreboard
+               continues from the previous run. When omitted, a demo goal runs.
 
 OPTIONS:
     -h, --help       Print this help text and exit.
     -V, --version    Print version information and exit.
 
 SUBCOMMANDS:
+    chat                 Start an interactive multi-turn session: one persistent
+                         agent that remembers the whole conversation until you
+                         type `exit` (or press Ctrl-D).
     vault set NAME       Store a secret under NAME (value read from stdin).
     vault list           List stored secret names (values stay encrypted).
     vault remove NAME    Delete the secret under NAME.
@@ -195,8 +207,15 @@ where
     if args.first().map(String::as_str) == Some("delegate") {
         return parse_delegate(&args[1..]);
     }
+    // `dadhichi chat` (or `-i`/`--interactive`) starts the multi-turn REPL.
+    if matches!(
+        args.first().map(String::as_str),
+        Some("chat" | "-i" | "--interactive" | "repl")
+    ) {
+        return Command::Chat;
+    }
 
-    let mut goal: Option<String> = None;
+    let mut goal_words: Vec<String> = Vec::new();
     let mut options_done = false;
 
     for arg in args {
@@ -211,12 +230,19 @@ where
                 _ => {}
             }
         }
-        // First non-flag token is the goal; later tokens are ignored so a
-        // quoted multi-word goal and an unquoted one behave the same.
-        if goal.is_none() {
-            goal = Some(arg);
-        }
+        // Collect EVERY non-flag token into the goal and join them with spaces,
+        // so an unquoted multi-word goal (`dadhichi write a tic tac toe game`)
+        // behaves identically to a quoted one (`dadhichi "write a tic tac toe
+        // game"`). Previously only the first token was kept, so the agent
+        // received just "write" and had to ask for clarification.
+        goal_words.push(arg);
     }
+
+    let goal = if goal_words.is_empty() {
+        None
+    } else {
+        Some(goal_words.join(" "))
+    };
 
     Command::Run { goal }
 }
@@ -252,13 +278,34 @@ mod tests {
     }
 
     #[test]
-    fn a_goal_is_captured() {
+    fn a_quoted_goal_is_captured() {
         assert_eq!(
             parse(["refactor the parser"]),
             Command::Run {
                 goal: Some("refactor the parser".to_string())
             }
         );
+    }
+
+    #[test]
+    fn an_unquoted_multi_word_goal_is_joined() {
+        // The shell splits an unquoted goal into many argv tokens. They must be
+        // rejoined so the agent receives the whole request, not just the first
+        // word (the bug where `dadhichi write a tic tac toe game` became "write").
+        assert_eq!(
+            parse(["write", "a", "tic", "tac", "toe", "game", "in", "html"]),
+            Command::Run {
+                goal: Some("write a tic tac toe game in html".to_string())
+            }
+        );
+    }
+
+    #[test]
+    fn chat_subcommand_and_aliases_parse() {
+        assert_eq!(parse(["chat"]), Command::Chat);
+        assert_eq!(parse(["-i"]), Command::Chat);
+        assert_eq!(parse(["--interactive"]), Command::Chat);
+        assert_eq!(parse(["repl"]), Command::Chat);
     }
 
     #[test]

@@ -10,14 +10,19 @@
 //!
 //! Usage:
 //! ```text
-//! dadhichi                     # run the built-in demo goal
-//! dadhichi "your goal here"    # run the agent against your own goal
+//! dadhichi                       # run the built-in demo goal
+//! dadhichi your goal here        # run the agent (quoting optional; words are joined)
+//! dadhichi chat                  # interactive multi-turn session
 //! ```
+//!
+//! Context persists across one-shot runs in a folder via `.dadhichi/session.json`,
+//! and `chat` keeps one agent context alive for a genuine multi-turn conversation.
 
 mod approve;
 mod cli;
 mod console;
 mod delegate_cmd;
+mod session;
 mod skill;
 mod vault;
 
@@ -69,6 +74,11 @@ async fn main() {
             delegate_cmd::run(subagent, task).await;
             return;
         }
+        cli::Command::Chat => {
+            init_tracing();
+            run_chat().await;
+            return;
+        }
         cli::Command::Run { goal } => goal,
     };
 
@@ -96,7 +106,16 @@ async fn main() {
     // the workspace root, and the virtual filesystem is confined to it by a
     // path-jail, so nothing the agent does can escape the project directory.
     let fs_store: Arc<dyn StateStore> = Arc::new(WorkspaceStore::new(&cwd));
+    // Restore memory from any prior session in this workspace so consecutive
+    // `dadhichi <goal>` invocations remember context (the CLI otherwise boots a
+    // fresh kernel each time and would forget everything). The same items seed
+    // the agent context below, and are what the memory.recall tool searches.
+    let prior_session = session::load(&cwd);
     let cli_memory = shared_memory();
+    {
+        let mut mem = cli_memory.lock().unwrap_or_else(|e| e.into_inner());
+        *mem = session::seed_memory(&prior_session);
+    }
     let tools = {
         let t = ToolRegistry::new();
         t.register(Arc::new(EchoTool));
@@ -129,6 +148,10 @@ async fn main() {
     //     workspace-indexing and capability showcase below, which only run for
     //     the bare `dadhichi` invocation, keeping a real goal run fast and quiet.
     if let Some(goal) = goal_override {
+        // Show that prior context was restored, so the continuity is visible.
+        if let Some(recap) = session::recap(&prior_session) {
+            println!("dadhichi ▸ resumed session ({} items) — last: {recap}", prior_session.len());
+        }
         println!("dadhichi ▸ goal: {goal}\n");
 
         // Gate the consequential capabilities behind the terminal approver, then
@@ -151,6 +174,11 @@ async fn main() {
             ]),
             kernel.bus().clone(),
         );
+        // Seed the run's memory with the prior session so the agent can recall
+        // what was built before, then record this turn's goal.
+        ctx.memory = session::seed_memory(&prior_session);
+        ctx.memory
+            .remember(dadhichi_agent::Tier::Working, format!("user goal: {goal}"));
 
         let agent = ReactAgent::new(&model_id);
         match agent.run(&goal, &mut ctx).await {
@@ -161,6 +189,12 @@ async fn main() {
                     outcome.status
                 );
                 println!("dadhichi ▸ answer: {}", outcome.summary);
+                // Record the outcome and persist the session for the next run.
+                ctx.memory
+                    .remember(dadhichi_agent::Tier::Conversation, outcome.summary.clone());
+                if let Err(err) = session::save(&cwd, &ctx.memory) {
+                    eprintln!("dadhichi ▸ could not save session: {err}");
+                }
             }
             Err(err) => eprintln!("\ndadhichi ▸ agent failed: {err}"),
         }
@@ -399,6 +433,111 @@ async fn main() {
     drop(skill_ctx);
 
     // 5. Drain the console by dropping the kernel's bus handles.
+    drop(ctx);
+    drop(kernel);
+    let _ = console.await;
+}
+
+/// Run the interactive multi-turn chat REPL: one kernel, one tool registry, and
+/// **one persistent [`AgentContext`]** kept alive across turns, so the agent
+/// remembers the whole conversation (unlike the one-shot `dadhichi <goal>`,
+/// which boots fresh each time and leans on the on-disk session file). Prior
+/// workspace context is loaded on start and the session is saved on exit.
+async fn run_chat() {
+    use std::io::Write;
+
+    let kernel = Kernel::new();
+    println!("dadhichi ▸ kernel booted (interactive chat)");
+    let plan = ProviderPlan::from_env();
+    println!("dadhichi ▸ model provider: {}", plan.summary());
+    let model_id = plan.default_model();
+    let router = Arc::new(plan.build_router());
+
+    let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
+    let fs_store: Arc<dyn StateStore> = Arc::new(WorkspaceStore::new(&cwd));
+    let prior_session = session::load(&cwd);
+    let cli_memory = shared_memory();
+    {
+        let mut mem = cli_memory.lock().unwrap_or_else(|e| e.into_inner());
+        *mem = session::seed_memory(&prior_session);
+    }
+
+    let tools = {
+        let t = ToolRegistry::new();
+        t.register(Arc::new(EchoTool));
+        t.register(Arc::new(TerminalTool::in_dir(&cwd)));
+        t.register(Arc::new(FsReadTool::new(fs_store.clone())));
+        t.register(Arc::new(FsWriteTool::new(fs_store.clone())));
+        t.register(Arc::new(FsListTool::new(fs_store.clone())));
+        t.register(Arc::new(MemoryWriteTool::new(cli_memory.clone())));
+        t.register(Arc::new(MemoryRecallTool::new(cli_memory.clone())));
+        t.set_policy(
+            ApprovalPolicy::default()
+                .with(Permission::RunCommands, PermissionMode::Interrupt)
+                .with(Permission::WriteWorkspace, PermissionMode::Interrupt),
+        );
+        t.set_approver(Arc::new(approve::CliApprover));
+        Arc::new(t)
+    };
+
+    let console = console::spawn(kernel.bus());
+
+    // The single, persistent context shared by every turn — this is what makes
+    // the chat genuinely multi-turn: memory accumulates across prompts.
+    let mut ctx = AgentContext::new(
+        router.clone(),
+        tools.clone(),
+        GrantSet::from_iter([
+            Permission::ReadWorkspace,
+            Permission::WriteWorkspace,
+            Permission::RunCommands,
+        ]),
+        kernel.bus().clone(),
+    );
+    ctx.memory = session::seed_memory(&prior_session);
+    if let Some(recap) = session::recap(&prior_session) {
+        println!("dadhichi ▸ resumed session ({} items) — last: {recap}", prior_session.len());
+    }
+
+    let agent = ReactAgent::new(&model_id);
+    println!("dadhichi ▸ chat ready. Type a goal; 'exit' or Ctrl-D to quit.\n");
+
+    let stdin = std::io::stdin();
+    loop {
+        print!("you ▸ ");
+        let _ = std::io::stdout().flush();
+        let mut line = String::new();
+        // EOF (Ctrl-D / closed pipe) ends the session.
+        if stdin.read_line(&mut line).unwrap_or(0) == 0 {
+            println!();
+            break;
+        }
+        let goal = line.trim();
+        if goal.is_empty() {
+            continue;
+        }
+        if matches!(goal, "exit" | "quit" | ":q") {
+            break;
+        }
+
+        ctx.memory
+            .remember(dadhichi_agent::Tier::Working, format!("user: {goal}"));
+        match agent.run(goal, &mut ctx).await {
+            Ok(outcome) => {
+                println!("\ndadhichi ▸ {}\n", outcome.summary);
+                ctx.memory
+                    .remember(dadhichi_agent::Tier::Conversation, outcome.summary.clone());
+            }
+            Err(err) => eprintln!("\ndadhichi ▸ agent failed: {err}\n"),
+        }
+    }
+
+    // Persist the whole conversation so the next session (chat or one-shot)
+    // continues from here.
+    if let Err(err) = session::save(&cwd, &ctx.memory) {
+        eprintln!("dadhichi ▸ could not save session: {err}");
+    }
+    println!("dadhichi ▸ session saved. Bye.");
     drop(ctx);
     drop(kernel);
     let _ = console.await;

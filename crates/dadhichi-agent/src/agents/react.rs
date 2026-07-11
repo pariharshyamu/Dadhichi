@@ -72,6 +72,11 @@ pub fn full_stack_system_prompt() -> &'static str {
      - DELEGATE. For a large, self-contained piece of work (a whole subsystem, a migration, a \
      test suite) use the `task` tool to hand it to a specialist that works in an isolated \
      context and returns only its summary — this keeps your own context focused.\n\
+     - REMEMBER. The conversation may span several turns. At the START of a task, use \
+     `memory.recall` to retrieve what was decided or built earlier (project name, chosen stack, \
+     file layout, open TODOs), and inspect the workspace — do not assume it is empty. As you \
+     work, use `memory.write` to record durable facts and decisions so later turns can pick them \
+     up.\n\
      - COMMIT sensibly when asked, with clear messages.\n\
      - Prefer the project's existing conventions and dependencies; match the surrounding code."
 }
