@@ -500,6 +500,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "dadhichi-hooks"
+version = "0.1.13"
+dependencies = [
+ "async-trait",
+ "dadhichi-mcp",
+ "dadhichi-security",
+ "regex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "dadhichi-index"
 version = "0.1.13"
 dependencies = [

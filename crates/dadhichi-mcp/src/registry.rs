@@ -1,6 +1,7 @@
 //! The tool registry: a permission-aware catalogue of every available tool.
 
 use crate::approval::{ApprovalPolicy, ApprovalRequest, Approver, Decision, PermissionMode};
+use crate::hooks::{GateDecision, PreToolUseGate};
 use crate::permission::{self, RuleAction, RuleSet, SessionMode, ToolCall, ToolClass};
 use crate::tool::{Permission, Tool, ToolError, ToolResult, ToolSpec};
 use std::collections::{HashMap, HashSet};
@@ -63,6 +64,10 @@ pub struct ToolRegistry {
     /// The approver consulted when a call is interrupted. Without one, an
     /// `Interrupt` mode falls back to allowing the call (headless default).
     approver: RwLock<Option<Arc<dyn Approver>>>,
+    /// An optional pre-tool-use gate (lifecycle hooks) consulted before any
+    /// permission check. A gate deny stops the call; a gate `Proceed` (the
+    /// default when none is installed) falls through to the normal checks.
+    gate: RwLock<Option<Arc<dyn PreToolUseGate>>>,
 }
 
 impl std::fmt::Debug for ToolRegistry {
@@ -158,6 +163,13 @@ impl ToolRegistry {
         self
     }
 
+    /// Install the [`PreToolUseGate`] (lifecycle hooks) consulted before every
+    /// permission check. Replaces any previous one.
+    pub fn set_pre_tool_use_gate(&self, gate: Arc<dyn PreToolUseGate>) -> &Self {
+        *self.gate.write().unwrap_or_else(|e| e.into_inner()) = Some(gate);
+        self
+    }
+
     /// Invoke `name` with `args`, enforcing `grants` and the approval policy.
     ///
     /// This is the single choke point where capability is checked, so no tool
@@ -179,6 +191,16 @@ impl ToolRegistry {
             .ok_or_else(|| ToolError::Execution(format!("unknown tool: {name}")))?;
 
         let spec = tool.spec();
+
+        // Pre-tool-use hooks run first and may veto the call before any
+        // permission check. A gate deny stops here; Proceed falls through.
+        let gate = self.gate.read().unwrap_or_else(|e| e.into_inner()).clone();
+        if let Some(gate) = gate {
+            if let GateDecision::Deny(reason) = gate.check(name, &args).await {
+                return Err(ToolError::Rejected(format!("{name} blocked by hook: {reason}")));
+            }
+        }
+
         if let Some(missing) = grants.first_missing(&spec.permissions) {
             return Err(ToolError::PermissionDenied(missing.to_string()));
         }
@@ -382,6 +404,49 @@ mod rule_tests {
             .invoke(
                 TerminalTool::NAME,
                 serde_json::json!({ "command": "echo hi" }),
+                &grants(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(out["success"], true);
+    }
+
+    #[tokio::test]
+    async fn pre_tool_use_gate_can_veto_before_permissions() {
+        use crate::hooks::{GateDecision, PreToolUseGate};
+        use async_trait::async_trait;
+
+        struct DenyEcho;
+        #[async_trait]
+        impl PreToolUseGate for DenyEcho {
+            async fn check(&self, _tool: &str, args: &serde_json::Value) -> GateDecision {
+                if args.get("command").and_then(|c| c.as_str()) == Some("echo blocked") {
+                    GateDecision::Deny("policy".into())
+                } else {
+                    GateDecision::Proceed
+                }
+            }
+        }
+
+        let registry = registry_with_terminal();
+        registry.set_pre_tool_use_gate(Arc::new(DenyEcho));
+
+        // The gate blocks this call even though the capability is granted.
+        let err = registry
+            .invoke(
+                TerminalTool::NAME,
+                serde_json::json!({ "command": "echo blocked" }),
+                &grants(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::Rejected(_)));
+
+        // A call the gate allows still runs.
+        let out = registry
+            .invoke(
+                TerminalTool::NAME,
+                serde_json::json!({ "command": "echo ok" }),
                 &grants(),
             )
             .await

@@ -29,6 +29,7 @@ pub mod client;
 pub mod connector;
 pub mod devtools;
 pub mod fs;
+pub mod hooks;
 pub mod permission;
 pub mod protocol;
 pub mod registry;
@@ -48,6 +49,7 @@ pub use connector::{
 };
 pub use devtools::{BuildTool, DbQueryTool, ScaffoldTool, TestRunnerTool};
 pub use fs::{FsGlobTool, FsGrepTool, FsListTool, FsReadTool, FsWriteTool};
+pub use hooks::{GateDecision, PreToolUseGate};
 pub use permission::{
     Pattern, PermissionRule, RuleAction, RuleParseError, RuleSet, SessionMode, ToolCall, ToolClass,
     is_dangerous, is_read_only_call, is_read_only_command,
