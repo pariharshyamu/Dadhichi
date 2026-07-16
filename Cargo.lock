@@ -601,6 +601,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "dadhichi-session"
+version = "0.1.13"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "uuid",
+]
+
+[[package]]
 name = "dadhichi-skill"
 version = "0.1.13"
 dependencies = [
