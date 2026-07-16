@@ -1,0 +1,3 @@
+Implement the reverse(s) function in strings.py so that it returns the string s
+reversed. For example, reverse("abc") must return "cba", and reverse("") must
+return "". Replace the NotImplementedError with a correct implementation.

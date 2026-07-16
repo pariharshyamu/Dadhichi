@@ -1,0 +1,5 @@
+fizzbuzz.py has a fizzbuzz(n) function with a logic bug: for numbers divisible
+by both 3 and 5 (like 15 or 30) it should return "FizzBuzz", but it currently
+returns "Fizz". Fix fizzbuzz.py so multiples of 15 return "FizzBuzz", multiples
+of 3 (only) return "Fizz", multiples of 5 (only) return "Buzz", and everything
+else returns the number as a string.

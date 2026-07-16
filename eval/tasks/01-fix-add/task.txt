@@ -1,0 +1,3 @@
+The file calc.py has a function add(a, b) that is supposed to return the sum of
+its two arguments, but it has a bug and returns the wrong value. Fix the bug in
+calc.py so that add(a, b) returns a + b. Edit the file in place.

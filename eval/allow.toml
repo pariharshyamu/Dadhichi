@@ -1,0 +1,8 @@
+# Permission config copied into each eval workspace.
+#
+# Headless runs deny prompt-worthy tool calls by default (so nothing blocks).
+# A coding task needs the agent to read and edit files, so we grant those
+# explicitly — the rule engine resolves before the deny gate, so `Edit`/`Read`
+# calls are allowed without prompting. This mirrors a real CI allow-list.
+[permission]
+allow = ["Read", "Edit", "Grep"]
