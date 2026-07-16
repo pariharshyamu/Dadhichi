@@ -52,6 +52,47 @@ pub enum Command {
     /// Serve the Agent Client Protocol over stdio, so an editor can drive
     /// Dadhichi as an embedded agent (session/new, session/prompt, …).
     Acp,
+    /// Manage persistent sessions (list, show, fork, rewind).
+    Sessions(SessionsCommand),
+}
+
+/// A `dadhichi sessions …` subcommand operating on the persistent session store.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionsCommand {
+    /// List the sessions for the current directory.
+    List,
+    /// Print a session's transcript and rewind points.
+    Show { id: String },
+    /// Fork a session into a new peer.
+    Fork { id: String },
+    /// Rewind a session to a point (restoring files); lists points if no index.
+    Rewind { id: String, index: Option<usize> },
+    /// Print sessions usage.
+    Help,
+}
+
+/// Parse the tokens following `sessions` into a [`SessionsCommand`].
+fn parse_sessions(args: &[String]) -> SessionsCommand {
+    let arg = |i: usize| args.get(i).filter(|s| !s.is_empty()).cloned();
+    match args.first().map(String::as_str) {
+        Some("list" | "ls") => SessionsCommand::List,
+        Some("show") => match arg(1) {
+            Some(id) => SessionsCommand::Show { id },
+            None => SessionsCommand::Help,
+        },
+        Some("fork") => match arg(1) {
+            Some(id) => SessionsCommand::Fork { id },
+            None => SessionsCommand::Help,
+        },
+        Some("rewind") => match arg(1) {
+            Some(id) => SessionsCommand::Rewind {
+                id,
+                index: arg(2).and_then(|s| s.parse().ok()),
+            },
+            None => SessionsCommand::Help,
+        },
+        _ => SessionsCommand::Help,
+    }
 }
 
 /// A `dadhichi skill …` subcommand for managing the on-disk skill library that
@@ -180,6 +221,11 @@ SUBCOMMANDS:
                          that load for this directory, with token estimates.
     acp                  Serve the Agent Client Protocol over stdio, for editors
                          that embed Dadhichi as an agent.
+    sessions list        List persistent sessions for this directory.
+    sessions show ID     Print a session's transcript and rewind points.
+    sessions fork ID     Fork a session into a new peer.
+    sessions rewind ID [N]  Rewind a session to point N (restores files);
+                         lists the points when N is omitted.
 
 ENVIRONMENT:
     RUST_LOG              Tracing filter (e.g. `info`, `dadhichi=debug`). Defaults to `warn`.
@@ -244,6 +290,9 @@ where
     }
     if args.first().map(String::as_str) == Some("acp") {
         return Command::Acp;
+    }
+    if args.first().map(String::as_str) == Some("sessions") {
+        return Command::Sessions(parse_sessions(&args[1..]));
     }
     // Headless: `-p`/`--print <prompt…>`, optionally `--output-format json` /
     // `--json` (anywhere). Everything after the flag that isn't an output-format
@@ -384,6 +433,21 @@ mod tests {
         );
         assert_eq!(parse(["-p"]), Command::Help); // empty prompt
         assert_eq!(parse(["acp"]), Command::Acp);
+        assert_eq!(
+            parse(["sessions", "list"]),
+            Command::Sessions(SessionsCommand::List)
+        );
+        assert_eq!(
+            parse(["sessions", "rewind", "abc", "2"]),
+            Command::Sessions(SessionsCommand::Rewind {
+                id: "abc".into(),
+                index: Some(2)
+            })
+        );
+        assert_eq!(
+            parse(["sessions", "fork", "abc"]),
+            Command::Sessions(SessionsCommand::Fork { id: "abc".into() })
+        );
     }
 
     #[test]

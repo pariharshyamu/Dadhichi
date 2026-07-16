@@ -16,7 +16,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["io-util", "macros"] }
+tokio = { workspace = true, features = ["io-util", "macros", "sync"] }
 dadhichi-session = { workspace = true }
 
 [dev-dependencies]

@@ -108,6 +108,10 @@ async fn run() {
             run_acp().await;
             return;
         }
+        cli::Command::Sessions(cmd) => {
+            run_sessions(cmd);
+            return;
+        }
         cli::Command::Run { goal } => goal,
     };
 
@@ -640,7 +644,7 @@ impl dadhichi_acp::PromptHandler for AcpAgentHandler {
         &self,
         session: &dadhichi_session::Session,
         prompt: &str,
-        sink: &mut dadhichi_acp::UpdateSink,
+        sink: dadhichi_acp::UpdateSink,
     ) -> Result<dadhichi_acp::PromptResult, String> {
         let cwd = session.cwd().to_path_buf();
         let fs_store: Arc<dyn StateStore> = Arc::new(WorkspaceStore::new(&cwd));
@@ -668,6 +672,19 @@ impl dadhichi_acp::PromptHandler for AcpAgentHandler {
         let _ = policy::activate(&tools, &cwd, session.id());
 
         let kernel = Kernel::new();
+
+        // Live streaming: forward the agent's messages to the client as they are
+        // published on the bus, so the editor sees progress in real time.
+        let mut messages = kernel.bus().subscribe_topic("agent.message");
+        let stream_sink = sink.clone();
+        let forwarder = tokio::spawn(async move {
+            while let Ok(event) = messages.recv().await {
+                if let Some(content) = event.payload.get("content").and_then(|c| c.as_str()) {
+                    stream_sink.text(content);
+                }
+            }
+        });
+
         let mut ctx = AgentContext::new(
             self.router.clone(),
             tools,
@@ -678,19 +695,95 @@ impl dadhichi_acp::PromptHandler for AcpAgentHandler {
             ]),
             kernel.bus().clone(),
         );
-        let agent = with_project_rules(ReactAgent::new(&self.model_id), &cwd);
+        // Multi-turn: replay the session's prior turns (all but the current
+        // prompt just appended) into the agent's memory so it has context.
+        let turns = session.transcript().unwrap_or_default();
+        for (role, text) in turns.iter().take(turns.len().saturating_sub(1)) {
+            ctx.memory
+                .remember(dadhichi_agent::Tier::LongTerm, format!("{role}: {text}"));
+        }
 
-        sink.text(session.id(), &format!("running: {prompt}"));
-        match agent.run(prompt, &mut ctx).await {
-            Ok(outcome) => {
-                sink.text(session.id(), &outcome.summary);
-                Ok(dadhichi_acp::PromptResult {
-                    text: outcome.summary,
-                    status: format!("{:?}", outcome.status),
-                })
-            }
+        let agent = with_project_rules(ReactAgent::new(&self.model_id), &cwd);
+        sink.text(&format!("running: {prompt}"));
+
+        let result = agent.run(prompt, &mut ctx).await;
+        forwarder.abort();
+
+        match result {
+            Ok(outcome) => Ok(dadhichi_acp::PromptResult {
+                text: outcome.summary,
+                status: format!("{:?}", outcome.status),
+            }),
             Err(e) => Err(e.to_string()),
         }
+    }
+}
+
+/// Handle `dadhichi sessions …` against the persistent session store.
+fn run_sessions(cmd: cli::SessionsCommand) {
+    use cli::SessionsCommand;
+    let Some(store) = dadhichi_session::SessionStore::at_home() else {
+        eprintln!("dadhichi ▸ sessions: no home directory for the session store");
+        return;
+    };
+    let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
+
+    let print_points = |points: Vec<dadhichi_session::RewindPoint>| {
+        if points.is_empty() {
+            println!("  (no rewind points)");
+        } else {
+            for p in points {
+                println!("  {} — {}", p.index, p.label);
+            }
+        }
+    };
+
+    match cmd {
+        SessionsCommand::List => {
+            let list = store.list(&cwd);
+            if list.is_empty() {
+                println!("No sessions for {}.", cwd.display());
+                return;
+            }
+            println!("Sessions for {} ({}):", cwd.display(), list.len());
+            for s in list {
+                let title = s.title.map(|t| format!("  — {t}")).unwrap_or_default();
+                println!("  {}  {} event(s){title}", s.id, s.num_events);
+            }
+        }
+        SessionsCommand::Show { id } => match store.resume(&id) {
+            Ok(session) => {
+                let turns = session.transcript().unwrap_or_default();
+                println!("Session {id} — {} turn(s):", turns.len());
+                for (role, text) in turns {
+                    let clipped: String = text.chars().take(120).collect();
+                    println!("  [{role}] {clipped}");
+                }
+                println!("Rewind points:");
+                print_points(session.rewind_points().unwrap_or_default());
+            }
+            Err(e) => eprintln!("dadhichi ▸ sessions: {e}"),
+        },
+        SessionsCommand::Fork { id } => match store.fork(&id) {
+            Ok(child) => println!("Forked {id} → {}", child.id()),
+            Err(e) => eprintln!("dadhichi ▸ sessions: {e}"),
+        },
+        SessionsCommand::Rewind { id, index } => match store.resume(&id) {
+            Ok(session) => match index {
+                Some(i) => match session.rewind(i) {
+                    Ok(files) => {
+                        println!("Rewound {id} to point {i}; restored {} file(s).", files.len())
+                    }
+                    Err(e) => eprintln!("dadhichi ▸ sessions: {e}"),
+                },
+                None => {
+                    println!("Rewind points for {id}:");
+                    print_points(session.rewind_points().unwrap_or_default());
+                }
+            },
+            Err(e) => eprintln!("dadhichi ▸ sessions: {e}"),
+        },
+        SessionsCommand::Help => println!("{}", cli::help_text()),
     }
 }
 

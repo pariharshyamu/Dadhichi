@@ -39,28 +39,36 @@ pub struct PromptResult {
     pub status: String,
 }
 
-/// Collects `session/update` payloads emitted while a prompt runs; the server
-/// writes them to the client before the final response.
-#[derive(Debug, Default)]
+/// A live channel for streaming `session/update` notifications while a prompt
+/// runs. The server drains it concurrently and writes each update to the client
+/// as it arrives — so updates appear in real time, not buffered until the turn
+/// ends. Cheap to [`Clone`] (e.g. for a background event-forwarding task).
+#[derive(Debug, Clone)]
 pub struct UpdateSink {
-    items: Vec<Value>,
+    session_id: String,
+    tx: tokio::sync::mpsc::UnboundedSender<Value>,
 }
 
 impl UpdateSink {
-    /// Emit a raw update payload for `session_id`.
-    pub fn update(&mut self, session_id: &str, payload: Value) {
-        self.items
-            .push(json!({ "sessionId": session_id, "update": payload }));
+    fn new(session_id: String, tx: tokio::sync::mpsc::UnboundedSender<Value>) -> Self {
+        Self { session_id, tx }
+    }
+
+    /// Emit a raw update payload.
+    pub fn update(&self, payload: Value) {
+        let _ = self
+            .tx
+            .send(json!({ "sessionId": self.session_id, "update": payload }));
     }
 
     /// Emit an agent-message text chunk.
-    pub fn text(&mut self, session_id: &str, text: &str) {
-        self.update(session_id, json!({ "type": "agent_message", "text": text }));
+    pub fn text(&self, text: &str) {
+        self.update(json!({ "type": "agent_message", "text": text }));
     }
 
     /// Emit a tool-call notice.
-    pub fn tool_call(&mut self, session_id: &str, tool: &str) {
-        self.update(session_id, json!({ "type": "tool_call", "tool": tool }));
+    pub fn tool_call(&self, tool: &str) {
+        self.update(json!({ "type": "tool_call", "tool": tool }));
     }
 }
 
@@ -68,12 +76,13 @@ impl UpdateSink {
 /// returning the final result. Implemented by the binary to drive the agent.
 #[async_trait]
 pub trait PromptHandler: Send + Sync {
-    /// Handle one prompt turn.
+    /// Handle one prompt turn. The `sink` streams updates live; the returned
+    /// [`PromptResult`] is the final answer.
     async fn prompt(
         &self,
         session: &Session,
         prompt: &str,
-        sink: &mut UpdateSink,
+        sink: UpdateSink,
     ) -> Result<PromptResult, String>;
 }
 
@@ -110,49 +119,52 @@ impl AcpServer {
             let Ok(req) = serde_json::from_str::<Request>(&line) else {
                 continue; // ignore unparseable input
             };
-            let is_notification = req.is_notification();
-            let (updates, response) = self.dispatch(req).await;
-            for update in updates {
-                write_json(&mut writer, &update).await?;
-            }
-            if !is_notification {
-                write_json(&mut writer, &response).await?;
-            }
+            self.handle(req, &mut writer).await?;
         }
         Ok(())
     }
 
-    async fn dispatch(&self, req: Request) -> (Vec<Notification>, Response) {
+    async fn handle<W>(&self, req: Request, writer: &mut W) -> std::io::Result<()>
+    where
+        W: AsyncWrite + Unpin,
+    {
+        let is_notification = req.is_notification();
         let id = req.id.clone().unwrap_or(Value::Null);
-        match req.method.as_str() {
-            "initialize" => (vec![], Response::ok(id, initialize_result())),
 
-            "session/new" => match self.store.create(&param_path(&req.params, "cwd")) {
-                Ok(s) => (vec![], Response::ok(id, json!({ "sessionId": s.id() }))),
-                Err(e) => (
-                    vec![],
-                    Response::err(id, codes::INTERNAL_ERROR, e.to_string()),
-                ),
+        // `session/prompt` streams updates live and writes its own response.
+        if req.method == "session/prompt" {
+            if is_notification {
+                return Ok(());
+            }
+            return self.handle_prompt(id, &req.params, writer).await;
+        }
+
+        // Every other method produces a single response.
+        let response = self.simple(&req.method, &req.params, id);
+        if !is_notification {
+            write_json(writer, &response).await?;
+        }
+        Ok(())
+    }
+
+    fn simple(&self, method: &str, params: &Value, id: Value) -> Response {
+        match method {
+            "initialize" => Response::ok(id, initialize_result()),
+            "session/new" => match self.store.create(&param_path(params, "cwd")) {
+                Ok(s) => Response::ok(id, json!({ "sessionId": s.id() })),
+                Err(e) => Response::err(id, codes::INTERNAL_ERROR, e.to_string()),
             },
-
-            "session/load" => match param_str(&req.params, "sessionId") {
+            "session/load" => match param_str(params, "sessionId") {
                 Some(sid) => match self.store.resume(&sid) {
-                    Ok(_) => (vec![], Response::ok(id, json!({}))),
-                    Err(e) => (
-                        vec![],
-                        Response::err(id, codes::INTERNAL_ERROR, e.to_string()),
-                    ),
+                    Ok(_) => Response::ok(id, json!({})),
+                    Err(e) => Response::err(id, codes::INTERNAL_ERROR, e.to_string()),
                 },
-                None => (
-                    vec![],
-                    Response::err(id, codes::INVALID_PARAMS, "missing sessionId"),
-                ),
+                None => Response::err(id, codes::INVALID_PARAMS, "missing sessionId"),
             },
-
             "session/list" => {
                 let sessions: Vec<Value> = self
                     .store
-                    .list(&param_path(&req.params, "cwd"))
+                    .list(&param_path(params, "cwd"))
                     .iter()
                     .map(|s| {
                         json!({
@@ -163,67 +175,79 @@ impl AcpServer {
                         })
                     })
                     .collect();
-                (vec![], Response::ok(id, json!({ "sessions": sessions })))
+                Response::ok(id, json!({ "sessions": sessions }))
             }
-
-            "session/prompt" => self.handle_prompt(id, &req.params).await,
-
-            other => (
-                vec![],
-                Response::err(
-                    id,
-                    codes::METHOD_NOT_FOUND,
-                    format!("unknown method: {other}"),
-                ),
+            other => Response::err(
+                id,
+                codes::METHOD_NOT_FOUND,
+                format!("unknown method: {other}"),
             ),
         }
     }
 
-    async fn handle_prompt(&self, id: Value, params: &Value) -> (Vec<Notification>, Response) {
+    /// Run a prompt, streaming `session/update` notifications to `writer` as the
+    /// handler emits them, then writing the final response.
+    async fn handle_prompt<W>(
+        &self,
+        id: Value,
+        params: &Value,
+        writer: &mut W,
+    ) -> std::io::Result<()>
+    where
+        W: AsyncWrite + Unpin,
+    {
         let (Some(sid), Some(prompt)) = (
             param_str(params, "sessionId"),
             param_str(params, "prompt").or_else(|| param_str(params, "text")),
         ) else {
-            return (
-                vec![],
-                Response::err(id, codes::INVALID_PARAMS, "missing sessionId or prompt"),
-            );
+            let e = Response::err(id, codes::INVALID_PARAMS, "missing sessionId or prompt");
+            return write_json(writer, &e).await;
         };
-
         let session = match self.store.resume(&sid) {
             Ok(s) => s,
             Err(e) => {
-                return (
-                    vec![],
-                    Response::err(id, codes::INTERNAL_ERROR, e.to_string()),
-                );
+                let e = Response::err(id, codes::INTERNAL_ERROR, e.to_string());
+                return write_json(writer, &e).await;
             }
         };
         let _ = session.append(&json!({ "role": "user", "text": prompt }));
 
-        let mut sink = UpdateSink::default();
-        match self.handler.prompt(&session, &prompt, &mut sink).await {
+        // The handler streams updates through the channel while it runs; we
+        // drain and write them concurrently, then write the final response.
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let sink = UpdateSink::new(sid, tx);
+        let handler_session = session.clone();
+        let fut = self.handler.prompt(&handler_session, &prompt, sink);
+        tokio::pin!(fut);
+
+        let result = loop {
+            tokio::select! {
+                Some(update) = rx.recv() => {
+                    write_json(writer, &Notification::new("session/update", update)).await?;
+                }
+                r = &mut fut => break r,
+            }
+        };
+        // Flush any updates emitted just before the handler returned.
+        while let Ok(update) = rx.try_recv() {
+            write_json(writer, &Notification::new("session/update", update)).await?;
+        }
+
+        let response = match result {
             Ok(result) => {
                 let _ = session.append(&json!({
                     "role": "assistant",
                     "text": result.text,
                     "status": result.status,
                 }));
-                let updates = sink
-                    .items
-                    .into_iter()
-                    .map(|p| Notification::new("session/update", p))
-                    .collect();
-                (
-                    updates,
-                    Response::ok(
-                        id,
-                        json!({ "result": result.text, "status": result.status }),
-                    ),
+                Response::ok(
+                    id,
+                    json!({ "result": result.text, "status": result.status }),
                 )
             }
-            Err(e) => (vec![], Response::err(id, codes::INTERNAL_ERROR, e)),
-        }
+            Err(e) => Response::err(id, codes::INTERNAL_ERROR, e),
+        };
+        write_json(writer, &response).await
     }
 }
 
@@ -271,12 +295,12 @@ mod tests {
     impl PromptHandler for EchoHandler {
         async fn prompt(
             &self,
-            session: &Session,
+            _session: &Session,
             prompt: &str,
-            sink: &mut UpdateSink,
+            sink: UpdateSink,
         ) -> Result<PromptResult, String> {
             // Stream one update, then return a result.
-            sink.text(session.id(), &format!("working on: {prompt}"));
+            sink.text(&format!("working on: {prompt}"));
             Ok(PromptResult {
                 text: format!("echo: {prompt}"),
                 status: "Completed".into(),

@@ -227,6 +227,21 @@ impl Session {
             .collect())
     }
 
+    /// The `(role, text)` turns recorded in the log, for replaying prior
+    /// context into an agent on resume. Events without both a string `role` and
+    /// `text` are skipped.
+    pub fn transcript(&self) -> io::Result<Vec<(String, String)>> {
+        Ok(self
+            .events()?
+            .into_iter()
+            .filter_map(|e| {
+                let role = e.get("role")?.as_str()?.to_string();
+                let text = e.get("text")?.as_str()?.to_string();
+                Some((role, text))
+            })
+            .collect())
+    }
+
     /// Set the session title.
     pub fn set_title(&self, title: &str) -> io::Result<()> {
         let mut s = read_summary(&self.dir)?;
@@ -436,6 +451,20 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert_eq!(events[0]["text"], "hi");
         assert_eq!(resumed.summary().unwrap().num_events, 2);
+    }
+
+    #[test]
+    fn transcript_extracts_role_text_turns() {
+        let (tmp, store) = store();
+        let s = store.create(&tmp.path().join("p")).unwrap();
+        s.append(&serde_json::json!({ "role": "user", "text": "hi" })).unwrap();
+        s.append(&serde_json::json!({ "role": "assistant", "text": "hello" })).unwrap();
+        s.append(&serde_json::json!({ "role": "system", "note": "no text field" })).unwrap();
+        let t = s.transcript().unwrap();
+        assert_eq!(t, vec![
+            ("user".to_string(), "hi".to_string()),
+            ("assistant".to_string(), "hello".to_string()),
+        ]);
     }
 
     #[test]
