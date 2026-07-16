@@ -49,8 +49,8 @@ pub use connector::{
 pub use devtools::{BuildTool, DbQueryTool, ScaffoldTool, TestRunnerTool};
 pub use fs::{FsGlobTool, FsGrepTool, FsListTool, FsReadTool, FsWriteTool};
 pub use permission::{
-    Pattern, PermissionRule, RuleAction, RuleParseError, RuleSet, ToolCall, ToolClass,
-    is_dangerous, is_read_only_command,
+    Pattern, PermissionRule, RuleAction, RuleParseError, RuleSet, SessionMode, ToolCall, ToolClass,
+    is_dangerous, is_read_only_call, is_read_only_command,
 };
 pub use protocol::{
     McpClient, McpError, PromptArgument, PromptSpec, ResourceSpec, RpcErrorObject, RpcRequest,

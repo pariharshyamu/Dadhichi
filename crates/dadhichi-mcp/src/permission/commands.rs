@@ -159,7 +159,7 @@ pub fn is_read_only_command(segment: &str) -> bool {
         // Filesystem viewing.
         "ls", "cat", "pwd", "date", "whoami", "hostname", "uptime", "ps", "head", "tail", "wc",
         "sort", "uniq", "tr", "cut", // Search / inspection.
-        "grep", "rg", "find", "which", "echo",
+        "grep", "rg",
     ];
     let primary = primary_command(segment);
     if READ_ONLY.contains(&primary) {

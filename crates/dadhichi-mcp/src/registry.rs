@@ -1,7 +1,7 @@
 //! The tool registry: a permission-aware catalogue of every available tool.
 
 use crate::approval::{ApprovalPolicy, ApprovalRequest, Approver, Decision, PermissionMode};
-use crate::permission::{RuleAction, RuleSet, ToolCall};
+use crate::permission::{self, RuleAction, RuleSet, SessionMode, ToolCall, ToolClass};
 use crate::tool::{Permission, Tool, ToolError, ToolResult, ToolSpec};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
@@ -55,6 +55,9 @@ pub struct ToolRegistry {
     /// Content-aware permission rules, consulted before the mode policy. Empty
     /// by default, so the registry behaves exactly as it did before rules.
     rules: RwLock<RuleSet>,
+    /// The session-wide fall-through mode for calls that match no rule and
+    /// aren't a read-only auto-approval. `Default` reproduces prior behaviour.
+    mode: RwLock<SessionMode>,
     /// Per-permission approval policy (default: allow everything).
     policy: RwLock<ApprovalPolicy>,
     /// The approver consulted when a call is interrupted. Without one, an
@@ -122,6 +125,18 @@ impl ToolRegistry {
         self.rules.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
+    /// Set the session-wide fall-through [`SessionMode`] (`default` / `dontAsk`
+    /// / `acceptEdits` / `bypassPermissions`).
+    pub fn set_mode(&self, mode: SessionMode) -> &Self {
+        *self.mode.write().unwrap_or_else(|e| e.into_inner()) = mode;
+        self
+    }
+
+    /// The current session mode.
+    pub fn mode(&self) -> SessionMode {
+        *self.mode.read().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// Replace the approval policy that gates interrupting/denied permissions.
     pub fn set_policy(&self, policy: ApprovalPolicy) -> &Self {
         *self.policy.write().unwrap_or_else(|e| e.into_inner()) = policy;
@@ -173,11 +188,21 @@ impl ToolRegistry {
         // to the same `PermissionMode` the gate acts on, so an empty rule set
         // reproduces the pre-rules behaviour exactly.
         let policy = self.policy();
-        let mode = match self.rules().evaluate(&ToolCall::new(name, &args)) {
+        let call = ToolCall::new(name, &args);
+        let mode = match self.rules().evaluate(&call) {
             Some(RuleAction::Deny) => PermissionMode::Deny,
             Some(RuleAction::Ask) => PermissionMode::Interrupt,
             Some(RuleAction::Allow) => PermissionMode::Allow,
-            None => policy.decide(&spec.permissions),
+            // No rule matched: fold the per-permission policy decision through
+            // the read-only auto-approval and the session mode.
+            None => {
+                let base = policy.decide(&spec.permissions);
+                self.mode().resolve(
+                    base,
+                    permission::is_read_only_call(&call),
+                    call.class == ToolClass::Edit,
+                )
+            }
         };
         match mode {
             PermissionMode::Allow => {}
@@ -234,7 +259,7 @@ impl ToolRegistry {
 mod rule_tests {
     use super::*;
     use crate::approval::{ApprovalPolicy, Decision, FixedApprover, PermissionMode};
-    use crate::permission::{RuleAction, RuleSet};
+    use crate::permission::{RuleAction, RuleSet, SessionMode};
     use crate::shell::TerminalTool;
 
     fn registry_with_terminal() -> ToolRegistry {
@@ -299,6 +324,60 @@ mod rule_tests {
         rules.add_strings(RuleAction::Allow, ["Bash(echo *)"]);
         registry.set_rules(rules);
 
+        let out = registry
+            .invoke(
+                TerminalTool::NAME,
+                serde_json::json!({ "command": "echo hi" }),
+                &grants(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(out["success"], true);
+    }
+
+    #[tokio::test]
+    async fn dont_ask_denies_an_unmatched_command() {
+        let registry = registry_with_terminal();
+        registry.set_mode(SessionMode::DontAsk);
+        // No allow rule and not read-only ⇒ denied by the mode.
+        let err = registry
+            .invoke(
+                TerminalTool::NAME,
+                serde_json::json!({ "command": "make deploy" }),
+                &grants(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::Rejected(_)));
+    }
+
+    #[tokio::test]
+    async fn read_only_command_auto_approves_under_dont_ask() {
+        let registry = registry_with_terminal();
+        registry.set_mode(SessionMode::DontAsk);
+        // `ls` is a built-in read-only command, so it runs even under dontAsk
+        // with no allow rule.
+        let out = registry
+            .invoke(
+                TerminalTool::NAME,
+                serde_json::json!({ "command": "ls" }),
+                &grants(),
+            )
+            .await
+            .unwrap();
+        assert!(out.get("success").is_some());
+    }
+
+    #[tokio::test]
+    async fn bypass_allows_an_interrupting_call() {
+        let registry = registry_with_terminal();
+        registry.set_policy(
+            ApprovalPolicy::default().with(Permission::RunCommands, PermissionMode::Interrupt),
+        );
+        registry.set_approver(Arc::new(FixedApprover(Decision::Deny)));
+        registry.set_mode(SessionMode::Bypass);
+        // Bypass short-circuits the interrupting policy and denying approver:
+        // the command runs (echo isn't read-only, so only bypass lets it past).
         let out = registry
             .invoke(
                 TerminalTool::NAME,

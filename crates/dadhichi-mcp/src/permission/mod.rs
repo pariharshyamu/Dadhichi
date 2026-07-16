@@ -16,9 +16,11 @@
 
 mod commands;
 mod glob;
+mod mode;
 mod rule;
 
 pub use commands::{is_dangerous, is_read_only_command, primary_command, split_segments};
+pub use mode::SessionMode;
 pub use rule::{Pattern, PermissionRule, RuleAction, RuleParseError, ToolClass};
 
 use std::borrow::Cow;
@@ -78,6 +80,21 @@ impl<'a> ToolCall<'a> {
             return Vec::new();
         };
         split_segments(command).unwrap_or_else(|| vec![command.to_string()])
+    }
+}
+
+/// Whether `call` is a built-in read-only operation that auto-approves without
+/// prompting: a read/search tool, or a shell command whose every chained
+/// segment is a recognised read-only command. A convenience layered on top of
+/// the grant and rule checks — never a security boundary.
+pub fn is_read_only_call(call: &ToolCall) -> bool {
+    match call.class {
+        ToolClass::Read | ToolClass::Grep => true,
+        ToolClass::Bash => {
+            let segments = call.bash_segments();
+            !segments.is_empty() && segments.iter().all(|s| is_read_only_command(s))
+        }
+        _ => false,
     }
 }
 
@@ -306,5 +323,21 @@ mod tests {
             set.evaluate(&ToolCall::new("fs.read", &args)),
             Some(RuleAction::Deny)
         );
+    }
+
+    #[test]
+    fn read_tools_are_read_only() {
+        let args = json!({ "path": "src/main.rs" });
+        assert!(is_read_only_call(&ToolCall::new("fs.read", &args)));
+        assert!(is_read_only_call(&ToolCall::new("fs.grep", &args)));
+        assert!(!is_read_only_call(&ToolCall::new("fs.write", &args)));
+    }
+
+    #[test]
+    fn read_only_shell_needs_every_segment_read_only() {
+        let ro = json!({ "command": "ls && git status" });
+        let mixed = json!({ "command": "ls && rm -rf /" });
+        assert!(is_read_only_call(&ToolCall::new("terminal.run", &ro)));
+        assert!(!is_read_only_call(&ToolCall::new("terminal.run", &mixed)));
     }
 }
