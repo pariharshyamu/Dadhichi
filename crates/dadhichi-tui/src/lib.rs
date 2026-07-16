@@ -235,6 +235,7 @@ fn render_editor(app: &App, frame: &mut Frame, area: Rect) {
         Some(doc) => {
             let top = doc.scroll();
             let cursor_line = doc.cursor_line_col().0;
+            let selection = doc.selection();
             (top..(top + rows).min(doc.line_count()))
                 .map(|n| {
                     let text = doc.line(n).unwrap_or_default();
@@ -263,7 +264,15 @@ fn render_editor(app: &App, frame: &mut Frame, area: Rect) {
                         Span::styled(marker, marker_style),
                         Span::styled(format!("{:>4} ", n + 1), gutter_style),
                     ];
-                    spans.extend(highlight_code(&text, on_cursor));
+                    // Overlay the selection: syntax-highlight the parts outside
+                    // it and draw the selected span reversed so a multi-line
+                    // selection reads clearly across the pane.
+                    spans.extend(line_content_spans(
+                        &text,
+                        selection,
+                        doc.line_start(n),
+                        on_cursor,
+                    ));
                     Line::from(spans)
                 })
                 .collect()
@@ -510,6 +519,13 @@ fn render_chat(app: &App, frame: &mut Frame, area: Rect) {
 
 fn render_status(app: &App, frame: &mut Frame, area: Rect) {
     let focus = format!("{:?}", app.focus());
+    // The hint line follows focus: in the editor, surface the editing shortcuts;
+    // elsewhere, the global navigation ones.
+    let hint = if app.focus() == Focus::Editor {
+        "  Ctrl-S save · Ctrl-F find · Ctrl-Z/Y undo/redo · Ctrl-X/C/V cut/copy/paste · Shift+↦ select · Tab focus"
+    } else {
+        "  Enter run · Ctrl-P palette · Ctrl-B explorer · PgUp/PgDn scroll · Tab focus · Ctrl-Q quit"
+    };
     let line = Line::from(vec![
         Span::styled(
             " dadhichi ",
@@ -517,9 +533,7 @@ fn render_status(app: &App, frame: &mut Frame, area: Rect) {
         ),
         Span::raw(format!(" {} ", app.status)),
         Span::styled(format!("[{focus}]"), Style::default().fg(Color::DarkGray)),
-        Span::raw(
-            "  Enter run · Ctrl-P palette · Ctrl-B explorer · PgUp/PgDn scroll · Tab focus · Ctrl-Q quit",
-        ),
+        Span::raw(hint),
     ]);
     frame.render_widget(Paragraph::new(line), area);
 }
@@ -593,6 +607,39 @@ fn centered_rect(pct_x: u16, pct_y: u16, area: Rect) -> Rect {
 
 fn short_file(uri: &str) -> String {
     uri.rsplit(['/', '\\']).next().unwrap_or(uri).to_string()
+}
+
+/// Build the styled spans for one editor line, overlaying the selection (if it
+/// intersects this line) on top of syntax highlighting. `selection` is the
+/// buffer-wide `(start, end)` char range; `line_start` is this line's first char
+/// offset. The parts outside the selection are syntax-highlighted; the selected
+/// part is drawn reversed. A line the selection misses is highlighted whole.
+fn line_content_spans(
+    text: &str,
+    selection: Option<(usize, usize)>,
+    line_start: usize,
+    on_cursor: bool,
+) -> Vec<Span<'static>> {
+    let line_len = text.chars().count();
+    if let Some((gs, ge)) = selection {
+        // Clamp the selection to this line's visible columns [0, line_len].
+        let start = gs.max(line_start).saturating_sub(line_start).min(line_len);
+        let end = ge.min(line_start + line_len).saturating_sub(line_start);
+        if end > start {
+            let chars: Vec<char> = text.chars().collect();
+            let before: String = chars[..start].iter().collect();
+            let selected: String = chars[start..end].iter().collect();
+            let after: String = chars[end..].iter().collect();
+            let mut out = highlight_code(&before, on_cursor);
+            out.push(Span::styled(
+                selected,
+                Style::default().add_modifier(Modifier::REVERSED),
+            ));
+            out.extend(highlight_code(&after, on_cursor));
+            return out;
+        }
+    }
+    highlight_code(text, on_cursor)
 }
 
 /// A small, language-agnostic syntax highlighter for one line of code. It has no
@@ -832,6 +879,32 @@ mod tests {
         assert!(text.contains("Agent Console"), "chat panel drawn");
         assert!(text.contains("fn main()"), "editor content shown");
         assert!(text.contains("dadhichi"), "status bar drawn");
+    }
+
+    #[test]
+    fn renders_the_editor_selection_reversed() {
+        use ratatui::style::Modifier;
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let mut app = demo_app();
+        app.set_focus(Focus::Editor);
+        // Select the first few characters of the buffer ("fn m…").
+        {
+            let doc = app.active_document_mut().unwrap();
+            for _ in 0..4 {
+                doc.select_right();
+            }
+        }
+        terminal.draw(|f| render(&mut app, f)).unwrap();
+
+        // The selected span is drawn with the REVERSED modifier; no unselected
+        // frame has it, so finding it proves the selection highlight landed.
+        let reversed = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .any(|c| c.modifier.contains(Modifier::REVERSED));
+        assert!(reversed, "selection drawn with a reversed highlight");
     }
 
     #[test]

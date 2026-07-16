@@ -205,6 +205,10 @@ pub struct App {
     pub status: String,
     /// The editor's incremental-find state.
     pub find: FindState,
+    /// The internal clipboard, shared across buffers, holding the text of the
+    /// last cut or copy. An in-process buffer (not the OS clipboard) so copy /
+    /// paste works headlessly and identically on every platform.
+    clipboard: String,
     /// How many lines the agent-console transcript is scrolled up from the tail.
     /// `0` pins to the newest line (the default); a positive value scrolls back
     /// into history. Any new chat line resets it to `0` so live output follows.
@@ -236,6 +240,7 @@ impl Default for App {
             delegation_review: None,
             status: "ready".into(),
             find: FindState::default(),
+            clipboard: String::new(),
             chat_scroll: 0,
             explorer_visible: true,
             agent_phase: AgentPhase::Idle,
@@ -453,6 +458,65 @@ impl App {
             format!("/{query} — not found")
         };
         found
+    }
+
+    /// The current clipboard contents (the last cut or copy).
+    pub fn clipboard(&self) -> &str {
+        &self.clipboard
+    }
+
+    /// Copy the active buffer's selection into the clipboard, leaving the buffer
+    /// unchanged. Returns whether there was a selection to copy.
+    pub fn copy_selection(&mut self) -> bool {
+        let text = self
+            .active_document()
+            .and_then(|doc| doc.selected_text());
+        match text {
+            Some(text) => {
+                let chars = text.chars().count();
+                self.clipboard = text;
+                self.status = format!("copied {chars} char(s)");
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Cut the active buffer's selection into the clipboard, deleting it from the
+    /// buffer as one undoable edit. Returns whether there was a selection.
+    pub fn cut_selection(&mut self) -> bool {
+        if !self.copy_selection() {
+            return false;
+        }
+        if let Some(doc) = self.active_document_mut() {
+            doc.delete_selection();
+        }
+        let chars = self.clipboard.chars().count();
+        self.status = format!("cut {chars} char(s)");
+        true
+    }
+
+    /// Paste the clipboard into the active buffer at the cursor, replacing any
+    /// selection. Returns whether anything was pasted (false if the clipboard is
+    /// empty or no buffer is open).
+    pub fn paste(&mut self) -> bool {
+        if self.clipboard.is_empty() {
+            return false;
+        }
+        let clip = self.clipboard.clone();
+        let pasted = if let Some(doc) = self.active_document_mut() {
+            doc.insert(&clip);
+            // Keep the paste as its own undo unit rather than letting subsequent
+            // typing fold into it.
+            doc.seal_undo_group();
+            true
+        } else {
+            false
+        };
+        if pasted {
+            self.status = format!("pasted {} char(s)", clip.chars().count());
+        }
+        pasted
     }
 
     /// Mark an agent run as in flight (or finished). The frontend sets this when
@@ -937,6 +1001,54 @@ mod tests {
 
         app.find_close();
         assert!(!app.is_finding());
+    }
+
+    #[test]
+    fn copy_cut_and_paste_move_text_through_the_clipboard() {
+        let mut app = App::new();
+        app.open_document(Some("f.rs".into()), "abcdef");
+
+        // Select "ab" and copy — buffer unchanged, clipboard holds "ab".
+        {
+            let doc = app.active_document_mut().unwrap();
+            doc.select_right();
+            doc.select_right();
+        }
+        assert!(app.copy_selection());
+        assert_eq!(app.clipboard(), "ab");
+        assert_eq!(app.active_document().unwrap().text(), "abcdef");
+
+        // Move to end, select "ef", cut — clipboard is "ef", buffer loses it.
+        {
+            let doc = app.active_document_mut().unwrap();
+            doc.move_line_end();
+            doc.select_left();
+            doc.select_left();
+        }
+        assert!(app.cut_selection());
+        assert_eq!(app.clipboard(), "ef");
+        assert_eq!(app.active_document().unwrap().text(), "abcd");
+
+        // Paste at the cursor (now at end of "abcd").
+        assert!(app.paste());
+        assert_eq!(app.active_document().unwrap().text(), "abcdef");
+
+        // A cut is undoable in one step (paste + cut are separate undo units).
+        let doc = app.active_document_mut().unwrap();
+        assert!(doc.undo()); // undo the paste
+        assert_eq!(doc.text(), "abcd");
+        assert!(doc.undo()); // undo the cut
+        assert_eq!(doc.text(), "abcdef");
+    }
+
+    #[test]
+    fn copy_and_paste_are_noops_without_selection_or_clipboard() {
+        let mut app = App::new();
+        app.open_document(None, "hi");
+        // No selection → nothing to copy; empty clipboard → nothing to paste.
+        assert!(!app.copy_selection());
+        assert!(!app.paste());
+        assert_eq!(app.active_document().unwrap().text(), "hi");
     }
 
     #[test]

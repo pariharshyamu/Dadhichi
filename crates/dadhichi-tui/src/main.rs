@@ -207,22 +207,134 @@ async fn handle_key(ctrl: &mut AppController, code: KeyCode, mods: KeyModifiers)
         return false;
     }
 
+    // The editor owns text input. It's handled before the generic navigation
+    // match so ordinary keys (`q`, Esc) act on the buffer instead of quitting:
+    // typing inserts, Shift+arrows/Home/End extend a selection, plain arrows
+    // move and collapse it, and the usual editor shortcuts apply — Ctrl-Z/Y
+    // undo/redo, Ctrl-X/C/V cut/copy/paste, Ctrl-A select-all. (Ctrl-S save and
+    // Ctrl-F find are handled globally above.)
+    if ctrl.ui().focus() == Focus::Editor {
+        let shift = mods.contains(KeyModifiers::SHIFT);
+        match (code, mods) {
+            (KeyCode::Char('z'), KeyModifiers::CONTROL) => {
+                if let Some(doc) = ctrl.ui_mut().active_document_mut() {
+                    doc.undo();
+                }
+            }
+            (KeyCode::Char('y'), KeyModifiers::CONTROL) => {
+                if let Some(doc) = ctrl.ui_mut().active_document_mut() {
+                    doc.redo();
+                }
+            }
+            (KeyCode::Char('a'), KeyModifiers::CONTROL) => {
+                if let Some(doc) = ctrl.ui_mut().active_document_mut() {
+                    doc.select_all();
+                }
+            }
+            (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                ctrl.ui_mut().copy_selection();
+            }
+            (KeyCode::Char('x'), KeyModifiers::CONTROL) => {
+                ctrl.ui_mut().cut_selection();
+            }
+            (KeyCode::Char('v'), KeyModifiers::CONTROL) => {
+                ctrl.ui_mut().paste();
+            }
+            (KeyCode::Tab, _) => ctrl.ui_mut().cycle_focus(),
+            (KeyCode::Left, _) => {
+                if let Some(doc) = ctrl.ui_mut().active_document_mut() {
+                    if shift {
+                        doc.select_left();
+                    } else {
+                        doc.move_left();
+                    }
+                }
+            }
+            (KeyCode::Right, _) => {
+                if let Some(doc) = ctrl.ui_mut().active_document_mut() {
+                    if shift {
+                        doc.select_right();
+                    } else {
+                        doc.move_right();
+                    }
+                }
+            }
+            (KeyCode::Up, _) => {
+                if let Some(doc) = ctrl.ui_mut().active_document_mut() {
+                    if shift {
+                        doc.select_up();
+                    } else {
+                        doc.move_up();
+                    }
+                }
+            }
+            (KeyCode::Down, _) => {
+                if let Some(doc) = ctrl.ui_mut().active_document_mut() {
+                    if shift {
+                        doc.select_down();
+                    } else {
+                        doc.move_down();
+                    }
+                }
+            }
+            (KeyCode::Home, _) => {
+                if let Some(doc) = ctrl.ui_mut().active_document_mut() {
+                    if shift {
+                        doc.select_line_start();
+                    } else {
+                        doc.move_line_start();
+                    }
+                }
+            }
+            (KeyCode::End, _) => {
+                if let Some(doc) = ctrl.ui_mut().active_document_mut() {
+                    if shift {
+                        doc.select_line_end();
+                    } else {
+                        doc.move_line_end();
+                    }
+                }
+            }
+            (KeyCode::Backspace, _) => {
+                if let Some(doc) = ctrl.ui_mut().active_document_mut() {
+                    doc.backspace();
+                }
+            }
+            (KeyCode::Delete, _) => {
+                if let Some(doc) = ctrl.ui_mut().active_document_mut() {
+                    doc.delete();
+                }
+            }
+            (KeyCode::Enter, _) => {
+                if let Some(doc) = ctrl.ui_mut().active_document_mut() {
+                    doc.insert("\n");
+                }
+            }
+            // Esc clears the selection rather than quitting, so a stray Esc in
+            // the editor doesn't tear down the app.
+            (KeyCode::Esc, _) => {
+                if let Some(doc) = ctrl.ui_mut().active_document_mut() {
+                    doc.clear_selection();
+                }
+            }
+            // Any printable key (including Shift-produced capitals) inserts,
+            // unless Ctrl is held — a Ctrl combo we don't bind is ignored.
+            (KeyCode::Char(c), m) if !m.contains(KeyModifiers::CONTROL) => {
+                if let Some(doc) = ctrl.ui_mut().active_document_mut() {
+                    doc.insert(&c.to_string());
+                }
+            }
+            _ => {}
+        }
+        return false;
+    }
+
     match (code, mods) {
         (KeyCode::Char('q'), _) | (KeyCode::Esc, _) => return true,
         (KeyCode::Tab, _) => ctrl.ui_mut().cycle_focus(),
         (KeyCode::Up, _) => navigate(ctrl, -1),
         (KeyCode::Down, _) => navigate(ctrl, 1),
         (KeyCode::Enter, _) => activate(ctrl),
-        (KeyCode::Backspace, _) if ctrl.ui().focus() == Focus::Editor => {
-            if let Some(doc) = ctrl.ui_mut().active_document_mut() {
-                doc.backspace();
-            }
-        }
-        (KeyCode::Char(c), _) if ctrl.ui().focus() == Focus::Editor => {
-            if let Some(doc) = ctrl.ui_mut().active_document_mut() {
-                doc.insert(&c.to_string());
-            }
-        }
         _ => {}
     }
     false
