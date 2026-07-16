@@ -152,9 +152,63 @@ impl SubAgentSpec {
         ]
     }
 
+    /// Constrain the delegate to a coarse [`CapabilityMode`], replacing its
+    /// grants. A convenient filter when the caller thinks in terms of
+    /// read-only / read-write / execute rather than individual permissions.
+    pub fn with_capability(mut self, mode: CapabilityMode) -> Self {
+        self.grants = mode.grants();
+        self
+    }
+
     /// Whether the spec grants a capability.
     fn grants(&self, perm: Permission) -> bool {
         self.grants.allows(&[perm])
+    }
+}
+
+/// A coarse filter on a delegate's powers, mirroring grok's subagent capability
+/// modes. Each maps onto a concrete [`GrantSet`]; the delegate's tool palette is
+/// then derived from those grants exactly as for a hand-built spec.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapabilityMode {
+    /// Read and search only — no file writes, no shell.
+    ReadOnly,
+    /// Read plus create/edit files. No shell.
+    ReadWrite,
+    /// Read plus run shell commands. No file writes.
+    Execute,
+    /// Full access: read, write, and execute.
+    All,
+}
+
+impl CapabilityMode {
+    /// The grants this mode confers.
+    pub fn grants(self) -> GrantSet {
+        match self {
+            CapabilityMode::ReadOnly => GrantSet::from_iter([Permission::ReadWorkspace]),
+            CapabilityMode::ReadWrite => {
+                GrantSet::from_iter([Permission::ReadWorkspace, Permission::WriteWorkspace])
+            }
+            CapabilityMode::Execute => {
+                GrantSet::from_iter([Permission::ReadWorkspace, Permission::RunCommands])
+            }
+            CapabilityMode::All => GrantSet::from_iter([
+                Permission::ReadWorkspace,
+                Permission::WriteWorkspace,
+                Permission::RunCommands,
+            ]),
+        }
+    }
+
+    /// Parse the mode name (`read-only` / `read-write` / `execute` / `all`).
+    pub fn parse(s: &str) -> Option<CapabilityMode> {
+        Some(match s {
+            "read-only" | "readonly" => CapabilityMode::ReadOnly,
+            "read-write" | "readwrite" => CapabilityMode::ReadWrite,
+            "execute" => CapabilityMode::Execute,
+            "all" => CapabilityMode::All,
+            _ => return None,
+        })
     }
 }
 
@@ -448,6 +502,40 @@ mod tests {
         let mut router = ModelRouter::new();
         router.register(Arc::new(MockProvider::default()));
         (Arc::new(router), EventBus::new())
+    }
+
+    #[test]
+    fn capability_modes_map_to_grants() {
+        let ro = CapabilityMode::ReadOnly.grants();
+        assert!(ro.allows(&[Permission::ReadWorkspace]));
+        assert!(!ro.allows(&[Permission::WriteWorkspace]));
+        assert!(!ro.allows(&[Permission::RunCommands]));
+
+        let ex = CapabilityMode::Execute.grants();
+        assert!(ex.allows(&[Permission::RunCommands]));
+        assert!(!ex.allows(&[Permission::WriteWorkspace]));
+
+        let all = CapabilityMode::All.grants();
+        assert!(all.allows(&[Permission::WriteWorkspace, Permission::RunCommands]));
+    }
+
+    #[test]
+    fn with_capability_overrides_spec_grants() {
+        // A writer spec constrained to read-only loses its write grant.
+        let spec = SubAgentSpec::writer("x").with_capability(CapabilityMode::ReadOnly);
+        assert!(spec.grants(Permission::ReadWorkspace));
+        assert!(!spec.grants(Permission::WriteWorkspace));
+    }
+
+    #[test]
+    fn capability_mode_parses() {
+        assert_eq!(
+            CapabilityMode::parse("read-only"),
+            Some(CapabilityMode::ReadOnly)
+        );
+        assert_eq!(CapabilityMode::parse("execute"), Some(CapabilityMode::Execute));
+        assert_eq!(CapabilityMode::parse("all"), Some(CapabilityMode::All));
+        assert_eq!(CapabilityMode::parse("nope"), None);
     }
 
     #[tokio::test]

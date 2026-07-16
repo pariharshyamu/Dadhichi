@@ -5,7 +5,7 @@
 //! status, staging, commit, and history — as plain view-model methods. It works
 //! entirely on the local repository, needing no network.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 /// Errors from Git operations.
@@ -14,6 +14,22 @@ pub enum GitError {
     /// The underlying libgit2 call failed.
     #[error("git error: {0}")]
     Git(#[from] git2::Error),
+    /// A filesystem operation (creating a worktree directory) failed.
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
+}
+
+/// A linked git worktree: an isolated checkout of the repository on its own
+/// branch, sharing the same object store. Used to run a delegate's file changes
+/// in isolation from the parent's working tree until they are merged back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Worktree {
+    /// The worktree's registered name.
+    pub name: String,
+    /// Its checkout directory.
+    pub path: PathBuf,
+    /// The branch checked out in it.
+    pub branch: String,
 }
 
 /// How a path differs from the last commit / index.
@@ -170,6 +186,46 @@ impl GitRepo {
         }
         Ok(out)
     }
+
+    /// Create a linked worktree named `name`, checked out at `path` on a new
+    /// branch also named `name` (branched from the current `HEAD`). The delegate
+    /// runs here so its edits never touch the parent's working tree.
+    pub fn add_worktree(&self, name: &str, path: &Path) -> Result<Worktree, GitError> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let wt = self.repo.worktree(name, path, None)?;
+        let branch = wt.name().unwrap_or(name).to_string();
+        Ok(Worktree {
+            name: name.to_string(),
+            path: wt.path().to_path_buf(),
+            branch,
+        })
+    }
+
+    /// The names of the repository's linked worktrees.
+    pub fn list_worktrees(&self) -> Result<Vec<String>, GitError> {
+        Ok(self
+            .repo
+            .worktrees()?
+            .iter()
+            .flatten()
+            .map(str::to_string)
+            .collect())
+    }
+
+    /// Remove the worktree named `name`: delete its checkout and unregister it.
+    /// Used to clean up after a delegate's changes have been merged (or
+    /// discarded).
+    pub fn prune_worktree(&self, name: &str) -> Result<(), GitError> {
+        let wt = self.repo.find_worktree(name)?;
+        let mut opts = git2::WorktreePruneOptions::new();
+        // Force removal even though the worktree is valid, and delete its
+        // working-tree files, not just the administrative entry.
+        opts.valid(true).working_tree(true);
+        wt.prune(Some(&mut opts))?;
+        Ok(())
+    }
 }
 
 fn short_id(oid: git2::Oid) -> String {
@@ -220,6 +276,21 @@ mod tests {
                 .iter()
                 .any(|e| e.path == "b.txt" && e.status == FileStatus::Staged)
         );
+    }
+
+    #[test]
+    fn creates_lists_and_prunes_a_worktree() {
+        let (dir, repo) = repo_with_commit();
+        let wt_path = dir.path().join("wt").join("feature");
+
+        let wt = repo.add_worktree("feature", &wt_path).unwrap();
+        assert_eq!(wt.name, "feature");
+        // The worktree has its own checkout containing the committed file.
+        assert!(wt.path.join("a.txt").is_file());
+        assert!(repo.list_worktrees().unwrap().contains(&"feature".to_string()));
+
+        repo.prune_worktree("feature").unwrap();
+        assert!(!repo.list_worktrees().unwrap().contains(&"feature".to_string()));
     }
 
     #[test]
