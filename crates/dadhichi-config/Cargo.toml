@@ -1,0 +1,21 @@
+[package]
+name = "dadhichi-config"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Layered configuration loader (permission rules, session mode) for Dadhichi"
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true }
+toml = { workspace = true }
+dadhichi-mcp = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+serde_json = { workspace = true }

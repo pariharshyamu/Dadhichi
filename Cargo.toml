@@ -6,6 +6,7 @@ members = [
     "crates/dadhichi-agent",
     "crates/dadhichi-skill",
     "crates/dadhichi-mcp",
+    "crates/dadhichi-config",
     "crates/dadhichi-workspace",
     "crates/dadhichi-parse",
     "crates/dadhichi-index",
@@ -44,6 +45,7 @@ async-trait = "0.1"
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+toml = "0.8"
 
 # Errors & diagnostics
 thiserror = "2"
@@ -62,6 +64,7 @@ dadhichi-ai = { path = "crates/dadhichi-ai" }
 dadhichi-agent = { path = "crates/dadhichi-agent" }
 dadhichi-skill = { path = "crates/dadhichi-skill" }
 dadhichi-mcp = { path = "crates/dadhichi-mcp" }
+dadhichi-config = { path = "crates/dadhichi-config" }
 dadhichi-workspace = { path = "crates/dadhichi-workspace" }
 dadhichi-parse = { path = "crates/dadhichi-parse" }
 dadhichi-index = { path = "crates/dadhichi-index" }
