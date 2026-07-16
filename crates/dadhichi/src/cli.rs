@@ -48,12 +48,28 @@ pub enum Command {
         prompt: String,
         /// Emit JSON (`--output-format json`) instead of plain text.
         json: bool,
+        /// Which session to run in (new, continue latest, or a specific id).
+        resume: ResumeSpec,
+        /// Extra session rules appended to the system prompt (`--rules`).
+        rules: Option<String>,
     },
     /// Serve the Agent Client Protocol over stdio, so an editor can drive
     /// Dadhichi as an embedded agent (session/new, session/prompt, …).
     Acp,
     /// Manage persistent sessions (list, show, fork, rewind).
     Sessions(SessionsCommand),
+}
+
+/// Which persistent session a headless run should use.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum ResumeSpec {
+    /// Start a fresh session (the default).
+    #[default]
+    New,
+    /// Continue the most recent session for the current directory (`-c`).
+    Continue,
+    /// Resume a specific session by id (`-r <id>`).
+    Session(String),
 }
 
 /// A `dadhichi sessions …` subcommand operating on the persistent session store.
@@ -201,6 +217,9 @@ OPTIONS:
                          denied rather than blocking. Add `--output-format json`
                          (or `--json`) for a machine-readable result with a
                          resumable session id.
+    -r, --resume ID      With -p: run in (and replay) an existing session.
+    -c, --continue       With -p: run in the most recent session for this dir.
+    --rules TEXT         With -p: append TEXT to the system prompt for this run.
 
 SUBCOMMANDS:
     chat                 Start an interactive multi-turn session: one persistent
@@ -294,19 +313,41 @@ where
     if args.first().map(String::as_str) == Some("sessions") {
         return Command::Sessions(parse_sessions(&args[1..]));
     }
-    // Headless: `-p`/`--print <prompt…>`, optionally `--output-format json` /
-    // `--json` (anywhere). Everything after the flag that isn't an output-format
-    // token forms the prompt.
-    if let Some(pos) = args.iter().position(|a| a == "-p" || a == "--print") {
-        let json = args.iter().any(|a| a == "--json")
-            || args.windows(2).any(|w| w[0] == "--output-format" && w[1] == "json");
+    // Headless: `-p`/`--print <prompt…>`, with optional `--output-format json` /
+    // `--json`, `-r`/`--resume <id>`, `-c`/`--continue`, and `--rules <text>`
+    // (flags may appear anywhere; prompt words are those after `-p`).
+    if args.iter().any(|a| a == "-p" || a == "--print") {
+        let mut json = false;
+        let mut resume = ResumeSpec::New;
+        let mut rules: Option<String> = None;
         let mut prompt_words = Vec::new();
-        let mut i = pos + 1;
+        let mut after_p = false;
+        let mut i = 0;
         while i < args.len() {
             match args[i].as_str() {
-                "--json" => {}
-                "--output-format" => i += 1, // skip its value (e.g. `json`)
-                w => prompt_words.push(w.to_string()),
+                "-p" | "--print" => after_p = true,
+                "--json" => json = true,
+                "--output-format" => {
+                    if args.get(i + 1).map(String::as_str) == Some("json") {
+                        json = true;
+                    }
+                    i += 1;
+                }
+                "-r" | "--resume" => {
+                    if let Some(id) = args.get(i + 1) {
+                        resume = ResumeSpec::Session(id.clone());
+                        i += 1;
+                    }
+                }
+                "-c" | "--continue" => resume = ResumeSpec::Continue,
+                "--rules" => {
+                    if let Some(text) = args.get(i + 1) {
+                        rules = Some(text.clone());
+                        i += 1;
+                    }
+                }
+                w if after_p => prompt_words.push(w.to_string()),
+                _ => {}
             }
             i += 1;
         }
@@ -314,7 +355,12 @@ where
         return if prompt.is_empty() {
             Command::Help
         } else {
-            Command::Headless { prompt, json }
+            Command::Headless {
+                prompt,
+                json,
+                resume,
+                rules,
+            }
         };
     }
 
@@ -414,24 +460,49 @@ mod tests {
             parse(["-p", "do", "the", "thing"]),
             Command::Headless {
                 prompt: "do the thing".into(),
-                json: false
+                json: false,
+                resume: ResumeSpec::New,
+                rules: None,
             }
         );
         assert_eq!(
             parse(["-p", "hi", "--output-format", "json"]),
             Command::Headless {
                 prompt: "hi".into(),
-                json: true
+                json: true,
+                resume: ResumeSpec::New,
+                rules: None,
             }
         );
         assert_eq!(
             parse(["--print", "hi", "--json"]),
             Command::Headless {
                 prompt: "hi".into(),
-                json: true
+                json: true,
+                resume: ResumeSpec::New,
+                rules: None,
             }
         );
         assert_eq!(parse(["-p"]), Command::Help); // empty prompt
+        // Resume + rules flags.
+        assert_eq!(
+            parse(["-p", "go", "-r", "sid-1"]),
+            Command::Headless {
+                prompt: "go".into(),
+                json: false,
+                resume: ResumeSpec::Session("sid-1".into()),
+                rules: None,
+            }
+        );
+        assert_eq!(
+            parse(["-c", "-p", "go", "--rules", "use tabs"]),
+            Command::Headless {
+                prompt: "go".into(),
+                json: false,
+                resume: ResumeSpec::Continue,
+                rules: Some("use tabs".into()),
+            }
+        );
         assert_eq!(parse(["acp"]), Command::Acp);
         assert_eq!(
             parse(["sessions", "list"]),

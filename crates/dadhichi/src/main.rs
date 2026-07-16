@@ -100,8 +100,13 @@ async fn run() {
             print_project_rules();
             return;
         }
-        cli::Command::Headless { prompt, json } => {
-            run_headless(prompt, json).await;
+        cli::Command::Headless {
+            prompt,
+            json,
+            resume,
+            rules,
+        } => {
+            run_headless(prompt, json, resume, rules).await;
             return;
         }
         cli::Command::Acp => {
@@ -221,7 +226,7 @@ async fn run() {
         ctx.memory
             .remember(dadhichi_agent::Tier::Working, format!("user goal: {goal}"));
 
-        let agent = with_project_rules(ReactAgent::new(&model_id), &cwd);
+        let agent = with_project_rules(ReactAgent::new(&model_id), &cwd, None);
         match agent.run(&goal, &mut ctx).await {
             Ok(outcome) => {
                 println!(
@@ -484,20 +489,34 @@ async fn run() {
 /// remembers the whole conversation (unlike the one-shot `dadhichi <goal>`,
 /// which boots fresh each time and leans on the on-disk session file). Prior
 /// workspace context is loaded on start and the session is saved on exit.
-/// Discover the project rules for `cwd` and fold them into `agent`'s prompt,
-/// printing a one-line note when any are found. A no-op when there are none.
-fn with_project_rules(agent: ReactAgent, cwd: &std::path::Path) -> ReactAgent {
+/// Fold the discovered project rules for `cwd` — plus any session `--rules`
+/// text — into `agent`'s prompt. Notes go to stderr so headless stdout stays
+/// clean. A no-op when there is nothing to add.
+fn with_project_rules(
+    agent: ReactAgent,
+    cwd: &std::path::Path,
+    session_rules: Option<&str>,
+) -> ReactAgent {
     let rules = ProjectRules::discover(cwd);
-    match rules.as_prompt_block() {
-        Some(block) => {
-            println!(
-                "dadhichi ▸ project rules: {} file(s), ~{} tokens",
-                rules.files.len(),
-                rules.approx_tokens()
-            );
-            agent.with_project_rules(block)
+    let mut block = rules.as_prompt_block().unwrap_or_default();
+    if !rules.is_empty() {
+        eprintln!(
+            "dadhichi ▸ project rules: {} file(s), ~{} tokens",
+            rules.files.len(),
+            rules.approx_tokens()
+        );
+    }
+    if let Some(extra) = session_rules.map(str::trim).filter(|s| !s.is_empty()) {
+        if !block.is_empty() {
+            block.push_str("\n\n");
         }
-        None => agent,
+        block.push_str(&format!("<session_rules>\n{extra}\n</session_rules>"));
+        eprintln!("dadhichi ▸ session rules applied");
+    }
+    if block.is_empty() {
+        agent
+    } else {
+        agent.with_project_rules(block)
     }
 }
 
@@ -507,7 +526,12 @@ fn with_project_rules(agent: ReactAgent, cwd: &std::path::Path) -> ReactAgent {
 /// `--output-format json` output stays clean and pipeable. Tool calls that
 /// would prompt are denied (never block); a persistent session is recorded so
 /// the run is resumable, and its id is reported in JSON mode.
-async fn run_headless(prompt: String, json: bool) {
+async fn run_headless(
+    prompt: String,
+    json: bool,
+    resume: cli::ResumeSpec,
+    rules: Option<String>,
+) {
     // Keep logs off stdout so `--output-format json` output stays clean.
     {
         use tracing_subscriber::{EnvFilter, fmt};
@@ -553,8 +577,28 @@ async fn run_headless(prompt: String, json: bool) {
         eprintln!("dadhichi ▸ {note}");
     }
 
-    // Record a resumable session (best-effort; a store failure never aborts).
-    let session = dadhichi_session::SessionStore::at_home().and_then(|s| s.create(&cwd).ok());
+    // Resolve the session: a fresh one, the latest for this dir (--continue),
+    // or a specific id (--resume). Best-effort — a store failure never aborts.
+    let session = match dadhichi_session::SessionStore::at_home() {
+        Some(store) => match &resume {
+            cli::ResumeSpec::New => store.create(&cwd).ok(),
+            cli::ResumeSpec::Continue => store.latest(&cwd).or_else(|| store.create(&cwd).ok()),
+            cli::ResumeSpec::Session(id) => match store.resume(id) {
+                Ok(s) => Some(s),
+                Err(e) => {
+                    eprintln!("dadhichi ▸ resume {id}: {e}");
+                    std::process::exit(1);
+                }
+            },
+        },
+        None => None,
+    };
+
+    // Capture the prior transcript (before this prompt) so it can seed context.
+    let prior: Vec<(String, String)> = session
+        .as_ref()
+        .map(|s| s.transcript().unwrap_or_default())
+        .unwrap_or_default();
     if let Some(s) = &session {
         let _ = s.append(&serde_json::json!({ "role": "user", "text": prompt }));
     }
@@ -569,7 +613,15 @@ async fn run_headless(prompt: String, json: bool) {
         ]),
         kernel.bus().clone(),
     );
-    let agent = with_project_rules(ReactAgent::new(&model_id), &cwd);
+    // Replay the prior turns into memory so a resumed/continued run has context.
+    for (role, text) in &prior {
+        ctx.memory
+            .remember(dadhichi_agent::Tier::LongTerm, format!("{role}: {text}"));
+    }
+    if !prior.is_empty() {
+        eprintln!("dadhichi ▸ resumed session ({} prior turn(s))", prior.len());
+    }
+    let agent = with_project_rules(ReactAgent::new(&model_id), &cwd, rules.as_deref());
 
     match agent.run(&prompt, &mut ctx).await {
         Ok(outcome) => {
@@ -703,7 +755,7 @@ impl dadhichi_acp::PromptHandler for AcpAgentHandler {
                 .remember(dadhichi_agent::Tier::LongTerm, format!("{role}: {text}"));
         }
 
-        let agent = with_project_rules(ReactAgent::new(&self.model_id), &cwd);
+        let agent = with_project_rules(ReactAgent::new(&self.model_id), &cwd, None);
         sink.text(&format!("running: {prompt}"));
 
         let result = agent.run(prompt, &mut ctx).await;
@@ -875,7 +927,7 @@ async fn run_chat() {
         println!("dadhichi ▸ resumed session ({} items) — last: {recap}", prior_session.len());
     }
 
-    let agent = with_project_rules(ReactAgent::new(&model_id), &cwd);
+    let agent = with_project_rules(ReactAgent::new(&model_id), &cwd, None);
     println!("dadhichi ▸ chat ready. Type a goal; 'exit' or Ctrl-D to quit.\n");
 
     let stdin = std::io::stdin();
