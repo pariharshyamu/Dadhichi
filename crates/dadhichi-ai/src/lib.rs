@@ -34,7 +34,9 @@ pub use cache::{CachingModel, CompletionCache};
 pub use config::{ProviderPlan, ProviderSpec};
 pub use cost::{CostTable, ModelPricing};
 pub use embedding::{EmbeddingModel, MockEmbedder};
-pub use provider::{LanguageModel, MockProvider, ModelCapabilities, ProviderError, ProviderResult};
+pub use provider::{
+    LanguageModel, MockProvider, ModelCapabilities, ProviderError, ProviderResult, ScriptProvider,
+};
 pub use router::ModelRouter;
 pub use types::{
     Completion, CompletionRequest, GenerationParams, Message, Role, StreamChunk, Usage,

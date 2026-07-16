@@ -160,3 +160,70 @@ impl LanguageModel for MockProvider {
         Ok(s.boxed())
     }
 }
+
+/// A deterministic provider that **replays** a fixed script of completions —
+/// one per model call, in order.
+///
+/// It exists to exercise the agentic loop end-to-end (parse action → run tool →
+/// feed result back → repeat → finish) without a live model: you hand it the
+/// exact JSON actions a perfect model would emit. This validates the loop's
+/// *plumbing* — action parsing, tool dispatch, filesystem effects, termination —
+/// not a model's ability to reason those actions out.
+#[derive(Debug)]
+pub struct ScriptProvider {
+    replies: std::sync::Mutex<std::collections::VecDeque<String>>,
+}
+
+impl ScriptProvider {
+    /// Build from an ordered list of completion strings (each a JSON action or
+    /// final answer, per the agent's action protocol).
+    pub fn new<I, S>(replies: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        Self {
+            replies: std::sync::Mutex::new(replies.into_iter().map(Into::into).collect()),
+        }
+    }
+
+    /// Load a script from a file of newline-delimited completions (blank lines
+    /// skipped).
+    pub fn from_file(path: impl AsRef<std::path::Path>) -> std::io::Result<Self> {
+        let text = std::fs::read_to_string(path)?;
+        Ok(Self::new(
+            text.lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .map(str::to_string),
+        ))
+    }
+}
+
+#[async_trait]
+impl LanguageModel for ScriptProvider {
+    fn id(&self) -> &str {
+        "script"
+    }
+
+    fn capabilities(&self) -> ModelCapabilities {
+        ModelCapabilities {
+            local: true,
+            tools: true,
+            ..Default::default()
+        }
+    }
+
+    async fn complete(&self, request: CompletionRequest) -> ProviderResult<Completion> {
+        let next = {
+            let mut replies = self.replies.lock().unwrap_or_else(|e| e.into_inner());
+            replies.pop_front()
+        };
+        let content = next.unwrap_or_else(|| "{\"final\": \"script exhausted\"}".to_string());
+        Ok(Completion {
+            content,
+            model: request.model,
+            usage: Usage::default(),
+        })
+    }
+}

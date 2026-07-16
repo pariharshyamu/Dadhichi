@@ -35,7 +35,8 @@ TASKS_DIR = ROOT / "tasks"
 ALLOW_TOML = (ROOT / "allow.toml").read_text()
 TIMEOUT = int(os.environ.get("DADHICHI_EVAL_TIMEOUT", "180"))
 
-FIXTURE_SKIP = {"task.txt", "verify.sh"}
+FIXTURE_SKIP = {"task.txt", "verify.sh", "script.jsonl"}
+SCRIPT_MODE = os.environ.get("DADHICHI_EVAL_MODE") == "script"
 
 
 def find_binary() -> str:
@@ -51,6 +52,8 @@ def find_binary() -> str:
 
 
 def provider_label() -> str:
+    if SCRIPT_MODE:
+        return "script replay (loop plumbing test — NOT a capability measure)"
     if os.environ.get("ANTHROPIC_API_KEY"):
         return f"anthropic ({os.environ.get('DADHICHI_MODEL', 'default')})"
     if os.environ.get("OPENAI_API_KEY"):
@@ -74,6 +77,13 @@ def run_task(binary: str, task_dir: Path):
         (work / ".dadhichi").mkdir(exist_ok=True)
         (work / ".dadhichi" / "config.toml").write_text(ALLOW_TOML)
 
+        run_env = os.environ.copy()
+        if SCRIPT_MODE:
+            script = task_dir / "script.jsonl"
+            if not script.exists():
+                return False, 0.0, "no script.jsonl for this task"
+            run_env["DADHICHI_SCRIPT"] = str(script)
+
         start = time.time()
         note = ""
         try:
@@ -83,6 +93,7 @@ def run_task(binary: str, task_dir: Path):
                 capture_output=True,
                 text=True,
                 timeout=TIMEOUT,
+                env=run_env,
             )
             lines = [ln for ln in proc.stdout.splitlines() if ln.strip()]
             if lines:

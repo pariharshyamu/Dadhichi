@@ -542,9 +542,31 @@ async fn run_headless(
             .with_writer(std::io::stderr)
             .try_init();
     }
-    let plan = ProviderPlan::from_env();
-    let model_id = plan.default_model();
-    let router = Arc::new(plan.build_router());
+    // `DADHICHI_SCRIPT=<file>` replays a fixed script of agent actions through
+    // the real loop instead of calling a model — for validating the agentic
+    // loop end-to-end (plumbing) without a live LLM. Otherwise the provider is
+    // resolved from the environment as usual.
+    let (router, model_id) = match std::env::var("DADHICHI_SCRIPT")
+        .ok()
+        .filter(|s| !s.is_empty())
+    {
+        Some(path) => match dadhichi_ai::ScriptProvider::from_file(&path) {
+            Ok(script) => {
+                let mut r = dadhichi_ai::ModelRouter::new();
+                r.register(Arc::new(script));
+                (Arc::new(r), "script".to_string())
+            }
+            Err(e) => {
+                eprintln!("dadhichi ▸ could not load DADHICHI_SCRIPT ({path}): {e}");
+                std::process::exit(1);
+            }
+        },
+        None => {
+            let plan = ProviderPlan::from_env();
+            let model_id = plan.default_model();
+            (Arc::new(plan.build_router()), model_id)
+        }
+    };
     let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
     let fs_store: Arc<dyn StateStore> = Arc::new(WorkspaceStore::new(&cwd));
     let cli_memory = shared_memory();

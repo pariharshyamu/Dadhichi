@@ -1,0 +1,2 @@
+{"thought":"fix add to return the sum","tool":"fs.write","args":{"path":"calc.py","content":"def add(a, b):\n    return a + b\n"}}
+{"thought":"done","final":"Fixed add() to return a + b."}
