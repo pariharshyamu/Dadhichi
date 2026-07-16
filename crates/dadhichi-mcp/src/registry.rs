@@ -1,6 +1,7 @@
 //! The tool registry: a permission-aware catalogue of every available tool.
 
 use crate::approval::{ApprovalPolicy, ApprovalRequest, Approver, Decision, PermissionMode};
+use crate::permission::{RuleAction, RuleSet, ToolCall};
 use crate::tool::{Permission, Tool, ToolError, ToolResult, ToolSpec};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
@@ -51,6 +52,9 @@ impl FromIterator<Permission> for GrantSet {
 #[derive(Default)]
 pub struct ToolRegistry {
     tools: RwLock<HashMap<String, Arc<dyn Tool>>>,
+    /// Content-aware permission rules, consulted before the mode policy. Empty
+    /// by default, so the registry behaves exactly as it did before rules.
+    rules: RwLock<RuleSet>,
     /// Per-permission approval policy (default: allow everything).
     policy: RwLock<ApprovalPolicy>,
     /// The approver consulted when a call is interrupted. Without one, an
@@ -105,6 +109,19 @@ impl ToolRegistry {
         specs
     }
 
+    /// Replace the content-aware permission rules consulted before the mode
+    /// policy. Rules resolve a call by severity (`deny > ask > allow`); when no
+    /// rule matches, the registry falls through to the [`ApprovalPolicy`].
+    pub fn set_rules(&self, rules: RuleSet) -> &Self {
+        *self.rules.write().unwrap_or_else(|e| e.into_inner()) = rules;
+        self
+    }
+
+    /// The current permission rule set.
+    pub fn rules(&self) -> RuleSet {
+        self.rules.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
     /// Replace the approval policy that gates interrupting/denied permissions.
     pub fn set_policy(&self, policy: ApprovalPolicy) -> &Self {
         *self.policy.write().unwrap_or_else(|e| e.into_inner()) = policy;
@@ -151,17 +168,26 @@ impl ToolRegistry {
             return Err(ToolError::PermissionDenied(missing.to_string()));
         }
 
-        // Dynamic approval gate: deny outright, or interrupt for a human verdict.
+        // Dynamic approval gate. Content-aware rules are consulted first; when
+        // no rule matches, the per-permission mode policy decides. Both resolve
+        // to the same `PermissionMode` the gate acts on, so an empty rule set
+        // reproduces the pre-rules behaviour exactly.
         let policy = self.policy();
-        match policy.decide(&spec.permissions) {
+        let mode = match self.rules().evaluate(&ToolCall::new(name, &args)) {
+            Some(RuleAction::Deny) => PermissionMode::Deny,
+            Some(RuleAction::Ask) => PermissionMode::Interrupt,
+            Some(RuleAction::Allow) => PermissionMode::Allow,
+            None => policy.decide(&spec.permissions),
+        };
+        match mode {
             PermissionMode::Allow => {}
             PermissionMode::Deny => {
-                let perm = policy
+                let reason = policy
                     .first_with_mode(&spec.permissions, PermissionMode::Deny)
                     .map(|p| p.to_string())
-                    .unwrap_or_default();
+                    .unwrap_or_else(|| "rule".to_string());
                 return Err(ToolError::Rejected(format!(
-                    "{name} denied by policy ({perm})"
+                    "{name} denied by policy ({reason})"
                 )));
             }
             PermissionMode::Interrupt => {
@@ -171,8 +197,12 @@ impl ToolRegistry {
                     .unwrap_or_else(|e| e.into_inner())
                     .clone();
                 if let Some(approver) = approver {
+                    // Name the capability behind the prompt: the policy's
+                    // interrupting permission if any, else the tool's first
+                    // declared permission, else a safe default.
                     let permission = policy
                         .first_with_mode(&spec.permissions, PermissionMode::Interrupt)
+                        .or_else(|| spec.permissions.first().copied())
                         .unwrap_or(Permission::RunCommands);
                     let request = ApprovalRequest {
                         tool: name.to_string(),
@@ -197,5 +227,107 @@ impl ToolRegistry {
 
     fn write(&self) -> std::sync::RwLockWriteGuard<'_, HashMap<String, Arc<dyn Tool>>> {
         self.tools.write().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+#[cfg(test)]
+mod rule_tests {
+    use super::*;
+    use crate::approval::{ApprovalPolicy, Decision, FixedApprover, PermissionMode};
+    use crate::permission::{RuleAction, RuleSet};
+    use crate::shell::TerminalTool;
+
+    fn registry_with_terminal() -> ToolRegistry {
+        let registry = ToolRegistry::new();
+        registry.register(Arc::new(TerminalTool::new()));
+        registry
+    }
+
+    fn grants() -> GrantSet {
+        GrantSet::from_iter([Permission::RunCommands])
+    }
+
+    #[tokio::test]
+    async fn deny_rule_rejects_a_granted_command() {
+        let registry = registry_with_terminal();
+        let mut rules = RuleSet::new();
+        rules.add_strings(RuleAction::Deny, ["Bash(rm -rf *)"]);
+        registry.set_rules(rules);
+
+        // The capability is granted and the mode policy allows, yet the content
+        // rule blocks this specific command.
+        let err = registry
+            .invoke(
+                TerminalTool::NAME,
+                serde_json::json!({ "command": "rm -rf /tmp/x" }),
+                &grants(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::Rejected(_)));
+    }
+
+    #[tokio::test]
+    async fn deny_rule_catches_a_chained_segment() {
+        let registry = registry_with_terminal();
+        let mut rules = RuleSet::new();
+        rules.add_strings(RuleAction::Allow, ["Bash(git *)"]);
+        rules.add_strings(RuleAction::Deny, ["Bash(rm -rf *)"]);
+        registry.set_rules(rules);
+
+        let err = registry
+            .invoke(
+                TerminalTool::NAME,
+                serde_json::json!({ "command": "git status && rm -rf /" }),
+                &grants(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::Rejected(_)));
+    }
+
+    #[tokio::test]
+    async fn allow_rule_bypasses_an_interrupting_policy() {
+        let registry = registry_with_terminal();
+        // The policy would interrupt every RunCommands call, and the approver
+        // would deny it — but an allow rule short-circuits the prompt.
+        registry.set_policy(
+            ApprovalPolicy::default().with(Permission::RunCommands, PermissionMode::Interrupt),
+        );
+        registry.set_approver(Arc::new(FixedApprover(Decision::Deny)));
+        let mut rules = RuleSet::new();
+        rules.add_strings(RuleAction::Allow, ["Bash(echo *)"]);
+        registry.set_rules(rules);
+
+        let out = registry
+            .invoke(
+                TerminalTool::NAME,
+                serde_json::json!({ "command": "echo hi" }),
+                &grants(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(out["success"], true);
+    }
+
+    #[tokio::test]
+    async fn no_rule_falls_through_to_policy() {
+        let registry = registry_with_terminal();
+        // No rules set; an interrupting policy with a denying approver must
+        // still block — proving the fall-through path is intact.
+        registry.set_policy(
+            ApprovalPolicy::default().with(Permission::RunCommands, PermissionMode::Interrupt),
+        );
+        registry.set_approver(Arc::new(FixedApprover(Decision::Deny)));
+
+        let err = registry
+            .invoke(
+                TerminalTool::NAME,
+                serde_json::json!({ "command": "echo hi" }),
+                &grants(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::Rejected(_)));
     }
 }

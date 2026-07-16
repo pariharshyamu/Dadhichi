@@ -29,6 +29,7 @@ pub mod client;
 pub mod connector;
 pub mod devtools;
 pub mod fs;
+pub mod permission;
 pub mod protocol;
 pub mod registry;
 pub mod shell;
@@ -47,6 +48,10 @@ pub use connector::{
 };
 pub use devtools::{BuildTool, DbQueryTool, ScaffoldTool, TestRunnerTool};
 pub use fs::{FsGlobTool, FsGrepTool, FsListTool, FsReadTool, FsWriteTool};
+pub use permission::{
+    Pattern, PermissionRule, RuleAction, RuleParseError, RuleSet, ToolCall, ToolClass,
+    is_dangerous, is_read_only_command,
+};
 pub use protocol::{
     McpClient, McpError, PromptArgument, PromptSpec, ResourceSpec, RpcErrorObject, RpcRequest,
     RpcResponse, ServerCapabilities,
