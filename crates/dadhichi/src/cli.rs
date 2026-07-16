@@ -49,6 +49,9 @@ pub enum Command {
         /// Emit JSON (`--output-format json`) instead of plain text.
         json: bool,
     },
+    /// Serve the Agent Client Protocol over stdio, so an editor can drive
+    /// Dadhichi as an embedded agent (session/new, session/prompt, …).
+    Acp,
 }
 
 /// A `dadhichi skill …` subcommand for managing the on-disk skill library that
@@ -175,6 +178,8 @@ SUBCOMMANDS:
                          (git commit) only after verification or your approval.
     inspect              List the project rules (AGENTS.md / .dadhichi/rules)
                          that load for this directory, with token estimates.
+    acp                  Serve the Agent Client Protocol over stdio, for editors
+                         that embed Dadhichi as an agent.
 
 ENVIRONMENT:
     RUST_LOG              Tracing filter (e.g. `info`, `dadhichi=debug`). Defaults to `warn`.
@@ -236,6 +241,9 @@ where
     }
     if args.first().map(String::as_str) == Some("inspect") {
         return Command::Inspect;
+    }
+    if args.first().map(String::as_str) == Some("acp") {
+        return Command::Acp;
     }
     // Headless: `-p`/`--print <prompt…>`, optionally `--output-format json` /
     // `--json` (anywhere). Everything after the flag that isn't an output-format
@@ -375,6 +383,7 @@ mod tests {
             }
         );
         assert_eq!(parse(["-p"]), Command::Help); // empty prompt
+        assert_eq!(parse(["acp"]), Command::Acp);
     }
 
     #[test]

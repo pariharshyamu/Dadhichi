@@ -361,6 +361,7 @@ name = "dadhichi"
 version = "0.1.13"
 dependencies = [
  "async-trait",
+ "dadhichi-acp",
  "dadhichi-agent",
  "dadhichi-ai",
  "dadhichi-cache",

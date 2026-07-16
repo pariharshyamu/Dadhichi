@@ -104,6 +104,10 @@ async fn run() {
             run_headless(prompt, json).await;
             return;
         }
+        cli::Command::Acp => {
+            run_acp().await;
+            return;
+        }
         cli::Command::Run { goal } => goal,
     };
 
@@ -591,6 +595,101 @@ async fn run_headless(prompt: String, json: bool) {
                 eprintln!("dadhichi ▸ error: {e}");
             }
             std::process::exit(1);
+        }
+    }
+}
+
+/// Serve the Agent Client Protocol over stdio (`dadhichi acp`) so an editor can
+/// embed Dadhichi. Each prompt runs one ReAct turn through a non-interactive
+/// (deny-approver) tool registry; sessions persist via the session store.
+async fn run_acp() {
+    {
+        use tracing_subscriber::{EnvFilter, fmt};
+        let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
+        let _ = fmt()
+            .with_env_filter(filter)
+            .with_target(false)
+            .with_writer(std::io::stderr)
+            .try_init();
+    }
+    let plan = ProviderPlan::from_env();
+    let handler = Arc::new(AcpAgentHandler {
+        router: Arc::new(plan.build_router()),
+        model_id: plan.default_model(),
+    });
+    let Some(store) = dadhichi_session::SessionStore::at_home() else {
+        eprintln!("dadhichi ▸ acp: no home directory for the session store");
+        std::process::exit(1);
+    };
+    let server = dadhichi_acp::AcpServer::new(store, handler);
+    let reader = tokio::io::BufReader::new(tokio::io::stdin());
+    if let Err(e) = server.serve(reader, tokio::io::stdout()).await {
+        eprintln!("dadhichi ▸ acp: {e}");
+    }
+}
+
+/// The ACP prompt handler: drives one ReAct turn per prompt.
+struct AcpAgentHandler {
+    router: Arc<dadhichi_ai::ModelRouter>,
+    model_id: String,
+}
+
+#[async_trait::async_trait]
+impl dadhichi_acp::PromptHandler for AcpAgentHandler {
+    async fn prompt(
+        &self,
+        session: &dadhichi_session::Session,
+        prompt: &str,
+        sink: &mut dadhichi_acp::UpdateSink,
+    ) -> Result<dadhichi_acp::PromptResult, String> {
+        let cwd = session.cwd().to_path_buf();
+        let fs_store: Arc<dyn StateStore> = Arc::new(WorkspaceStore::new(&cwd));
+        let cli_memory = shared_memory();
+
+        let tools = {
+            let t = ToolRegistry::new();
+            t.register(Arc::new(EchoTool));
+            t.register(Arc::new(TerminalTool::in_dir(&cwd)));
+            t.register(Arc::new(FsReadTool::new(fs_store.clone())));
+            t.register(Arc::new(FsWriteTool::new(fs_store.clone())));
+            t.register(Arc::new(FsListTool::new(fs_store.clone())));
+            t.register(Arc::new(MemoryWriteTool::new(cli_memory.clone())));
+            t.register(Arc::new(MemoryRecallTool::new(cli_memory.clone())));
+            // Non-interactive: a prompt-worthy call is denied, not blocked.
+            t.set_policy(
+                ApprovalPolicy::default()
+                    .with(Permission::RunCommands, PermissionMode::Interrupt)
+                    .with(Permission::WriteWorkspace, PermissionMode::Interrupt),
+            );
+            t.set_approver(Arc::new(FixedApprover(Decision::Deny)));
+            Arc::new(t)
+        };
+        // Apply the workspace's config rules/mode + hooks (notes suppressed).
+        let _ = policy::activate(&tools, &cwd, session.id());
+
+        let kernel = Kernel::new();
+        let mut ctx = AgentContext::new(
+            self.router.clone(),
+            tools,
+            GrantSet::from_iter([
+                Permission::ReadWorkspace,
+                Permission::WriteWorkspace,
+                Permission::RunCommands,
+            ]),
+            kernel.bus().clone(),
+        );
+        let agent = with_project_rules(ReactAgent::new(&self.model_id), &cwd);
+
+        sink.text(session.id(), &format!("running: {prompt}"));
+        match agent.run(prompt, &mut ctx).await {
+            Ok(outcome) => {
+                sink.text(session.id(), &outcome.summary);
+                Ok(dadhichi_acp::PromptResult {
+                    text: outcome.summary,
+                    status: format!("{:?}", outcome.status),
+                })
+            }
+            Err(e) => Err(e.to_string()),
         }
     }
 }
