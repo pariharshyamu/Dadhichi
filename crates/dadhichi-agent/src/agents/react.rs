@@ -96,6 +96,10 @@ pub struct ReactAgent {
     /// appended after the base protocol — how a specialist role injects its
     /// domain instructions without a separate agent implementation.
     playbook: Option<String>,
+    /// An optional project-rules block (discovered `AGENTS.md` / `.dadhichi/
+    /// rules`) appended to the prompt so the agent follows the repository's
+    /// conventions. See [`crate::rules`].
+    project_rules: Option<String>,
 }
 
 impl Default for ReactAgent {
@@ -107,6 +111,7 @@ impl Default for ReactAgent {
             max_rounds: DEFAULT_MAX_ROUNDS,
             persona: None,
             playbook: None,
+            project_rules: None,
         }
     }
 }
@@ -146,6 +151,16 @@ impl ReactAgent {
     /// customises the one shared ReAct engine instead of a bespoke agent type.
     pub fn with_playbook(mut self, playbook: impl Into<String>) -> Self {
         self.playbook = Some(playbook.into());
+        self
+    }
+
+    /// Attach a project-rules block (from [`crate::rules::ProjectRules`]) so the
+    /// agent follows the repository's conventions. A no-op when `rules` is empty.
+    pub fn with_project_rules(mut self, rules: impl Into<String>) -> Self {
+        let rules = rules.into();
+        if !rules.trim().is_empty() {
+            self.project_rules = Some(rules);
+        }
         self
     }
 
@@ -189,10 +204,14 @@ impl ReactAgent {
             Some(p) => format!("\n\n{p}"),
             None => String::new(),
         };
+        let rules = match &self.project_rules {
+            Some(r) => format!("\n\n{r}"),
+            None => String::new(),
+        };
         format!(
             "{role}{}\n\n\
              Tools available to you:\n{tools}\n\n\
-             {}{playbook}",
+             {}{playbook}{rules}",
             full_stack_system_prompt(),
             action_protocol(),
         )
@@ -436,6 +455,22 @@ impl Agent for ReactAgent {
 mod tests {
     use super::*;
     use crate::agent::AgentContext;
+
+    #[test]
+    fn project_rules_appear_in_the_system_prompt() {
+        let agent = ReactAgent::new("mock")
+            .with_project_rules("<project_rules>\nUse tabs, not spaces.\n</project_rules>");
+        let prompt = agent.system_prompt("(no tools)");
+        assert!(prompt.contains("Use tabs, not spaces."));
+        assert!(prompt.contains("<project_rules>"));
+    }
+
+    #[test]
+    fn empty_project_rules_are_ignored() {
+        let agent = ReactAgent::new("mock").with_project_rules("   ");
+        assert!(agent.project_rules.is_none());
+    }
+
     use async_trait::async_trait;
     use dadhichi_ai::{
         Completion, CompletionRequest, LanguageModel, ModelCapabilities, ModelRouter,
