@@ -17,12 +17,13 @@ use crate::agent::{Agent, AgentContext, AgentError, AgentOutcome, AgentStatus};
 use async_trait::async_trait;
 use dadhichi_ai::{CompletionRequest, Message, ModelRouter};
 use dadhichi_core::{Event, EventBus};
+use dadhichi_git::{FileStatus, GitRepo};
 use dadhichi_mcp::{
     BuildTool, DbQueryTool, FsGlobTool, FsGrepTool, FsListTool, FsReadTool, FsWriteTool, GrantSet,
     OverlayChange, OverlayStore, Permission, ScaffoldTool, StateError, StateStore, TerminalTool,
-    TestRunnerTool, ToolRegistry,
+    TestRunnerTool, ToolRegistry, WorkspaceStore,
 };
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// The permission envelope and tool palette a delegated sub-agent runs under.
@@ -320,7 +321,30 @@ pub struct DelegationReview {
     /// The orchestrator-side critic's verdict, when a [`Critic`] reviewed the
     /// work. When present it, not the delegate's self-assessment, drives the gate.
     pub verdict: Option<CriticVerdict>,
-    overlay: Arc<OverlayStore>,
+    stage: Staging,
+}
+
+/// Where a delegate's staged work lives until it lands — an in-memory overlay,
+/// or a real git worktree.
+#[derive(Debug)]
+enum Staging {
+    /// Copy-on-write overlay over the base store; landing flushes it.
+    Overlay(Arc<OverlayStore>),
+    /// A linked git worktree; landing copies the changed files into the parent
+    /// working tree and removes the worktree.
+    Worktree(WorktreeStaging),
+}
+
+#[derive(Debug)]
+struct WorktreeStaging {
+    /// The parent repository / workspace root that changes land into.
+    parent_root: PathBuf,
+    /// The worktree checkout the delegate wrote to.
+    worktree_root: PathBuf,
+    /// The worktree's registered name (for pruning).
+    name: String,
+    /// The files the delegate changed, relative to the worktree root.
+    changed: Vec<OverlayChange>,
 }
 
 impl DelegationReview {
@@ -361,16 +385,68 @@ impl DelegationReview {
         )
     }
 
-    /// Land the staged changes onto the base workspace (flush the overlay),
-    /// returning the number of files changed. The caller commits them.
+    /// Land the staged changes onto the parent workspace, returning the number
+    /// of files changed. For an overlay this flushes it; for a worktree it
+    /// copies the changed files into the parent tree and removes the worktree.
+    /// The caller commits the result.
     pub fn land(&self) -> Result<usize, StateError> {
-        self.overlay.flush()
+        match &self.stage {
+            Staging::Overlay(overlay) => overlay.flush(),
+            Staging::Worktree(w) => land_worktree(w),
+        }
+    }
+
+    /// Discard the staged work without landing it. A no-op for an overlay
+    /// (dropping it is enough); for a worktree it removes the checkout so a
+    /// rejected delegation leaves nothing behind.
+    pub fn discard(&self) {
+        if let Staging::Worktree(w) = &self.stage {
+            if let Ok(repo) = GitRepo::open(&w.parent_root) {
+                let _ = repo.prune_worktree(&w.name);
+            }
+        }
     }
 
     /// Whether there is anything staged to land.
     pub fn has_changes(&self) -> bool {
         !self.changes.is_empty()
     }
+}
+
+/// Land a worktree delegation: copy each changed file from the worktree into the
+/// parent tree (or delete it), then prune the worktree.
+fn land_worktree(w: &WorktreeStaging) -> Result<usize, StateError> {
+    let io = |e: std::io::Error| StateError::Io(e.to_string());
+    let mut landed = 0;
+    for change in &w.changed {
+        let dst = w.parent_root.join(&change.path);
+        if change.deleted {
+            let _ = std::fs::remove_file(&dst);
+        } else {
+            if let Some(parent) = dst.parent() {
+                std::fs::create_dir_all(parent).map_err(io)?;
+            }
+            std::fs::copy(w.worktree_root.join(&change.path), &dst).map_err(io)?;
+        }
+        landed += 1;
+    }
+    if let Ok(repo) = GitRepo::open(&w.parent_root) {
+        let _ = repo.prune_worktree(&w.name);
+    }
+    Ok(landed)
+}
+
+/// How a delegate's file changes are isolated from the parent workspace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Isolation {
+    /// A copy-on-write overlay over an in-memory or virtual base store. The
+    /// default: zero-cost and works without a git repo.
+    #[default]
+    Overlay,
+    /// A real linked git worktree — its own checkout on its own branch, so the
+    /// delegate can build and run tests against real files without disturbing
+    /// the parent tree. Requires the workspace to be a git repository.
+    Worktree,
 }
 
 /// Runs sub-agents in isolation and reports what they changed.
@@ -380,6 +456,7 @@ pub struct Delegator {
     bus: EventBus,
     threshold: f32,
     critic: Option<Arc<dyn Critic>>,
+    isolation: Isolation,
 }
 
 impl Delegator {
@@ -391,7 +468,15 @@ impl Delegator {
             bus,
             threshold: 0.75,
             critic: None,
+            isolation: Isolation::Overlay,
         }
+    }
+
+    /// Choose how delegates are isolated ([`Overlay`](Isolation::Overlay) by
+    /// default, or a real [`Worktree`](Isolation::Worktree)).
+    pub fn with_isolation(mut self, isolation: Isolation) -> Self {
+        self.isolation = isolation;
+        self
     }
 
     /// Set the confidence a delegation must reach to land without approval.
@@ -408,10 +493,14 @@ impl Delegator {
         self
     }
 
-    /// Run `agent` on `task` in isolation over `base`, staging its file writes in
-    /// an overlay and returning a review for the caller to land or reject. The
-    /// delegate's tool palette is built from `spec.grants`, so it gets exactly
-    /// the powers the spec allows — all filesystem access confined to the overlay.
+    /// Run `agent` on `task` in isolation and return a review to land or reject.
+    /// The delegate's tool palette is built from `spec.grants`, so it gets
+    /// exactly the powers the spec allows. Isolation is [`Overlay`] by default
+    /// (writes staged in a copy-on-write overlay over `base`) or [`Worktree`]
+    /// (writes go to a real git worktree at `cwd`; `base` is unused).
+    ///
+    /// [`Overlay`]: Isolation::Overlay
+    /// [`Worktree`]: Isolation::Worktree
     pub async fn delegate(
         &self,
         agent: &dyn Agent,
@@ -420,63 +509,119 @@ impl Delegator {
         base: Arc<dyn StateStore>,
         cwd: impl Into<PathBuf>,
     ) -> Result<DelegationReview, AgentError> {
+        let cwd: PathBuf = cwd.into();
+        match self.isolation {
+            Isolation::Overlay => self.delegate_overlay(agent, spec, task, base, cwd).await,
+            Isolation::Worktree => self.delegate_worktree(agent, spec, task, cwd).await,
+        }
+    }
+
+    async fn delegate_overlay(
+        &self,
+        agent: &dyn Agent,
+        spec: &SubAgentSpec,
+        task: &str,
+        base: Arc<dyn StateStore>,
+        cwd: PathBuf,
+    ) -> Result<DelegationReview, AgentError> {
         let overlay = Arc::new(OverlayStore::new(base));
         let store: Arc<dyn StateStore> = overlay.clone();
+        let tools = build_registry(spec, store, &cwd);
 
-        // Assemble the delegate's own registry: filesystem tools bound to the
-        // overlay, plus shell if granted. Reads/writes stay staged and isolated.
-        let tools = ToolRegistry::new();
-        tools.register(Arc::new(FsReadTool::new(store.clone())));
-        tools.register(Arc::new(FsListTool::new(store.clone())));
-        // Read-only search tools every specialist can use to explore the code.
-        tools.register(Arc::new(FsGrepTool::new(store.clone())));
-        tools.register(Arc::new(FsGlobTool::new(store.clone())));
-        if spec.grants(Permission::WriteWorkspace) {
-            tools.register(Arc::new(FsWriteTool::new(store.clone())));
-        }
-        if spec.grants(Permission::RunCommands) {
-            // Shell and the full-stack dev tools share the RunCommands gate. They
-            // act on the real `cwd` (scaffold/build/test/db all shell out), so a
-            // delegate granted RunCommands can build and verify a real project.
-            let cwd: PathBuf = cwd.into();
-            tools.register(Arc::new(TerminalTool::in_dir(&cwd)));
-            tools.register(Arc::new(ScaffoldTool::new(&cwd)));
-            tools.register(Arc::new(BuildTool::new(&cwd)));
-            tools.register(Arc::new(TestRunnerTool::new(&cwd)));
-            tools.register(Arc::new(DbQueryTool::new(&cwd)));
-        }
-        let tools = Arc::new(tools);
+        self.announce_start(spec, task, Isolation::Overlay);
+        let outcome = self.run_delegate(agent, spec, task, tools).await?;
+        let changes = overlay.changes();
+        Ok(self
+            .review_and_announce(spec, task, outcome, changes, Staging::Overlay(overlay))
+            .await)
+    }
 
+    async fn delegate_worktree(
+        &self,
+        agent: &dyn Agent,
+        spec: &SubAgentSpec,
+        task: &str,
+        cwd: PathBuf,
+    ) -> Result<DelegationReview, AgentError> {
+        let repo = GitRepo::open(&cwd).map_err(|e| {
+            AgentError::Tool(format!("worktree isolation requires a git repository: {e}"))
+        })?;
+        let safe: String = spec
+            .name
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect();
+        let name = format!("dadhichi-delegate-{safe}-{}", uuid::Uuid::new_v4().simple());
+        let wt_root = cwd.join(".dadhichi").join("worktrees").join(&name);
+        let wt = repo
+            .add_worktree(&name, &wt_root)
+            .map_err(|e| AgentError::Tool(format!("create worktree: {e}")))?;
+
+        let store: Arc<dyn StateStore> = Arc::new(WorkspaceStore::new(&wt.path));
+        let tools = build_registry(spec, store, &wt.path);
+
+        self.announce_start(spec, task, Isolation::Worktree);
+        let outcome = self.run_delegate(agent, spec, task, tools).await?;
+        let changes = worktree_changes(&wt.path);
+        let stage = Staging::Worktree(WorktreeStaging {
+            parent_root: cwd,
+            worktree_root: wt.path,
+            name,
+            changed: changes.clone(),
+        });
+        Ok(self
+            .review_and_announce(spec, task, outcome, changes, stage)
+            .await)
+    }
+
+    fn announce_start(&self, spec: &SubAgentSpec, task: &str, isolation: Isolation) {
         self.bus.publish(Event::new(
             "agent.delegated",
-            serde_json::json!({ "subagent": spec.name, "task": task }),
+            serde_json::json!({
+                "subagent": spec.name,
+                "task": task,
+                "isolation": format!("{isolation:?}"),
+            }),
         ));
+    }
 
+    async fn run_delegate(
+        &self,
+        agent: &dyn Agent,
+        spec: &SubAgentSpec,
+        task: &str,
+        tools: Arc<ToolRegistry>,
+    ) -> Result<AgentOutcome, AgentError> {
         let mut ctx = AgentContext::new(
             self.models.clone(),
             tools,
             spec.grants.clone(),
             self.bus.clone(),
         );
-        let outcome = agent.run(task, &mut ctx).await?;
-        let changes = overlay.changes();
+        agent.run(task, &mut ctx).await
+    }
 
-        // Orchestrator-side verification: an attached critic reviews the staged
-        // work and its verdict governs the gate, so the delegate doesn't grade
-        // its own homework.
+    /// Run the critic (if any), assemble the review, and publish the reviewed
+    /// event — shared by both isolation paths.
+    async fn review_and_announce(
+        &self,
+        spec: &SubAgentSpec,
+        task: &str,
+        outcome: AgentOutcome,
+        changes: Vec<OverlayChange>,
+        stage: Staging,
+    ) -> DelegationReview {
         let verdict = match &self.critic {
             Some(critic) => Some(critic.review(task, &outcome.summary, &changes).await),
             None => None,
         };
-
         let review = DelegationReview {
             outcome,
             changes,
             threshold: self.threshold,
             verdict,
-            overlay,
+            stage,
         };
-
         self.bus.publish(Event::new(
             "agent.delegation.reviewed",
             serde_json::json!({
@@ -486,8 +631,47 @@ impl Delegator {
                 "changes": review.changes.iter().map(|c| &c.path).collect::<Vec<_>>(),
             }),
         ));
+        review
+    }
+}
 
-        Ok(review)
+/// Build a delegate's tool registry: filesystem tools bound to `store`, plus the
+/// shell and full-stack dev tools (rooted at `cmd_cwd`) when the spec grants
+/// `RunCommands`.
+fn build_registry(
+    spec: &SubAgentSpec,
+    store: Arc<dyn StateStore>,
+    cmd_cwd: &Path,
+) -> Arc<ToolRegistry> {
+    let tools = ToolRegistry::new();
+    tools.register(Arc::new(FsReadTool::new(store.clone())));
+    tools.register(Arc::new(FsListTool::new(store.clone())));
+    tools.register(Arc::new(FsGrepTool::new(store.clone())));
+    tools.register(Arc::new(FsGlobTool::new(store.clone())));
+    if spec.grants(Permission::WriteWorkspace) {
+        tools.register(Arc::new(FsWriteTool::new(store.clone())));
+    }
+    if spec.grants(Permission::RunCommands) {
+        tools.register(Arc::new(TerminalTool::in_dir(cmd_cwd)));
+        tools.register(Arc::new(ScaffoldTool::new(cmd_cwd)));
+        tools.register(Arc::new(BuildTool::new(cmd_cwd)));
+        tools.register(Arc::new(TestRunnerTool::new(cmd_cwd)));
+        tools.register(Arc::new(DbQueryTool::new(cmd_cwd)));
+    }
+    Arc::new(tools)
+}
+
+/// The files a delegate changed in its worktree, from `git status`.
+fn worktree_changes(worktree: &Path) -> Vec<OverlayChange> {
+    match GitRepo::open(worktree).and_then(|r| r.status()) {
+        Ok(entries) => entries
+            .into_iter()
+            .map(|e| OverlayChange {
+                path: e.path,
+                deleted: e.status == FileStatus::Deleted,
+            })
+            .collect(),
+        Err(_) => Vec::new(),
     }
 }
 
@@ -560,7 +744,7 @@ mod tests {
             changes: overlay.changes(),
             threshold: 0.75,
             verdict: None,
-            overlay: overlay.clone(),
+            stage: Staging::Overlay(overlay.clone()),
         };
 
         // High confidence ⇒ auto-approved, and the change is staged, not landed.
@@ -660,5 +844,58 @@ mod tests {
         assert!(!review.auto_approved());
         // Nothing landed on the base while it awaits a decision.
         assert!(base.list("").unwrap().is_empty());
+    }
+
+    #[test]
+    fn worktree_land_copies_changes_and_prunes() {
+        // A real repo with one commit, then a worktree the "delegate" writes to.
+        let dir = tempfile::tempdir().unwrap();
+        let repo = GitRepo::init(dir.path()).unwrap();
+        std::fs::write(dir.path().join("a.txt"), "base").unwrap();
+        repo.stage_all().unwrap();
+        repo.commit("init", "T", "t@e.com").unwrap();
+
+        let wt_path = dir.path().join(".dadhichi").join("worktrees").join("wt1");
+        let wt = repo.add_worktree("wt1", &wt_path).unwrap();
+        std::fs::write(wt.path.join("new.txt"), "hello").unwrap();
+
+        // The change is detected from the worktree's git status.
+        let changes = worktree_changes(&wt.path);
+        assert!(changes.iter().any(|c| c.path == "new.txt" && !c.deleted));
+
+        // Landing copies it into the parent tree and removes the worktree.
+        let staging = WorktreeStaging {
+            parent_root: dir.path().to_path_buf(),
+            worktree_root: wt.path.clone(),
+            name: "wt1".into(),
+            changed: changes,
+        };
+        let n = land_worktree(&staging).unwrap();
+        assert!(n >= 1);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("new.txt")).unwrap(),
+            "hello"
+        );
+        assert!(
+            !repo
+                .list_worktrees()
+                .unwrap()
+                .contains(&"wt1".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn worktree_isolation_requires_a_git_repo() {
+        let (models, bus) = deps();
+        let delegator = Delegator::new(models, bus).with_isolation(Isolation::Worktree);
+        let agent = ReactAgent::new("mock");
+        let spec = SubAgentSpec::for_role("code-agent").unwrap();
+        let base: Arc<dyn StateStore> = Arc::new(MemStore::new());
+        let non_git = tempfile::tempdir().unwrap();
+
+        let res = delegator
+            .delegate(&agent, &spec, "do it", base, non_git.path())
+            .await;
+        assert!(res.is_err(), "worktree isolation must fail outside a git repo");
     }
 }

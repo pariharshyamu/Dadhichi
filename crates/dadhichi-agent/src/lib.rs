@@ -56,7 +56,8 @@ pub use agent::{Agent, AgentContext, AgentError, AgentOutcome, AgentStatus};
 pub use agents::{ConversationalAgent, ReactAgent, SpecialistAgent};
 pub use compaction::{CompactionPolicy, CompactionReport, estimate_tokens};
 pub use delegate::{
-    CapabilityMode, Critic, CriticVerdict, DelegationReview, Delegator, ModelCritic, SubAgentSpec,
+    CapabilityMode, Critic, CriticVerdict, DelegationReview, Delegator, Isolation, ModelCritic,
+    SubAgentSpec,
 };
 pub use memory::{Memory, MemoryItem, Tier};
 pub use memory_tools::{MemoryRecallTool, MemoryWriteTool, SharedMemory, shared_memory};

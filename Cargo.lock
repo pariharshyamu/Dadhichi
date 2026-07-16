@@ -406,6 +406,7 @@ dependencies = [
  "async-trait",
  "dadhichi-ai",
  "dadhichi-core",
+ "dadhichi-git",
  "dadhichi-mcp",
  "dadhichi-vector",
  "serde",
