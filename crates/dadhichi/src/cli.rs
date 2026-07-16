@@ -36,6 +36,9 @@ pub enum Command {
     /// Start an interactive multi-turn chat session (a persistent kernel and
     /// agent context that remembers the whole conversation until you exit).
     Chat,
+    /// List the project rules (`AGENTS.md` / `.dadhichi/rules`) that would load
+    /// for the current directory, with approximate token counts, then exit.
+    Inspect,
 }
 
 /// A `dadhichi skill …` subcommand for managing the on-disk skill library that
@@ -155,6 +158,8 @@ SUBCOMMANDS:
     delegate SUB TASK    Run specialist SUB on TASK in an isolated overlay; it
                          stages file changes, which land on the current branch
                          (git commit) only after verification or your approval.
+    inspect              List the project rules (AGENTS.md / .dadhichi/rules)
+                         that load for this directory, with token estimates.
 
 ENVIRONMENT:
     RUST_LOG              Tracing filter (e.g. `info`, `dadhichi=debug`). Defaults to `warn`.
@@ -213,6 +218,9 @@ where
         Some("chat" | "-i" | "--interactive" | "repl")
     ) {
         return Command::Chat;
+    }
+    if args.first().map(String::as_str) == Some("inspect") {
+        return Command::Inspect;
     }
 
     let mut goal_words: Vec<String> = Vec::new();
@@ -306,6 +314,7 @@ mod tests {
         assert_eq!(parse(["-i"]), Command::Chat);
         assert_eq!(parse(["--interactive"]), Command::Chat);
         assert_eq!(parse(["repl"]), Command::Chat);
+        assert_eq!(parse(["inspect"]), Command::Inspect);
     }
 
     #[test]

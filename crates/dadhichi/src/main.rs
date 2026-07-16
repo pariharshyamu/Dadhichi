@@ -31,7 +31,7 @@ use std::sync::Arc;
 
 use dadhichi_agent::{
     Agent, AgentContext, ConversationalAgent, MemoryRecallTool, MemoryWriteTool, Orchestrator,
-    ReactAgent, SemanticMemory, SpecialistAgent, Workflow, shared_memory,
+    ProjectRules, ReactAgent, SemanticMemory, SpecialistAgent, Workflow, shared_memory,
 };
 use dadhichi_ai::{MockEmbedder, ProviderPlan};
 use dadhichi_cache::RocksBlobCache;
@@ -94,6 +94,10 @@ async fn run() {
         cli::Command::Chat => {
             init_tracing();
             run_chat().await;
+            return;
+        }
+        cli::Command::Inspect => {
+            print_project_rules();
             return;
         }
         cli::Command::Run { goal } => goal,
@@ -205,7 +209,7 @@ async fn run() {
         ctx.memory
             .remember(dadhichi_agent::Tier::Working, format!("user goal: {goal}"));
 
-        let agent = ReactAgent::new(&model_id);
+        let agent = with_project_rules(ReactAgent::new(&model_id), &cwd);
         match agent.run(&goal, &mut ctx).await {
             Ok(outcome) => {
                 println!(
@@ -468,6 +472,48 @@ async fn run() {
 /// remembers the whole conversation (unlike the one-shot `dadhichi <goal>`,
 /// which boots fresh each time and leans on the on-disk session file). Prior
 /// workspace context is loaded on start and the session is saved on exit.
+/// Discover the project rules for `cwd` and fold them into `agent`'s prompt,
+/// printing a one-line note when any are found. A no-op when there are none.
+fn with_project_rules(agent: ReactAgent, cwd: &std::path::Path) -> ReactAgent {
+    let rules = ProjectRules::discover(cwd);
+    match rules.as_prompt_block() {
+        Some(block) => {
+            println!(
+                "dadhichi ▸ project rules: {} file(s), ~{} tokens",
+                rules.files.len(),
+                rules.approx_tokens()
+            );
+            agent.with_project_rules(block)
+        }
+        None => agent,
+    }
+}
+
+/// Print the project rules that would load for the current directory — the
+/// `dadhichi inspect` subcommand.
+fn print_project_rules() {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
+    let rules = ProjectRules::discover(&cwd);
+    if rules.is_empty() {
+        println!(
+            "No project rules found for {}.\n\
+             (Looked for AGENTS.md / AGENT.md / CLAUDE.md / CLAUDE.local.md and \
+             .dadhichi/rules/*.md from the repo root down to the working directory.)",
+            cwd.display()
+        );
+        return;
+    }
+    println!(
+        "Project rules for {} — {} file(s), ~{} tokens total:",
+        cwd.display(),
+        rules.files.len(),
+        rules.approx_tokens()
+    );
+    for f in &rules.files {
+        println!("  {}  (~{} tokens)", f.path.display(), f.approx_tokens);
+    }
+}
+
 async fn run_chat() {
     use std::io::Write;
 
@@ -531,7 +577,7 @@ async fn run_chat() {
         println!("dadhichi ▸ resumed session ({} items) — last: {recap}", prior_session.len());
     }
 
-    let agent = ReactAgent::new(&model_id);
+    let agent = with_project_rules(ReactAgent::new(&model_id), &cwd);
     println!("dadhichi ▸ chat ready. Type a goal; 'exit' or Ctrl-D to quit.\n");
 
     let stdin = std::io::stdin();
