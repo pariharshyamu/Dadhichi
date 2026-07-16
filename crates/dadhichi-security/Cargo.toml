@@ -18,5 +18,10 @@ thiserror.workspace = true
 chacha20poly1305 = "0.10"
 sha2 = "0.10"
 
+# OS-level sandbox backend. Linux-only: the crate builds a Landlock ruleset.
+# On other targets the sandbox reports `Unsupported` and no backend is pulled.
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock = "0.4"
+
 [dev-dependencies]
 tempfile = "3"

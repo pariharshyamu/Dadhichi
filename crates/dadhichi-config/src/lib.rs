@@ -35,6 +35,10 @@ pub struct Config {
     /// enterprise `requirements.toml`. When set, a `mode` of `bypass` is
     /// downgraded to `default`.
     pub bypass_locked: bool,
+    /// The requested OS sandbox profile name (`workspace` / `read-only` /
+    /// `strict` / `off`), from `[sandbox] profile`. The binary resolves and
+    /// applies it; `None` means no sandbox.
+    pub sandbox: Option<String>,
     /// Non-fatal problems encountered while loading (bad rule strings, unknown
     /// tools, unreadable optional files). Loading never fails on these.
     pub warnings: Vec<String>,
@@ -70,6 +74,7 @@ impl Config {
                 // An enterprise file contributes rules and can set a mode like
                 // any source, but additionally carries the bypass lock.
                 config.apply_permission(raw.permission);
+                config.apply_sandbox(raw.sandbox);
                 if raw
                     .ui
                     .and_then(|u| u.disable_bypass_permissions_mode)
@@ -89,6 +94,13 @@ impl Config {
     fn merge_file(&mut self, path: &Path) {
         if let Some(raw) = read_raw(path, &mut self.warnings) {
             self.apply_permission(raw.permission);
+            self.apply_sandbox(raw.sandbox);
+        }
+    }
+
+    fn apply_sandbox(&mut self, sandbox: Option<RawSandbox>) {
+        if let Some(profile) = sandbox.and_then(|s| s.profile) {
+            self.sandbox = Some(profile);
         }
     }
 
@@ -165,6 +177,12 @@ fn home_dir() -> Option<PathBuf> {
 struct RawConfig {
     permission: Option<RawPermission>,
     ui: Option<RawUi>,
+    sandbox: Option<RawSandbox>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawSandbox {
+    profile: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -319,6 +337,19 @@ mod tests {
         assert!(cfg.bypass_locked);
         // bypass was requested but is locked off ⇒ downgraded to default.
         assert_eq!(cfg.mode, SessionMode::Default);
+    }
+
+    #[test]
+    fn reads_sandbox_profile_deeper_wins() {
+        let dir = tempfile::tempdir().unwrap();
+        let global = write(
+            dir.path(),
+            "global.toml",
+            "[sandbox]\nprofile = \"workspace\"\n",
+        );
+        let project = write(dir.path(), "project.toml", "[sandbox]\nprofile = \"strict\"\n");
+        let cfg = Config::load_layered(&[global, project], None);
+        assert_eq!(cfg.sandbox.as_deref(), Some("strict"));
     }
 
     #[test]
