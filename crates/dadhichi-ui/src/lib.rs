@@ -108,6 +108,16 @@ pub struct FindState {
     pub active: bool,
 }
 
+/// The editor's go-to-line state (Ctrl+G): the line number being typed and
+/// whether the input is capturing keystrokes.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GotoState {
+    /// The digits typed so far.
+    pub input: String,
+    /// Whether the goto input line is active.
+    pub active: bool,
+}
+
 /// Which panel currently has keyboard focus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
@@ -205,6 +215,8 @@ pub struct App {
     pub status: String,
     /// The editor's incremental-find state.
     pub find: FindState,
+    /// The editor's go-to-line state.
+    pub goto: GotoState,
     /// The internal clipboard, shared across buffers, holding the text of the
     /// last cut or copy. An in-process buffer (not the OS clipboard) so copy /
     /// paste works headlessly and identically on every platform.
@@ -240,6 +252,7 @@ impl Default for App {
             delegation_review: None,
             status: "ready".into(),
             find: FindState::default(),
+            goto: GotoState::default(),
             clipboard: String::new(),
             chat_scroll: 0,
             explorer_visible: true,
@@ -268,10 +281,52 @@ impl App {
         self.explorer = Some(Explorer::scan(root.into()));
     }
 
-    /// Open a document, making it active.
+    /// Open a document, making it active. A file that is already open is
+    /// re-activated rather than opened twice, preserving its edits, cursor and
+    /// undo history — the way an IDE's tabs behave. Path-less scratch buffers
+    /// are always fresh.
     pub fn open_document(&mut self, path: Option<PathBuf>, text: &str) {
+        if path.is_some() {
+            if let Some(i) = self.documents.iter().position(|d| d.path == path) {
+                self.active = i;
+                return;
+            }
+        }
         self.documents.push(Document::from_str(path, text));
         self.active = self.documents.len() - 1;
+    }
+
+    /// Activate the next open buffer (tab cycling), wrapping at the end.
+    pub fn next_document(&mut self) {
+        if !self.documents.is_empty() {
+            self.active = (self.active + 1) % self.documents.len();
+        }
+    }
+
+    /// Activate the previous open buffer, wrapping at the start.
+    pub fn prev_document(&mut self) {
+        if !self.documents.is_empty() {
+            self.active = (self.active + self.documents.len() - 1) % self.documents.len();
+        }
+    }
+
+    /// Close the active buffer. Refuses (with a status hint) while it has
+    /// unsaved changes so a stray Ctrl+W can't lose work; save first, then
+    /// close. Returns whether the buffer was closed.
+    pub fn close_active_document(&mut self) -> bool {
+        let Some(doc) = self.documents.get(self.active) else {
+            return false;
+        };
+        if doc.dirty {
+            self.status = "unsaved changes — Ctrl-S to save first".into();
+            return false;
+        }
+        self.documents.remove(self.active);
+        if self.active >= self.documents.len() && self.active > 0 {
+            self.active -= 1;
+        }
+        self.status = "closed".into();
+        true
     }
 
     /// The active document, if any.
@@ -453,11 +508,65 @@ impl App {
             None => false,
         };
         self.status = if found {
-            format!("/{query}")
+            // Report which match the cursor landed on, à la an IDE's "3 of 12".
+            let (current, total) = self
+                .active_document()
+                .map(|d| d.find_stats(&query))
+                .unwrap_or((0, 0));
+            format!("/{query}  {current} of {total}")
         } else {
             format!("/{query} — not found")
         };
         found
+    }
+
+    /// Whether the go-to-line input (Ctrl+G) is capturing keystrokes.
+    pub fn is_goto(&self) -> bool {
+        self.goto.active
+    }
+
+    /// Open the go-to-line input, starting fresh.
+    pub fn goto_begin(&mut self) {
+        self.goto.active = true;
+        self.goto.input.clear();
+        self.status = "goto line:".into();
+    }
+
+    /// Append a digit to the go-to-line input (non-digits are ignored).
+    pub fn goto_push(&mut self, c: char) {
+        if c.is_ascii_digit() {
+            self.goto.input.push(c);
+            self.status = format!("goto line: {}", self.goto.input);
+        }
+    }
+
+    /// Delete the last digit of the go-to-line input.
+    pub fn goto_backspace(&mut self) {
+        self.goto.input.pop();
+        self.status = format!("goto line: {}", self.goto.input);
+    }
+
+    /// Close the go-to-line input without jumping.
+    pub fn goto_close(&mut self) {
+        self.goto.active = false;
+        self.status = "ready".into();
+    }
+
+    /// Jump to the typed line and close the input. Returns whether a jump
+    /// happened (false on an empty/invalid number).
+    pub fn goto_run(&mut self) -> bool {
+        self.goto.active = false;
+        let Ok(n) = self.goto.input.parse::<usize>() else {
+            self.status = "ready".into();
+            return false;
+        };
+        if let Some(doc) = self.active_document_mut() {
+            doc.goto_line(n);
+            let line = doc.cursor_line_col().0 + 1;
+            self.status = format!("Ln {line}");
+            return true;
+        }
+        false
     }
 
     /// The current clipboard contents (the last cut or copy).
@@ -1039,6 +1148,89 @@ mod tests {
         assert_eq!(doc.text(), "abcd");
         assert!(doc.undo()); // undo the cut
         assert_eq!(doc.text(), "abcdef");
+    }
+
+    #[test]
+    fn open_document_dedupes_by_path_and_tabs_cycle() {
+        let mut app = App::new();
+        app.open_document(Some("a.rs".into()), "aaa");
+        app.open_document(Some("b.rs".into()), "bbb");
+        assert_eq!(app.documents.len(), 2);
+        assert_eq!(app.active, 1);
+
+        // Re-opening a.rs re-activates the existing buffer — no duplicate tab —
+        // and preserves its (edited) contents.
+        app.active_document_mut().unwrap().insert("x");
+        app.open_document(Some("a.rs".into()), "aaa");
+        assert_eq!(app.documents.len(), 2);
+        assert_eq!(app.active, 0);
+        assert_eq!(app.documents[1].text(), "xbbb", "edits survived");
+
+        // Tab cycling wraps both ways.
+        app.next_document();
+        assert_eq!(app.active, 1);
+        app.next_document();
+        assert_eq!(app.active, 0);
+        app.prev_document();
+        assert_eq!(app.active, 1);
+
+        // Scratch buffers (no path) never dedupe.
+        app.open_document(None, "");
+        app.open_document(None, "");
+        assert_eq!(app.documents.len(), 4);
+    }
+
+    #[test]
+    fn close_refuses_dirty_buffers_then_closes_clean_ones() {
+        let mut app = App::new();
+        app.open_document(Some("a.rs".into()), "aaa");
+        app.open_document(Some("b.rs".into()), "bbb");
+        app.active_document_mut().unwrap().insert("!");
+
+        // Dirty: refused with a status hint.
+        assert!(!app.close_active_document());
+        assert_eq!(app.documents.len(), 2);
+        assert!(app.status.contains("unsaved"));
+
+        // Saved: closes, and the active index clamps to a valid tab.
+        app.active_document_mut().unwrap().mark_saved();
+        assert!(app.close_active_document());
+        assert_eq!(app.documents.len(), 1);
+        assert_eq!(app.active, 0);
+    }
+
+    #[test]
+    fn goto_line_flow_jumps_the_cursor() {
+        let mut app = App::new();
+        let text: String = (0..30).map(|n| format!("line {n}\n")).collect();
+        app.open_document(Some("f.rs".into()), &text);
+
+        app.goto_begin();
+        assert!(app.is_goto());
+        app.goto_push('1');
+        app.goto_push('x'); // non-digit ignored
+        app.goto_push('2');
+        assert_eq!(app.goto.input, "12");
+        assert!(app.goto_run());
+        assert!(!app.is_goto());
+        assert_eq!(app.active_document().unwrap().cursor_line_col().0, 11);
+        assert!(app.status.contains("Ln 12"));
+
+        // An empty input is a no-op.
+        app.goto_begin();
+        assert!(!app.goto_run());
+    }
+
+    #[test]
+    fn find_status_reports_match_position() {
+        let mut app = App::new();
+        app.open_document(Some("f.rs".into()), "foo foo foo");
+        app.find_begin();
+        for c in "foo".chars() {
+            app.find_push(c);
+        }
+        assert!(app.find_run(true));
+        assert!(app.status.contains("2 of 3"), "status was: {}", app.status);
     }
 
     #[test]

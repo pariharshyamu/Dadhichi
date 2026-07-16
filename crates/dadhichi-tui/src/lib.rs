@@ -214,13 +214,41 @@ fn render_explorer(app: &App, frame: &mut Frame, area: Rect) {
 }
 
 fn render_editor(app: &App, frame: &mut Frame, area: Rect) {
-    let title = app
-        .active_document()
-        .and_then(|d| d.path.as_ref())
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|| "scratch".into());
-    let heading = format!("Editor — {title}");
-    let block = panel(&heading, app.focus() == Focus::Editor);
+    let focused = app.focus() == Focus::Editor;
+
+    // The title doubles as a tab strip: every open buffer by file name, a ● on
+    // unsaved ones, the active tab highlighted — Ctrl+PgUp/PgDn cycles them.
+    let mut title = vec![Span::styled(
+        "Editor",
+        Style::default().fg(Color::DarkGray),
+    )];
+    for (i, doc) in app.documents.iter().enumerate() {
+        title.push(Span::styled("▕", Style::default().fg(Color::DarkGray)));
+        let name = doc
+            .path
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "scratch".into());
+        let dirty = if doc.dirty { " ●" } else { "" };
+        let style = if i == app.active {
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+        title.push(Span::styled(format!(" {name}{dirty} "), style));
+    }
+    let border = if focused {
+        Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(Line::from(title))
+        .border_style(border);
 
     // Render the slice of lines currently scrolled into view, numbered by their
     // absolute position so the gutter stays truthful as the buffer scrolls. Lines
@@ -231,10 +259,15 @@ fn render_editor(app: &App, frame: &mut Frame, area: Rect) {
         .active_document()
         .and_then(|d| d.path.as_ref())
         .map(|p| p.display().to_string());
+    let query = if app.find.query.is_empty() {
+        None
+    } else {
+        Some(app.find.query.as_str())
+    };
     let lines: Vec<Line> = match app.active_document() {
         Some(doc) => {
             let top = doc.scroll();
-            let cursor_line = doc.cursor_line_col().0;
+            let (cursor_line, cursor_col) = doc.cursor_line_col();
             let selection = doc.selection();
             (top..(top + rows).min(doc.line_count()))
                 .map(|n| {
@@ -258,21 +291,44 @@ fn render_editor(app: &App, frame: &mut Frame, area: Rect) {
                     } else {
                         Style::default().fg(Color::DarkGray)
                     };
-                    // Syntax-colour the code so tokens are legible instead of a
-                    // flat monochrome wall; the cursor line is additionally bold.
+
+                    // Layer the line up like an editor compositor: syntax colour
+                    // first, then find-match highlights, then the selection, and
+                    // the block caret on top.
+                    let mut content = highlight_code(&text, on_cursor);
+                    if let Some(q) = query {
+                        for (byte, m) in text.match_indices(q) {
+                            let s = text[..byte].chars().count();
+                            let e = s + m.chars().count();
+                            content = apply_overlay(content, s, e, |st| {
+                                st.bg(Color::Yellow).fg(Color::Black)
+                            });
+                        }
+                    }
+                    if let Some((gs, ge)) = selection {
+                        let line_start = doc.line_start(n);
+                        let line_len = text.chars().count();
+                        let s = gs.max(line_start).saturating_sub(line_start).min(line_len);
+                        let e = ge.min(line_start + line_len).saturating_sub(line_start);
+                        content =
+                            apply_overlay(content, s, e, |st| st.add_modifier(Modifier::REVERSED));
+                    }
+                    if focused && on_cursor {
+                        let caret = |_: Style| Style::default().bg(Color::White).fg(Color::Black);
+                        if cursor_col < text.chars().count() {
+                            content = apply_overlay(content, cursor_col, cursor_col + 1, caret);
+                        } else {
+                            // Caret past the end of the line: draw it as a block
+                            // in the empty cell after the text.
+                            content.push(Span::styled(" ", caret(Style::default())));
+                        }
+                    }
+
                     let mut spans = vec![
                         Span::styled(marker, marker_style),
                         Span::styled(format!("{:>4} ", n + 1), gutter_style),
                     ];
-                    // Overlay the selection: syntax-highlight the parts outside
-                    // it and draw the selected span reversed so a multi-line
-                    // selection reads clearly across the pane.
-                    spans.extend(line_content_spans(
-                        &text,
-                        selection,
-                        doc.line_start(n),
-                        on_cursor,
-                    ));
+                    spans.extend(content);
                     Line::from(spans)
                 })
                 .collect()
@@ -522,20 +578,31 @@ fn render_status(app: &App, frame: &mut Frame, area: Rect) {
     // The hint line follows focus: in the editor, surface the editing shortcuts;
     // elsewhere, the global navigation ones.
     let hint = if app.focus() == Focus::Editor {
-        "  Ctrl-S save · Ctrl-F find · Ctrl-Z/Y undo/redo · Ctrl-X/C/V cut/copy/paste · Shift+↦ select · Tab focus"
+        "  Ctrl-Z/Y undo · Ctrl-X/C/V clip · Ctrl-G goto · Ctrl-/ comment · Alt-↑↓ move ln · Ctrl-D dup · Ctrl-W close · S-Tab focus"
     } else {
         "  Enter run · Ctrl-P palette · Ctrl-B explorer · PgUp/PgDn scroll · Tab focus · Ctrl-Q quit"
     };
-    let line = Line::from(vec![
+    let mut spans = vec![
         Span::styled(
             " dadhichi ",
             Style::default().bg(Color::Green).fg(Color::Black),
         ),
         Span::raw(format!(" {} ", app.status)),
-        Span::styled(format!("[{focus}]"), Style::default().fg(Color::DarkGray)),
-        Span::raw(hint),
-    ]);
-    frame.render_widget(Paragraph::new(line), area);
+    ];
+    // The cursor position, VS Code style, whenever a buffer is open.
+    if let Some(doc) = app.active_document() {
+        let (line, col) = doc.cursor_line_col();
+        spans.push(Span::styled(
+            format!("Ln {}, Col {} ", line + 1, col + 1),
+            Style::default().fg(Color::Cyan),
+        ));
+    }
+    spans.push(Span::styled(
+        format!("[{focus}]"),
+        Style::default().fg(Color::DarkGray),
+    ));
+    spans.push(Span::raw(hint));
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn render_palette(app: &App, frame: &mut Frame, area: Rect) {
@@ -609,37 +676,52 @@ fn short_file(uri: &str) -> String {
     uri.rsplit(['/', '\\']).next().unwrap_or(uri).to_string()
 }
 
-/// Build the styled spans for one editor line, overlaying the selection (if it
-/// intersects this line) on top of syntax highlighting. `selection` is the
-/// buffer-wide `(start, end)` char range; `line_start` is this line's first char
-/// offset. The parts outside the selection are syntax-highlighted; the selected
-/// part is drawn reversed. A line the selection misses is highlighted whole.
-fn line_content_spans(
-    text: &str,
-    selection: Option<(usize, usize)>,
-    line_start: usize,
-    on_cursor: bool,
+/// Re-style the char columns `[start, end)` of a styled line, splitting spans at
+/// the boundaries and applying `restyle` to the covered slice while leaving the
+/// rest untouched. This is the compositor primitive the editor stacks its
+/// overlays with — find-match highlights, the selection, and the caret each
+/// apply on top of the syntax colouring without disturbing it elsewhere.
+fn apply_overlay(
+    spans: Vec<Span<'static>>,
+    start: usize,
+    end: usize,
+    restyle: impl Fn(Style) -> Style,
 ) -> Vec<Span<'static>> {
-    let line_len = text.chars().count();
-    if let Some((gs, ge)) = selection {
-        // Clamp the selection to this line's visible columns [0, line_len].
-        let start = gs.max(line_start).saturating_sub(line_start).min(line_len);
-        let end = ge.min(line_start + line_len).saturating_sub(line_start);
-        if end > start {
-            let chars: Vec<char> = text.chars().collect();
-            let before: String = chars[..start].iter().collect();
-            let selected: String = chars[start..end].iter().collect();
-            let after: String = chars[end..].iter().collect();
-            let mut out = highlight_code(&before, on_cursor);
+    if start >= end {
+        return spans;
+    }
+    let mut out = Vec::with_capacity(spans.len() + 2);
+    let mut pos = 0;
+    for span in spans {
+        let len = span.content.chars().count();
+        let (s0, s1) = (pos, pos + len);
+        pos = s1;
+        // Entirely outside the overlay: pass through unchanged.
+        if s1 <= start || s0 >= end {
+            out.push(span);
+            continue;
+        }
+        let chars: Vec<char> = span.content.chars().collect();
+        let a = start.saturating_sub(s0);
+        let b = (end - s0).min(len);
+        if a > 0 {
             out.push(Span::styled(
-                selected,
-                Style::default().add_modifier(Modifier::REVERSED),
+                chars[..a].iter().collect::<String>(),
+                span.style,
             ));
-            out.extend(highlight_code(&after, on_cursor));
-            return out;
+        }
+        out.push(Span::styled(
+            chars[a..b].iter().collect::<String>(),
+            restyle(span.style),
+        ));
+        if b < len {
+            out.push(Span::styled(
+                chars[b..].iter().collect::<String>(),
+                span.style,
+            ));
         }
     }
-    highlight_code(text, on_cursor)
+    out
 }
 
 /// A small, language-agnostic syntax highlighter for one line of code. It has no
@@ -905,6 +987,73 @@ mod tests {
             .iter()
             .any(|c| c.modifier.contains(Modifier::REVERSED));
         assert!(reversed, "selection drawn with a reversed highlight");
+    }
+
+    #[test]
+    fn renders_the_tab_strip_with_dirty_indicator() {
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let mut app = demo_app(); // main.rs already open
+        app.open_document(Some("src/lib.rs".into()), "pub fn x() {}");
+        // Dirty the second buffer so its tab shows the ● marker.
+        app.active_document_mut().unwrap().insert("y");
+        terminal.draw(|f| render(&mut app, f)).unwrap();
+
+        let text = buffer_text(&terminal);
+        assert!(text.contains("main.rs"), "first tab listed");
+        assert!(text.contains("lib.rs ●"), "second tab shows unsaved dot");
+    }
+
+    #[test]
+    fn renders_a_block_caret_when_the_editor_is_focused() {
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let mut app = demo_app();
+        app.set_focus(Focus::Editor);
+        terminal.draw(|f| render(&mut app, f)).unwrap();
+        assert!(
+            buffer_uses_bg(&terminal, Color::White),
+            "block caret drawn on the cursor cell"
+        );
+
+        // Unfocused, the caret disappears.
+        let mut app = demo_app();
+        app.set_focus(Focus::Chat);
+        terminal.draw(|f| render(&mut app, f)).unwrap();
+        assert!(
+            !buffer_uses_bg(&terminal, Color::White),
+            "no caret while the editor is unfocused"
+        );
+    }
+
+    #[test]
+    fn highlights_find_matches_in_the_editor() {
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let mut app = demo_app(); // buffer contains "run();"
+        app.find.query = "run".into();
+        terminal.draw(|f| render(&mut app, f)).unwrap();
+        assert!(
+            buffer_uses_bg(&terminal, Color::Yellow),
+            "find matches highlighted in the buffer"
+        );
+    }
+
+    #[test]
+    fn status_bar_shows_the_cursor_position() {
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let mut app = demo_app();
+        app.set_focus(Focus::Editor);
+        // Move to line 2, col 5 (1-based: Ln 2, Col 5).
+        {
+            let doc = app.active_document_mut().unwrap();
+            doc.move_down();
+            for _ in 0..4 {
+                doc.move_right();
+            }
+        }
+        terminal.draw(|f| render(&mut app, f)).unwrap();
+        assert!(
+            buffer_text(&terminal).contains("Ln 2, Col 5"),
+            "status bar reports the cursor position"
+        );
     }
 
     #[test]

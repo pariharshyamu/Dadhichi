@@ -575,12 +575,371 @@ impl Document {
         self.open_group = None;
     }
 
+    // ---- Word-wise motion --------------------------------------------------
+
+    /// The target one word to the left: skip whitespace, then a run of chars of
+    /// the same class (identifier vs punctuation), the way VS Code's
+    /// Ctrl+Left behaves. Newlines count as whitespace, so the motion crosses
+    /// line boundaries.
+    fn word_left_target(&self) -> usize {
+        let mut i = self.cursor;
+        while i > 0 && self.rope.char(i - 1).is_whitespace() {
+            i -= 1;
+        }
+        if i > 0 {
+            let class = is_word_char(self.rope.char(i - 1));
+            while i > 0 {
+                let c = self.rope.char(i - 1);
+                if c.is_whitespace() || is_word_char(c) != class {
+                    break;
+                }
+                i -= 1;
+            }
+        }
+        i
+    }
+
+    /// The target one word to the right (mirror of [`word_left_target`]).
+    fn word_right_target(&self) -> usize {
+        let len = self.rope.len_chars();
+        let mut i = self.cursor;
+        while i < len && self.rope.char(i).is_whitespace() {
+            i += 1;
+        }
+        if i < len {
+            let class = is_word_char(self.rope.char(i));
+            while i < len {
+                let c = self.rope.char(i);
+                if c.is_whitespace() || is_word_char(c) != class {
+                    break;
+                }
+                i += 1;
+            }
+        }
+        i
+    }
+
+    /// Move the cursor one word left, collapsing any selection.
+    pub fn move_word_left(&mut self) {
+        let t = self.word_left_target();
+        self.go(t, false);
+    }
+
+    /// Move the cursor one word right, collapsing any selection.
+    pub fn move_word_right(&mut self) {
+        let t = self.word_right_target();
+        self.go(t, false);
+    }
+
+    /// Extend the selection one word left.
+    pub fn select_word_left(&mut self) {
+        let t = self.word_left_target();
+        self.go(t, true);
+    }
+
+    /// Extend the selection one word right.
+    pub fn select_word_right(&mut self) {
+        let t = self.word_right_target();
+        self.go(t, true);
+    }
+
+    /// Delete from the previous word boundary to the cursor (Ctrl+Backspace) as
+    /// one discrete undo step. With a selection active, deletes the selection.
+    pub fn delete_word_back(&mut self) {
+        if self.has_selection() {
+            self.delete_selection();
+            return;
+        }
+        let target = self.word_left_target();
+        if target < self.cursor {
+            self.edit(target, self.cursor - target, "", EditKind::Delete);
+            self.cursor = target;
+            self.open_group = None;
+        }
+    }
+
+    // ---- Whole-line operations ----------------------------------------------
+
+    /// The char span `[start, end)` of line `l`, where `end` is the start of the
+    /// next line (so the span includes the trailing newline when there is one).
+    fn line_span(&self, l: usize) -> (usize, usize) {
+        let start = self.rope.line_to_char(l);
+        let end = if l + 1 < self.rope.len_lines() {
+            self.rope.line_to_char(l + 1)
+        } else {
+            self.rope.len_chars()
+        };
+        (start, end)
+    }
+
+    /// Duplicate the cursor's line below it, moving the cursor into the copy at
+    /// the same column, as one undo step.
+    pub fn duplicate_line(&mut self) {
+        let (line, col) = self.cursor_line_col();
+        let (start, end) = self.line_span(line);
+        if start == end {
+            return; // the phantom empty line after a trailing newline
+        }
+        let text = self.rope.slice(start..end).to_string();
+        if text.ends_with('\n') {
+            self.edit(end, 0, &text, EditKind::Replace);
+            self.cursor = end + col;
+        } else {
+            // Last line without a newline: the copy needs a separator.
+            let insert = format!("\n{text}");
+            self.edit(end, 0, &insert, EditKind::Replace);
+            self.cursor = end + 1 + col;
+        }
+        self.anchor = None;
+        self.open_group = None;
+    }
+
+    /// Swap the cursor's line with the one above, keeping the cursor on its line
+    /// (VS Code's Alt+Up). One undo step; no-op on the first line.
+    pub fn move_line_up(&mut self) {
+        let (line, col) = self.cursor_line_col();
+        if line == 0 {
+            return;
+        }
+        self.swap_lines(line - 1, line);
+        self.cursor = self.rope.line_to_char(line - 1) + col;
+        self.anchor = None;
+        self.open_group = None;
+    }
+
+    /// Swap the cursor's line with the one below (VS Code's Alt+Down). One undo
+    /// step; no-op on the last line.
+    pub fn move_line_down(&mut self) {
+        let (line, col) = self.cursor_line_col();
+        if line + 1 >= self.rope.len_lines() {
+            return;
+        }
+        let (next_start, next_end) = self.line_span(line + 1);
+        if next_start == next_end {
+            return; // below is only the phantom line after a trailing newline
+        }
+        self.swap_lines(line, line + 1);
+        self.cursor = self.rope.line_to_char(line + 1) + col;
+        self.anchor = None;
+        self.open_group = None;
+    }
+
+    /// Replace lines `a` and `a+1 == b` with each other, normalising the trailing
+    /// newline so swapping with a final newline-less line stays line-shaped.
+    fn swap_lines(&mut self, a: usize, b: usize) {
+        debug_assert_eq!(a + 1, b);
+        let (a_start, a_end) = self.line_span(a);
+        let (_, b_end) = self.line_span(b);
+        let mut first = self.rope.slice(a_start..a_end).to_string();
+        let mut second = self.rope.slice(a_end..b_end).to_string();
+        if !second.ends_with('\n') {
+            // The lower line lacked a newline; after the swap it sits on top and
+            // needs one, while the upper line (now last) sheds its own.
+            second.push('\n');
+            first.pop();
+        }
+        let swapped = format!("{second}{first}");
+        self.edit(a_start, b_end - a_start, &swapped, EditKind::Replace);
+    }
+
+    /// Delete the cursor's whole line (VS Code's Ctrl+Shift+K) as one undo step,
+    /// keeping the cursor at the same column on the line that takes its place.
+    pub fn delete_line(&mut self) {
+        let (line, col) = self.cursor_line_col();
+        let (mut start, end) = self.line_span(line);
+        if start == end && start > 0 {
+            // The phantom empty line after a trailing newline: deleting it means
+            // removing that newline.
+            start -= 1;
+        }
+        if start == end {
+            return; // empty buffer
+        }
+        let remove = if end == self.rope.len_chars() && start > 0 && line > 0 {
+            // Deleting the last line also removes the newline that preceded it,
+            // so the buffer doesn't keep a dangling blank line.
+            start -= 1;
+            end - start
+        } else {
+            end - start
+        };
+        self.edit(start, remove, "", EditKind::Replace);
+        let last = self.rope.len_lines().saturating_sub(1);
+        self.cursor = self.clamp_to_line(line.min(last), col);
+        self.anchor = None;
+        self.open_group = None;
+    }
+
+    /// Toggle a line comment (`prefix`, e.g. `//` or `#`) on the selected lines,
+    /// or the cursor's line when nothing is selected, as one undo step. If every
+    /// non-blank line in the range is already commented the prefixes are removed;
+    /// otherwise each non-blank line gains `prefix ` after its indentation.
+    pub fn toggle_comment(&mut self, prefix: &str) {
+        let (line, col) = self.cursor_line_col();
+        let (first, last) = match self.selection() {
+            Some((s, e)) => (
+                self.rope.char_to_line(s),
+                // `e` is exclusive; a selection ending at a line's col 0 does not
+                // include that line.
+                self.rope.char_to_line(e.saturating_sub(1).max(s)),
+            ),
+            None => (line, line),
+        };
+        let start = self.rope.line_to_char(first);
+        let (_, end) = self.line_span(last);
+        let span = self.rope.slice(start..end).to_string();
+
+        let lines: Vec<&str> = span.split_inclusive('\n').collect();
+        let mut non_blank = lines.iter().filter(|l| !l.trim().is_empty()).peekable();
+        let all_commented = non_blank.peek().is_some()
+            && non_blank.all(|l| l.trim_start().starts_with(prefix));
+
+        let rebuilt: String = lines
+            .iter()
+            .map(|l| {
+                if l.trim().is_empty() {
+                    (*l).to_string()
+                } else {
+                    let ws = l.len() - l.trim_start().len();
+                    let (indent, rest) = l.split_at(ws);
+                    if all_commented {
+                        let rest = rest.strip_prefix(prefix).unwrap_or(rest);
+                        let rest = rest.strip_prefix(' ').unwrap_or(rest);
+                        format!("{indent}{rest}")
+                    } else {
+                        format!("{indent}{prefix} {rest}")
+                    }
+                }
+            })
+            .collect();
+
+        if rebuilt != span {
+            self.edit(start, end - start, &rebuilt, EditKind::Replace);
+            self.cursor = self.clamp_to_line(line, col);
+            self.anchor = None;
+            self.open_group = None;
+        }
+    }
+
+    /// Insert a newline carrying the current line's leading whitespace, plus one
+    /// indent level when the cursor sits right after an opening `{`/`(`/`[` or a
+    /// `:` — the auto-indent every code editor performs on Enter.
+    pub fn insert_newline(&mut self) {
+        let (line, col) = self.cursor_line_col();
+        let text = self.line(line).unwrap_or_default();
+        // Only the whitespace left of the cursor: pressing Enter inside the
+        // indentation shouldn't copy indentation the cursor hasn't passed.
+        let indent: String = text
+            .chars()
+            .take(col)
+            .take_while(|c| *c == ' ' || *c == '\t')
+            .collect();
+        let opens_block = text
+            .chars()
+            .take(col)
+            .last()
+            .is_some_and(|c| matches!(c, '{' | '(' | '[' | ':'));
+        let extra = if opens_block { "    " } else { "" };
+        self.insert(&format!("\n{indent}{extra}"));
+        self.open_group = None;
+    }
+
+    /// Indent: with a selection, prepend four spaces to every selected line as
+    /// one undo step; otherwise insert four spaces at the cursor.
+    pub fn indent(&mut self) {
+        let Some((s, e)) = self.selection() else {
+            self.insert("    ");
+            return;
+        };
+        let first = self.rope.char_to_line(s);
+        let last = self.rope.char_to_line(e.saturating_sub(1).max(s));
+        let start = self.rope.line_to_char(first);
+        let (_, end) = self.line_span(last);
+        let span = self.rope.slice(start..end).to_string();
+        let rebuilt: String = span
+            .split_inclusive('\n')
+            .map(|l| {
+                if l.trim().is_empty() {
+                    l.to_string()
+                } else {
+                    format!("    {l}")
+                }
+            })
+            .collect();
+        let (line, col) = self.cursor_line_col();
+        self.edit(start, end - start, &rebuilt, EditKind::Replace);
+        self.cursor = self.clamp_to_line(line, col + 4);
+        self.anchor = None;
+        self.open_group = None;
+    }
+
+    // ---- Paging & jumps ------------------------------------------------------
+
+    /// Move the cursor `rows` lines up or down (PageUp/PageDown), preserving the
+    /// column, optionally extending the selection.
+    pub fn move_page(&mut self, down: bool, rows: usize, extend: bool) {
+        let (line, col) = self.cursor_line_col();
+        let target_line = if down {
+            (line + rows).min(self.rope.len_lines().saturating_sub(1))
+        } else {
+            line.saturating_sub(rows)
+        };
+        let t = self.clamp_to_line(target_line, col);
+        self.go(t, extend);
+    }
+
+    /// Move the cursor to the start of the buffer (Ctrl+Home), optionally
+    /// extending the selection.
+    pub fn move_doc_start(&mut self, extend: bool) {
+        self.go(0, extend);
+    }
+
+    /// Move the cursor to the end of the buffer (Ctrl+End), optionally extending
+    /// the selection.
+    pub fn move_doc_end(&mut self, extend: bool) {
+        let t = self.rope.len_chars();
+        self.go(t, extend);
+    }
+
+    /// Jump the cursor to the start of 1-based line `n`, clamped to the buffer.
+    pub fn goto_line(&mut self, n: usize) {
+        let line = n.saturating_sub(1).min(self.rope.len_lines().saturating_sub(1));
+        let t = self.rope.line_to_char(line);
+        self.go(t, false);
+    }
+
+    /// How the cursor relates to the matches of `needle`: `(current, total)`,
+    /// where `current` is the 1-based index of the match at or before the cursor
+    /// (0 when the cursor precedes every match). Drives the find bar's `k/n`.
+    pub fn find_stats(&self, needle: &str) -> (usize, usize) {
+        if needle.is_empty() {
+            return (0, 0);
+        }
+        let text = self.rope.to_string();
+        let cursor_byte = char_to_byte(&text, self.cursor);
+        let mut total = 0;
+        let mut current = 0;
+        for (byte, _) in text.match_indices(needle) {
+            total += 1;
+            if byte <= cursor_byte {
+                current = total;
+            }
+        }
+        (current, total)
+    }
+
     /// Resolve `(line, col)` to a char offset, clamping the column to the line.
     fn clamp_to_line(&self, line: usize, col: usize) -> usize {
         let line_start = self.rope.line_to_char(line);
         let line_len = self.line(line).map(|l| l.chars().count()).unwrap_or(0);
         line_start + col.min(line_len)
     }
+}
+
+/// Whether `c` belongs to a word (identifier) rather than punctuation, for
+/// word-wise motion. Whitespace is neither and is handled separately.
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
 }
 
 /// Byte offset of the `n`-th char in `text` (clamped to its end), for bridging
@@ -816,5 +1175,184 @@ mod tests {
         assert_eq!(doc.cursor_line_col(), (1, 5));
         doc.move_line_start();
         assert_eq!(doc.cursor_line_col(), (1, 0));
+    }
+
+    #[test]
+    fn word_motion_hops_identifiers_and_punctuation() {
+        let mut doc = Document::from_str(None, "let foo_bar = baz();");
+        doc.move_word_right(); // past "let" → 3
+        assert_eq!(doc.cursor(), 3);
+        doc.move_word_right(); // past "foo_bar" → 11
+        assert_eq!(doc.cursor(), 11);
+        doc.move_word_right(); // past "=" → 13
+        assert_eq!(doc.cursor(), 13);
+        doc.move_word_right(); // past "baz" → 17
+        assert_eq!(doc.cursor(), 17);
+
+        doc.move_word_left(); // back to the start of "baz"
+        assert_eq!(doc.cursor(), 14);
+
+        // Shift+Ctrl+Left extends a selection over the word.
+        doc.move_word_right();
+        doc.select_word_left();
+        assert_eq!(doc.selected_text().as_deref(), Some("baz"));
+    }
+
+    #[test]
+    fn delete_word_back_removes_one_word_per_undo_step() {
+        let mut doc = Document::from_str(None, "hello brave world");
+        doc.move_doc_end(false);
+        doc.delete_word_back();
+        assert_eq!(doc.text(), "hello brave ");
+        doc.delete_word_back();
+        assert_eq!(doc.text(), "hello ");
+        // Each Ctrl+Backspace is a discrete undo step.
+        assert!(doc.undo());
+        assert_eq!(doc.text(), "hello brave ");
+        assert!(doc.undo());
+        assert_eq!(doc.text(), "hello brave world");
+    }
+
+    #[test]
+    fn duplicate_line_copies_below_and_moves_the_cursor_into_the_copy() {
+        let mut doc = Document::from_str(None, "one\ntwo");
+        doc.move_right(); // line 0, col 1
+        doc.duplicate_line();
+        assert_eq!(doc.text(), "one\none\ntwo");
+        assert_eq!(doc.cursor_line_col(), (1, 1));
+
+        // Duplicating the (newline-less) last line stays line-shaped.
+        doc.move_down();
+        doc.move_down(); // onto "two"
+        doc.duplicate_line();
+        assert_eq!(doc.text(), "one\none\ntwo\ntwo");
+
+        // One undo per duplicate.
+        assert!(doc.undo());
+        assert_eq!(doc.text(), "one\none\ntwo");
+    }
+
+    #[test]
+    fn move_line_up_and_down_swap_neighbours() {
+        let mut doc = Document::from_str(None, "a\nb\nc");
+        doc.move_down(); // on "b"
+        doc.move_line_up();
+        assert_eq!(doc.text(), "b\na\nc");
+        assert_eq!(doc.cursor_line_col(), (0, 0), "cursor rides its line");
+
+        doc.move_line_down();
+        assert_eq!(doc.text(), "a\nb\nc");
+        assert_eq!(doc.cursor_line_col(), (1, 0));
+
+        // Moving the newline-less last line up keeps the buffer line-shaped.
+        doc.move_down(); // on "c"
+        doc.move_line_up();
+        assert_eq!(doc.text(), "a\nc\nb");
+
+        // Boundary no-ops: first line can't go up, last can't go down.
+        let mut top = Document::from_str(None, "x\ny");
+        top.move_line_up();
+        assert_eq!(top.text(), "x\ny");
+        top.move_down();
+        top.move_line_down();
+        assert_eq!(top.text(), "x\ny");
+    }
+
+    #[test]
+    fn delete_line_removes_the_whole_line() {
+        let mut doc = Document::from_str(None, "one\ntwo\nthree");
+        doc.move_down(); // on "two"
+        doc.delete_line();
+        assert_eq!(doc.text(), "one\nthree");
+        assert_eq!(doc.cursor_line_col(), (1, 0));
+
+        // Deleting the last line also drops the preceding newline.
+        doc.delete_line();
+        assert_eq!(doc.text(), "one");
+
+        // Undo restores each deletion.
+        assert!(doc.undo());
+        assert_eq!(doc.text(), "one\nthree");
+    }
+
+    #[test]
+    fn toggle_comment_adds_and_removes_prefixes() {
+        let mut doc = Document::from_str(None, "    let x = 1;");
+        doc.toggle_comment("//");
+        assert_eq!(doc.text(), "    // let x = 1;");
+        doc.toggle_comment("//");
+        assert_eq!(doc.text(), "    let x = 1;");
+
+        // A multi-line selection comments every non-blank line; blank lines are
+        // untouched. A mixed range (some commented) gets commented throughout.
+        let mut doc = Document::from_str(None, "a\n\nb\n");
+        doc.select_all();
+        doc.toggle_comment("#");
+        assert_eq!(doc.text(), "# a\n\n# b\n");
+        doc.select_all();
+        doc.toggle_comment("#");
+        assert_eq!(doc.text(), "a\n\nb\n");
+    }
+
+    #[test]
+    fn enter_auto_indents_and_opens_blocks() {
+        let mut doc = Document::from_str(None, "    foo {");
+        doc.move_line_end();
+        doc.insert_newline();
+        // Carries the 4-space indent and adds a level for the open brace.
+        assert_eq!(doc.text(), "    foo {\n        ");
+        assert_eq!(doc.cursor_line_col(), (1, 8));
+
+        // Plain continuation keeps only the existing indent.
+        doc.insert("bar");
+        doc.insert_newline();
+        assert_eq!(doc.line(2).as_deref(), Some("        "));
+    }
+
+    #[test]
+    fn indent_inserts_spaces_or_indents_selected_lines() {
+        let mut doc = Document::from_str(None, "a");
+        doc.indent();
+        assert_eq!(doc.text(), "    a");
+
+        let mut doc = Document::from_str(None, "a\nb");
+        doc.select_all();
+        doc.indent();
+        assert_eq!(doc.text(), "    a\n    b");
+        // One undo step for the block indent.
+        assert!(doc.undo());
+        assert_eq!(doc.text(), "a\nb");
+    }
+
+    #[test]
+    fn page_moves_and_document_jumps() {
+        let text: String = (0..50).map(|n| format!("line {n}\n")).collect();
+        let mut doc = Document::from_str(None, &text);
+        doc.move_page(true, 20, false);
+        assert_eq!(doc.cursor_line_col().0, 20);
+        doc.move_page(false, 5, false);
+        assert_eq!(doc.cursor_line_col().0, 15);
+
+        doc.move_doc_end(false);
+        assert_eq!(doc.cursor(), doc.text().chars().count());
+        doc.move_doc_start(false);
+        assert_eq!(doc.cursor(), 0);
+
+        // goto_line is 1-based and clamps past the end.
+        doc.goto_line(10);
+        assert_eq!(doc.cursor_line_col().0, 9);
+        doc.goto_line(9999);
+        assert_eq!(doc.cursor_line_col().0, doc.line_count() - 1);
+    }
+
+    #[test]
+    fn find_stats_report_current_of_total() {
+        let mut doc = Document::from_str(None, "foo bar foo baz foo");
+        assert_eq!(doc.find_stats("foo"), (1, 3), "cursor at 0 sits on match 1");
+        doc.find_next("foo");
+        assert_eq!(doc.find_stats("foo"), (2, 3));
+        doc.find_next("foo");
+        assert_eq!(doc.find_stats("foo"), (3, 3));
+        assert_eq!(doc.find_stats("zzz"), (0, 0));
     }
 }

@@ -157,6 +157,21 @@ async fn handle_key(ctrl: &mut AppController, code: KeyCode, mods: KeyModifiers)
         return false;
     }
 
+    // While the go-to-line input is open (Ctrl+G) it captures keystrokes: digits
+    // build the line number, Enter jumps, Esc cancels.
+    if ctrl.ui().is_goto() {
+        match code {
+            KeyCode::Enter => {
+                ctrl.ui_mut().goto_run();
+            }
+            KeyCode::Esc => ctrl.ui_mut().goto_close(),
+            KeyCode::Backspace => ctrl.ui_mut().goto_backspace(),
+            KeyCode::Char(c) => ctrl.ui_mut().goto_push(c),
+            _ => {}
+        }
+        return false;
+    }
+
     // A pending tool-approval prompt captures the next keystroke globally: `y`
     // approves the parked call, `n`/Esc rejects it. Nothing else is dispatched
     // until it's answered, so a shell command can't slip past the gate.
@@ -208,58 +223,122 @@ async fn handle_key(ctrl: &mut AppController, code: KeyCode, mods: KeyModifiers)
     }
 
     // The editor owns text input. It's handled before the generic navigation
-    // match so ordinary keys (`q`, Esc) act on the buffer instead of quitting:
-    // typing inserts, Shift+arrows/Home/End extend a selection, plain arrows
-    // move and collapse it, and the usual editor shortcuts apply — Ctrl-Z/Y
-    // undo/redo, Ctrl-X/C/V cut/copy/paste, Ctrl-A select-all. (Ctrl-S save and
-    // Ctrl-F find are handled globally above.)
+    // match so ordinary keys (`q`, Esc) act on the buffer instead of quitting.
+    // The keymap mirrors VS Code where a terminal allows: word-wise motion on
+    // Ctrl+arrows, Alt+↑↓ to move lines, Ctrl+D duplicate, Ctrl+Shift+K delete
+    // line, Ctrl+/ toggle comment, Ctrl+G go to line, Ctrl+W close tab,
+    // Ctrl+PgUp/PgDn switch tabs, Tab indents, Shift+Tab cycles focus. (Ctrl-S
+    // save and Ctrl-F find are handled globally above.)
     if ctrl.ui().focus() == Focus::Editor {
         let shift = mods.contains(KeyModifiers::SHIFT);
-        match (code, mods) {
-            (KeyCode::Char('z'), KeyModifiers::CONTROL) => {
+        let control = mods.contains(KeyModifiers::CONTROL);
+        let alt = mods.contains(KeyModifiers::ALT);
+        match code {
+            // -- Ctrl+letter commands (history, clipboard, line ops, tabs) --
+            KeyCode::Char(c) if control => match c.to_ascii_lowercase() {
+                'z' if shift => {
+                    if let Some(doc) = ctrl.ui_mut().active_document_mut() {
+                        doc.redo();
+                    }
+                }
+                'z' => {
+                    if let Some(doc) = ctrl.ui_mut().active_document_mut() {
+                        doc.undo();
+                    }
+                }
+                'y' => {
+                    if let Some(doc) = ctrl.ui_mut().active_document_mut() {
+                        doc.redo();
+                    }
+                }
+                'a' => {
+                    if let Some(doc) = ctrl.ui_mut().active_document_mut() {
+                        doc.select_all();
+                    }
+                }
+                'c' => {
+                    ctrl.ui_mut().copy_selection();
+                }
+                'x' => {
+                    ctrl.ui_mut().cut_selection();
+                }
+                'v' => {
+                    ctrl.ui_mut().paste();
+                }
+                'g' => ctrl.ui_mut().goto_begin(),
+                'd' => {
+                    if let Some(doc) = ctrl.ui_mut().active_document_mut() {
+                        doc.duplicate_line();
+                    }
+                }
+                'k' => {
+                    if let Some(doc) = ctrl.ui_mut().active_document_mut() {
+                        doc.delete_line();
+                    }
+                }
+                'w' => {
+                    ctrl.ui_mut().close_active_document();
+                }
+                '/' | '_' => {
+                    let prefix = comment_prefix(
+                        ctrl.ui().active_document().and_then(|d| d.path.as_deref()),
+                    );
+                    if let Some(doc) = ctrl.ui_mut().active_document_mut() {
+                        doc.toggle_comment(prefix);
+                    }
+                }
+                // Many terminals deliver Ctrl+Backspace as Ctrl+H.
+                'h' => {
+                    if let Some(doc) = ctrl.ui_mut().active_document_mut() {
+                        doc.delete_word_back();
+                    }
+                }
+                _ => {}
+            },
+            // Tab indents (line-aware with a selection); Shift+Tab leaves the
+            // editor, since Tab itself is taken by indentation.
+            KeyCode::Tab => {
                 if let Some(doc) = ctrl.ui_mut().active_document_mut() {
-                    doc.undo();
+                    doc.indent();
                 }
             }
-            (KeyCode::Char('y'), KeyModifiers::CONTROL) => {
+            KeyCode::BackTab => ctrl.ui_mut().cycle_focus(),
+            KeyCode::Left => {
                 if let Some(doc) = ctrl.ui_mut().active_document_mut() {
-                    doc.redo();
-                }
-            }
-            (KeyCode::Char('a'), KeyModifiers::CONTROL) => {
-                if let Some(doc) = ctrl.ui_mut().active_document_mut() {
-                    doc.select_all();
-                }
-            }
-            (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
-                ctrl.ui_mut().copy_selection();
-            }
-            (KeyCode::Char('x'), KeyModifiers::CONTROL) => {
-                ctrl.ui_mut().cut_selection();
-            }
-            (KeyCode::Char('v'), KeyModifiers::CONTROL) => {
-                ctrl.ui_mut().paste();
-            }
-            (KeyCode::Tab, _) => ctrl.ui_mut().cycle_focus(),
-            (KeyCode::Left, _) => {
-                if let Some(doc) = ctrl.ui_mut().active_document_mut() {
-                    if shift {
-                        doc.select_left();
-                    } else {
-                        doc.move_left();
+                    match (control, shift) {
+                        (true, true) => doc.select_word_left(),
+                        (true, false) => doc.move_word_left(),
+                        (false, true) => doc.select_left(),
+                        (false, false) => doc.move_left(),
                     }
                 }
             }
-            (KeyCode::Right, _) => {
+            KeyCode::Right => {
                 if let Some(doc) = ctrl.ui_mut().active_document_mut() {
-                    if shift {
-                        doc.select_right();
-                    } else {
-                        doc.move_right();
+                    match (control, shift) {
+                        (true, true) => doc.select_word_right(),
+                        (true, false) => doc.move_word_right(),
+                        (false, true) => doc.select_right(),
+                        (false, false) => doc.move_right(),
                     }
                 }
             }
-            (KeyCode::Up, _) => {
+            KeyCode::Up if alt => {
+                if let Some(doc) = ctrl.ui_mut().active_document_mut() {
+                    doc.move_line_up();
+                }
+            }
+            KeyCode::Down if alt && shift => {
+                if let Some(doc) = ctrl.ui_mut().active_document_mut() {
+                    doc.duplicate_line();
+                }
+            }
+            KeyCode::Down if alt => {
+                if let Some(doc) = ctrl.ui_mut().active_document_mut() {
+                    doc.move_line_down();
+                }
+            }
+            KeyCode::Up => {
                 if let Some(doc) = ctrl.ui_mut().active_document_mut() {
                     if shift {
                         doc.select_up();
@@ -268,7 +347,7 @@ async fn handle_key(ctrl: &mut AppController, code: KeyCode, mods: KeyModifiers)
                     }
                 }
             }
-            (KeyCode::Down, _) => {
+            KeyCode::Down => {
                 if let Some(doc) = ctrl.ui_mut().active_document_mut() {
                     if shift {
                         doc.select_down();
@@ -277,49 +356,69 @@ async fn handle_key(ctrl: &mut AppController, code: KeyCode, mods: KeyModifiers)
                     }
                 }
             }
-            (KeyCode::Home, _) => {
+            KeyCode::Home => {
                 if let Some(doc) = ctrl.ui_mut().active_document_mut() {
-                    if shift {
-                        doc.select_line_start();
-                    } else {
-                        doc.move_line_start();
+                    match (control, shift) {
+                        (true, extend) => doc.move_doc_start(extend),
+                        (false, true) => doc.select_line_start(),
+                        (false, false) => doc.move_line_start(),
                     }
                 }
             }
-            (KeyCode::End, _) => {
+            KeyCode::End => {
                 if let Some(doc) = ctrl.ui_mut().active_document_mut() {
-                    if shift {
-                        doc.select_line_end();
-                    } else {
-                        doc.move_line_end();
+                    match (control, shift) {
+                        (true, extend) => doc.move_doc_end(extend),
+                        (false, true) => doc.select_line_end(),
+                        (false, false) => doc.move_line_end(),
                     }
                 }
             }
-            (KeyCode::Backspace, _) => {
+            // Ctrl+PgUp/PgDn switch tabs; plain paging moves the cursor a
+            // screenful, Shift extends the selection.
+            KeyCode::PageUp if control => ctrl.ui_mut().prev_document(),
+            KeyCode::PageDown if control => ctrl.ui_mut().next_document(),
+            KeyCode::PageUp => {
+                if let Some(doc) = ctrl.ui_mut().active_document_mut() {
+                    doc.move_page(false, 20, shift);
+                }
+            }
+            KeyCode::PageDown => {
+                if let Some(doc) = ctrl.ui_mut().active_document_mut() {
+                    doc.move_page(true, 20, shift);
+                }
+            }
+            KeyCode::Backspace if control => {
+                if let Some(doc) = ctrl.ui_mut().active_document_mut() {
+                    doc.delete_word_back();
+                }
+            }
+            KeyCode::Backspace => {
                 if let Some(doc) = ctrl.ui_mut().active_document_mut() {
                     doc.backspace();
                 }
             }
-            (KeyCode::Delete, _) => {
+            KeyCode::Delete => {
                 if let Some(doc) = ctrl.ui_mut().active_document_mut() {
                     doc.delete();
                 }
             }
-            (KeyCode::Enter, _) => {
+            // Enter auto-indents: it carries the line's indentation and deepens
+            // it after an opening brace/bracket/colon.
+            KeyCode::Enter => {
                 if let Some(doc) = ctrl.ui_mut().active_document_mut() {
-                    doc.insert("\n");
+                    doc.insert_newline();
                 }
             }
             // Esc clears the selection rather than quitting, so a stray Esc in
             // the editor doesn't tear down the app.
-            (KeyCode::Esc, _) => {
+            KeyCode::Esc => {
                 if let Some(doc) = ctrl.ui_mut().active_document_mut() {
                     doc.clear_selection();
                 }
             }
-            // Any printable key (including Shift-produced capitals) inserts,
-            // unless Ctrl is held — a Ctrl combo we don't bind is ignored.
-            (KeyCode::Char(c), m) if !m.contains(KeyModifiers::CONTROL) => {
+            // Any printable key (including Shift-produced capitals) inserts.
+            KeyCode::Char(c) => {
                 if let Some(doc) = ctrl.ui_mut().active_document_mut() {
                     doc.insert(&c.to_string());
                 }
@@ -388,6 +487,20 @@ fn resolve_approval(ctrl: &mut AppController, decision: Decision) {
     if let Some(id) = ctrl.ui().pending_approval().map(|p| p.id.clone()) {
         ctrl.resolve_approval(&id, decision);
         ctrl.ui_mut().clear_approval();
+    }
+}
+
+/// The line-comment prefix for a file, by extension: `#` for scripting/config
+/// languages, `--` for SQL/Lua/Haskell, `//` for everything curly-braced.
+fn comment_prefix(path: Option<&std::path::Path>) -> &'static str {
+    match path
+        .and_then(|p| p.extension())
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+    {
+        "py" | "sh" | "bash" | "rb" | "pl" | "toml" | "yaml" | "yml" | "conf" | "mk" | "r" => "#",
+        "sql" | "lua" | "hs" => "--",
+        _ => "//",
     }
 }
 
