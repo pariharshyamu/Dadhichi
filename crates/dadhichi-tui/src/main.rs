@@ -233,9 +233,53 @@ async fn handle_key(ctrl: &mut AppController, code: KeyCode, mods: KeyModifiers)
         let shift = mods.contains(KeyModifiers::SHIFT);
         let control = mods.contains(KeyModifiers::CONTROL);
         let alt = mods.contains(KeyModifiers::ALT);
+
+        // While the completion popup is open it owns the relevant keys:
+        // Up/Down navigate, Enter/Tab accept, Esc dismisses, and ordinary
+        // typing/backspace keeps editing while narrowing the list live. Any
+        // other key closes the popup and then acts normally.
+        if ctrl.ui().completion.is_open() {
+            match code {
+                KeyCode::Up => {
+                    ctrl.ui_mut().completion.select_prev();
+                    return false;
+                }
+                KeyCode::Down => {
+                    ctrl.ui_mut().completion.select_next();
+                    return false;
+                }
+                KeyCode::Enter | KeyCode::Tab => {
+                    ctrl.ui_mut().completion_accept();
+                    return false;
+                }
+                KeyCode::Esc => {
+                    ctrl.ui_mut().completion.close();
+                    return false;
+                }
+                KeyCode::Char(c) if !control => {
+                    if let Some(doc) = ctrl.ui_mut().active_document_mut() {
+                        doc.insert(&c.to_string());
+                    }
+                    ctrl.ui_mut().completion_refilter();
+                    return false;
+                }
+                KeyCode::Backspace => {
+                    if let Some(doc) = ctrl.ui_mut().active_document_mut() {
+                        doc.backspace();
+                    }
+                    ctrl.ui_mut().completion_refilter();
+                    return false;
+                }
+                _ => ctrl.ui_mut().completion.close(),
+            }
+        }
+
         match code {
             // -- Ctrl+letter commands (history, clipboard, line ops, tabs) --
             KeyCode::Char(c) if control => match c.to_ascii_lowercase() {
+                // Ctrl+Space asks the language server for completions at the
+                // cursor (the reply opens the popup via an lsp.completion event).
+                ' ' => ctrl.request_completions(),
                 'z' if shift => {
                     if let Some(doc) = ctrl.ui_mut().active_document_mut() {
                         doc.redo();

@@ -87,6 +87,44 @@ pub struct PublishDiagnostics {
     pub diagnostics: Vec<Diagnostic>,
 }
 
+/// A completion suggestion, flattened to what the popup needs: the label shown,
+/// a short kind tag, an optional type/detail string, and the text to insert.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompletionItem {
+    /// The label shown in the list (usually the identifier).
+    pub label: String,
+    /// A short kind tag: `fn`, `var`, `struct`, `mod`, …
+    pub kind: String,
+    /// Extra detail (a type signature, the defining module), possibly empty.
+    pub detail: String,
+    /// The text to insert when accepted.
+    pub insert: String,
+}
+
+/// Map LSP's numeric `CompletionItemKind` (1..=25) to a short tag for the popup.
+fn kind_tag(n: u64) -> &'static str {
+    match n {
+        2 => "method",
+        3 => "fn",
+        4 => "ctor",
+        5 => "field",
+        6 => "var",
+        7 => "class",
+        8 => "iface",
+        9 => "mod",
+        10 => "prop",
+        13 => "enum",
+        14 => "kw",
+        15 => "snip",
+        17 => "file",
+        20 => "member",
+        21 => "const",
+        22 => "struct",
+        25 => "type",
+        _ => "text",
+    }
+}
+
 /// Build `initialize` params rooted at `root_uri`.
 pub fn initialize_params(root_uri: &str) -> serde_json::Value {
     serde_json::json!({
@@ -97,10 +135,69 @@ pub fn initialize_params(root_uri: &str) -> serde_json::Value {
                 "hover": { "contentFormat": ["markdown", "plaintext"] },
                 "definition": {},
                 "references": {},
-                "publishDiagnostics": {}
+                "publishDiagnostics": {},
+                // Plain-text completions only: without snippetSupport a server
+                // must not send `${1:...}` placeholders we'd have to interpret.
+                "completion": { "completionItem": { "snippetSupport": false } },
+                "synchronization": { "didSave": true }
             }
         }
     })
+}
+
+/// Build `textDocument/didChange` params using **full** document sync — the
+/// whole text replaces the server's copy. Simple and always correct; the
+/// incremental protocol is an optimisation for later.
+pub fn did_change_params(uri: &str, version: i64, text: &str) -> serde_json::Value {
+    serde_json::json!({
+        "textDocument": { "uri": uri, "version": version },
+        "contentChanges": [{ "text": text }]
+    })
+}
+
+/// Parse a `textDocument/completion` result, which may be `null`, a bare array
+/// of items, or a `CompletionList { isIncomplete, items }`.
+pub fn parse_completion(result: &serde_json::Value) -> Vec<CompletionItem> {
+    let items = match result {
+        serde_json::Value::Array(items) => items.as_slice(),
+        serde_json::Value::Object(map) => map
+            .get("items")
+            .and_then(|i| i.as_array())
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]),
+        _ => &[],
+    };
+    items
+        .iter()
+        .filter_map(|item| {
+            let label = item.get("label")?.as_str()?.trim().to_string();
+            let kind = kind_tag(item.get("kind").and_then(|k| k.as_u64()).unwrap_or(1));
+            let detail = item
+                .get("detail")
+                .and_then(|d| d.as_str())
+                .unwrap_or("")
+                .to_string();
+            // Prefer insertText, then a textEdit's newText, then the label.
+            // Snippet tab-stops shouldn't appear (snippetSupport is off), but a
+            // stray final `$0` is harmless to strip.
+            let insert = item
+                .get("insertText")
+                .and_then(|t| t.as_str())
+                .or_else(|| {
+                    item.get("textEdit")
+                        .and_then(|e| e.get("newText"))
+                        .and_then(|t| t.as_str())
+                })
+                .unwrap_or(&label)
+                .replace("$0", "");
+            Some(CompletionItem {
+                label,
+                kind: kind.to_string(),
+                detail,
+                insert,
+            })
+        })
+        .collect()
 }
 
 /// Build `textDocument/didOpen` params.
@@ -225,6 +322,43 @@ mod tests {
             2
         );
         assert!(parse_locations(&serde_json::Value::Null).is_empty());
+    }
+
+    #[test]
+    fn completion_parses_lists_arrays_and_null() {
+        // Bare array form.
+        let arr = serde_json::json!([
+            { "label": "push", "kind": 2, "detail": "fn(&mut self, T)" },
+            { "label": "pop", "kind": 2, "insertText": "pop()" }
+        ]);
+        let items = parse_completion(&arr);
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].kind, "method");
+        assert_eq!(items[0].insert, "push", "label is the insert fallback");
+        assert_eq!(items[1].insert, "pop()");
+
+        // CompletionList form, with a textEdit-based insert and a snippet $0.
+        let list = serde_json::json!({
+            "isIncomplete": false,
+            "items": [{
+                "label": "main",
+                "kind": 3,
+                "textEdit": { "range": {}, "newText": "main()$0" }
+            }]
+        });
+        let items = parse_completion(&list);
+        assert_eq!(items[0].kind, "fn");
+        assert_eq!(items[0].insert, "main()", "trailing $0 stripped");
+
+        assert!(parse_completion(&serde_json::Value::Null).is_empty());
+    }
+
+    #[test]
+    fn did_change_uses_full_sync() {
+        let params = did_change_params("file:///a.rs", 3, "fn main() {}");
+        assert_eq!(params["textDocument"]["version"], 3);
+        assert_eq!(params["contentChanges"][0]["text"], "fn main() {}");
+        assert!(params["contentChanges"][0].get("range").is_none());
     }
 
     #[test]

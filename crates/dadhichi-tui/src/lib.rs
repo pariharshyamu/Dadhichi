@@ -336,6 +336,91 @@ fn render_editor(app: &App, frame: &mut Frame, area: Rect) {
         None => vec![Line::from("(no file open)")],
     };
     frame.render_widget(Paragraph::new(lines).block(block), area);
+
+    // The completion popup floats just below the cursor, IDE-style: label,
+    // kind tag, and detail per row, the selected row highlighted. Drawn last so
+    // it sits on top of the buffer.
+    if focused && app.completion.is_open() {
+        if let Some(doc) = app.active_document() {
+            render_completion_popup(app, doc, frame, area);
+        }
+    }
+}
+
+/// Draw the completion popup anchored at the cursor: below it when there's
+/// room, above it otherwise, clamped to the editor pane.
+fn render_completion_popup(
+    app: &App,
+    doc: &dadhichi_ui::Document,
+    frame: &mut Frame,
+    area: Rect,
+) {
+    let entries = app.completion.entries();
+    if entries.is_empty() {
+        return;
+    }
+    let (cursor_line, cursor_col) = doc.cursor_line_col();
+    let top = doc.scroll();
+    if cursor_line < top {
+        return; // cursor scrolled out of view — nothing to anchor to
+    }
+
+    let rows = entries.len().min(8) as u16;
+    let height = rows + 2; // + borders
+    let width = entries
+        .iter()
+        .map(|e| e.label.chars().count() + e.kind.chars().count() + e.detail.chars().count() + 4)
+        .max()
+        .unwrap_or(20)
+        .clamp(18, 48) as u16
+        + 2;
+
+    // Anchor: the cell just under the cursor (past the 6-char gutter + border).
+    let cursor_row = area.y + 1 + (cursor_line - top) as u16;
+    let mut x = area.x + 7 + cursor_col as u16;
+    let mut y = cursor_row + 1;
+    // Clamp horizontally; flip above the cursor when there's no room below.
+    if x + width > area.right() {
+        x = area.right().saturating_sub(width).max(area.x);
+    }
+    if y + height > area.bottom() {
+        y = cursor_row.saturating_sub(height).max(area.y);
+    }
+    let popup = Rect::new(x, y, width.min(area.width), height.min(area.height));
+
+    let items: Vec<ListItem> = entries
+        .iter()
+        .map(|e| {
+            let mut spans = vec![
+                Span::styled(e.label.clone(), Style::default().fg(Color::White)),
+                Span::styled(format!(" {}", e.kind), Style::default().fg(Color::Magenta)),
+            ];
+            if !e.detail.is_empty() {
+                spans.push(Span::styled(
+                    format!(" {}", e.detail),
+                    Style::default().fg(Color::DarkGray),
+                ));
+            }
+            ListItem::new(Line::from(spans))
+        })
+        .collect();
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("suggestions")
+                .border_style(Style::default().fg(Color::Cyan)),
+        )
+        .highlight_style(
+            Style::default()
+                .bg(Color::Cyan)
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD),
+        );
+    let mut state = ListState::default();
+    state.select(Some(app.completion.selected()));
+    frame.render_widget(Clear, popup);
+    frame.render_stateful_widget(list, popup, &mut state);
 }
 
 fn render_problems(app: &App, frame: &mut Frame, area: Rect) {
@@ -578,7 +663,7 @@ fn render_status(app: &App, frame: &mut Frame, area: Rect) {
     // The hint line follows focus: in the editor, surface the editing shortcuts;
     // elsewhere, the global navigation ones.
     let hint = if app.focus() == Focus::Editor {
-        "  Ctrl-Z/Y undo · Ctrl-X/C/V clip · Ctrl-G goto · Ctrl-/ comment · Alt-↑↓ move ln · Ctrl-D dup · Ctrl-W close · S-Tab focus"
+        "  C-Spc complete · Ctrl-Z/Y undo · Ctrl-X/C/V clip · Ctrl-G goto · Ctrl-/ comment · Alt-↑↓ move ln · Ctrl-W close · S-Tab focus"
     } else {
         "  Enter run · Ctrl-P palette · Ctrl-B explorer · PgUp/PgDn scroll · Tab focus · Ctrl-Q quit"
     };
@@ -987,6 +1072,43 @@ mod tests {
             .iter()
             .any(|c| c.modifier.contains(Modifier::REVERSED));
         assert!(reversed, "selection drawn with a reversed highlight");
+    }
+
+    #[test]
+    fn renders_the_completion_popup_with_suggestions() {
+        use dadhichi_ui::CompletionEntry;
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let mut app = demo_app();
+        app.set_focus(Focus::Editor);
+        app.completion.open(
+            vec![
+                CompletionEntry {
+                    label: "run_fast".into(),
+                    kind: "fn".into(),
+                    detail: "fn() -> ()".into(),
+                    insert: "run_fast()".into(),
+                },
+                CompletionEntry {
+                    label: "run_slow".into(),
+                    kind: "fn".into(),
+                    detail: String::new(),
+                    insert: "run_slow()".into(),
+                },
+            ],
+            "run",
+        );
+        terminal.draw(|f| render(&mut app, f)).unwrap();
+
+        let text = buffer_text(&terminal);
+        assert!(text.contains("suggestions"), "popup frame drawn");
+        assert!(text.contains("run_fast"), "first suggestion listed");
+        assert!(text.contains("run_slow"), "second suggestion listed");
+        assert!(text.contains("fn() -> ()"), "detail shown");
+
+        // Dismissed, the popup vanishes.
+        app.completion.close();
+        terminal.draw(|f| render(&mut app, f)).unwrap();
+        assert!(!buffer_text(&terminal).contains("suggestions"));
     }
 
     #[test]

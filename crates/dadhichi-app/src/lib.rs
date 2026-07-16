@@ -35,6 +35,7 @@ use dadhichi_skill::{
     SharedSkills, Skill, SkillAgent, SkillRegistry, SkillSpec, SkillTools, SkillWatchGuard, shared,
     watch_skills,
 };
+use dadhichi_lsp::LspManager;
 use dadhichi_ui::{App, McpEntry, PaletteAction, SkillEntry};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -80,6 +81,9 @@ pub struct AppController {
     /// A delegated sub-agent's staged work held pending the user's land/discard
     /// decision. `Some` while the Review panel is up; `resolve_delegation` takes it.
     pending_delegation: Arc<Mutex<Option<PendingDelegation>>>,
+    /// Language servers for completion (and their pushed diagnostics), spawned
+    /// lazily per language.
+    lsp: Arc<LspManager>,
 }
 
 /// A delegation held between its review and the user's land/discard decision:
@@ -378,6 +382,10 @@ impl AppController {
         }
         publish_mcp_report(kernel.bus(), &mcp_report);
 
+        // Language servers, spawned lazily per language on the first completion
+        // request. Their diagnostics feed the same bus the Problems panel reads.
+        let lsp = Arc::new(LspManager::new(&root, Some(kernel.bus().clone())));
+
         Self {
             kernel,
             ui,
@@ -393,6 +401,7 @@ impl AppController {
             root: root.clone(),
             model_id: model_id.clone(),
             pending_delegation: Arc::new(Mutex::new(None)),
+            lsp,
         }
     }
 
@@ -488,6 +497,47 @@ impl AppController {
                     "agent.error",
                     serde_json::json!({ "error": err.to_string() }),
                 ));
+            }
+        });
+    }
+
+    /// Request LSP completions for the active buffer at its cursor, **without
+    /// blocking**. The manager spawns/reuses the language server for the file's
+    /// language, syncs the buffer's *current* text (unsaved edits included),
+    /// and requests suggestions on a spawned task; the result comes back
+    /// through the bus as an `lsp.completion` event (or `lsp.status` on
+    /// failure), which `pump` routes into the completion popup. This is the
+    /// real work behind the editor's Ctrl+Space.
+    pub fn request_completions(&mut self) {
+        let Some(doc) = self.ui.active_document() else {
+            return;
+        };
+        let Some(path) = doc.path.clone() else {
+            self.ui.status = "no language server for a scratch buffer".into();
+            return;
+        };
+        let text = doc.text();
+        let (line, col) = doc.cursor_line_col();
+        let position = dadhichi_lsp::Position::new(line as u32, col as u32);
+        self.ui.status = "completing…".into();
+
+        let lsp = self.lsp.clone();
+        let bus = self.kernel.bus().clone();
+        tokio::spawn(async move {
+            match lsp.completions(&path, &text, position).await {
+                Ok(items) => {
+                    let payload = serde_json::json!({
+                        "path": path.display().to_string(),
+                        "items": serde_json::to_value(&items).unwrap_or_default(),
+                    });
+                    bus.publish(Event::new("lsp.completion", payload));
+                }
+                Err(err) => {
+                    bus.publish(Event::new(
+                        "lsp.status",
+                        serde_json::json!({ "message": err.to_string() }),
+                    ));
+                }
             }
         });
     }

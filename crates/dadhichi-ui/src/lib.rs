@@ -26,11 +26,13 @@
 //! assert_eq!(app.problems.count(), 1);
 //! ```
 
+pub mod completion;
 pub mod document;
 pub mod explorer;
 pub mod palette;
 pub mod problems;
 
+pub use completion::{CompletionEntry, CompletionMenu};
 pub use document::Document;
 pub use explorer::Explorer;
 pub use palette::{CommandPalette, McpEntry, PaletteAction, PaletteItem, SkillEntry};
@@ -217,6 +219,8 @@ pub struct App {
     pub find: FindState,
     /// The editor's go-to-line state.
     pub goto: GotoState,
+    /// The LSP-driven completion popup.
+    pub completion: CompletionMenu,
     /// The internal clipboard, shared across buffers, holding the text of the
     /// last cut or copy. An in-process buffer (not the OS clipboard) so copy /
     /// paste works headlessly and identically on every platform.
@@ -253,6 +257,7 @@ impl Default for App {
             status: "ready".into(),
             find: FindState::default(),
             goto: GotoState::default(),
+            completion: CompletionMenu::default(),
             clipboard: String::new(),
             chat_scroll: 0,
             explorer_visible: true,
@@ -569,6 +574,34 @@ impl App {
         false
     }
 
+    /// Re-filter the completion popup against the word prefix now under the
+    /// cursor — called after each keystroke while the popup is open, so typing
+    /// narrows the list and deleting widens it (auto-closing on no match).
+    pub fn completion_refilter(&mut self) {
+        if self.completion.is_open() {
+            let prefix = self
+                .active_document()
+                .map(|d| d.current_prefix())
+                .unwrap_or_default();
+            self.completion.refilter(&prefix);
+        }
+    }
+
+    /// Accept the highlighted completion: replace the typed prefix with the
+    /// entry's insert text (one undo step) and close the popup. Returns whether
+    /// anything was accepted.
+    pub fn completion_accept(&mut self) -> bool {
+        let Some(entry) = self.completion.selected_entry().cloned() else {
+            return false;
+        };
+        if let Some(doc) = self.active_document_mut() {
+            doc.accept_completion(&entry.insert);
+        }
+        self.completion.close();
+        self.status = format!("↪ {}", entry.label);
+        true
+    }
+
     /// The current clipboard contents (the last cut or copy).
     pub fn clipboard(&self) -> &str {
         &self.clipboard
@@ -669,6 +702,56 @@ impl App {
         let topic = event.topic.as_str();
         match topic {
             "lsp.diagnostics" => self.problems.apply(&event.payload),
+            // Completion suggestions arriving from the language server: open
+            // the popup filtered by the word prefix currently under the cursor.
+            "lsp.completion" => {
+                let items: Vec<CompletionEntry> = event
+                    .payload
+                    .get("items")
+                    .and_then(|i| i.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| {
+                                let get = |k: &str| {
+                                    v.get(k).and_then(|s| s.as_str()).unwrap_or("").to_string()
+                                };
+                                let label = get("label");
+                                if label.is_empty() {
+                                    return None;
+                                }
+                                let insert = {
+                                    let i = get("insert");
+                                    if i.is_empty() { label.clone() } else { i }
+                                };
+                                Some(CompletionEntry {
+                                    label,
+                                    kind: get("kind"),
+                                    detail: get("detail"),
+                                    insert,
+                                })
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if items.is_empty() {
+                    self.status = "no suggestions".into();
+                } else {
+                    let prefix = self
+                        .active_document()
+                        .map(|d| d.current_prefix())
+                        .unwrap_or_default();
+                    self.completion.open(items, &prefix);
+                    if !self.completion.is_open() {
+                        self.status = "no suggestions".into();
+                    }
+                }
+            }
+            // A one-line LSP status report (e.g. "server not installed").
+            "lsp.status" => {
+                if let Some(msg) = event.payload.get("message").and_then(|m| m.as_str()) {
+                    self.status = msg.to_string();
+                }
+            }
             "symbols.updated" => {
                 let file = event
                     .payload
@@ -1219,6 +1302,94 @@ mod tests {
         // An empty input is a no-op.
         app.goto_begin();
         assert!(!app.goto_run());
+    }
+
+    #[test]
+    fn completion_event_opens_filters_and_accepts_into_the_buffer() {
+        let mut app = App::new();
+        // The user typed "ma" mid-identifier; cursor sits after it.
+        app.open_document(Some("f.rs".into()), "");
+        app.active_document_mut().unwrap().insert("let x = v.ma");
+
+        app.apply_event(&Event::new(
+            "lsp.completion",
+            serde_json::json!({ "items": [
+                { "label": "map", "kind": "method", "detail": "fn(self)", "insert": "map()" },
+                { "label": "max", "kind": "method", "insert": "max()" },
+                { "label": "len", "kind": "method", "insert": "len()" }
+            ]}),
+        ));
+        assert!(app.completion.is_open());
+        // Filtered by the "ma" prefix: len is gone.
+        let labels: Vec<&str> = app
+            .completion
+            .entries()
+            .iter()
+            .map(|e| e.label.as_str())
+            .collect();
+        assert_eq!(labels, ["map", "max"]);
+
+        // Navigate to "max" and accept: the prefix "ma" is replaced by the
+        // insert text, as one undo step.
+        app.completion.select_next();
+        assert!(app.completion_accept());
+        let doc = app.active_document().unwrap();
+        assert_eq!(doc.text(), "let x = v.max()");
+        assert!(!app.completion.is_open());
+
+        // The accept is one undoable step back to the typed prefix.
+        app.active_document_mut().unwrap().undo();
+        assert_eq!(app.active_document().unwrap().text(), "let x = v.ma");
+    }
+
+    #[test]
+    fn completion_refilters_as_the_user_types() {
+        let mut app = App::new();
+        app.open_document(Some("f.rs".into()), "");
+        app.active_document_mut().unwrap().insert("m");
+        app.apply_event(&Event::new(
+            "lsp.completion",
+            serde_json::json!({ "items": [
+                { "label": "map", "insert": "map" },
+                { "label": "min", "insert": "min" }
+            ]}),
+        ));
+        assert_eq!(app.completion.entries().len(), 2);
+
+        // Typing narrows: "mi" keeps only "min".
+        app.active_document_mut().unwrap().insert("i");
+        app.completion_refilter();
+        let labels: Vec<&str> = app
+            .completion
+            .entries()
+            .iter()
+            .map(|e| e.label.as_str())
+            .collect();
+        assert_eq!(labels, ["min"]);
+
+        // Typing a non-matching char closes the popup.
+        app.active_document_mut().unwrap().insert("z");
+        app.completion_refilter();
+        assert!(!app.completion.is_open());
+    }
+
+    #[test]
+    fn empty_completion_reports_no_suggestions() {
+        let mut app = App::new();
+        app.open_document(Some("f.rs".into()), "x");
+        app.apply_event(&Event::new(
+            "lsp.completion",
+            serde_json::json!({ "items": [] }),
+        ));
+        assert!(!app.completion.is_open());
+        assert_eq!(app.status, "no suggestions");
+
+        // And an lsp.status event lands on the status bar.
+        app.apply_event(&Event::new(
+            "lsp.status",
+            serde_json::json!({ "message": "language server 'gopls' unavailable" }),
+        ));
+        assert!(app.status.contains("gopls"));
     }
 
     #[test]

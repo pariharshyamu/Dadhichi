@@ -10,8 +10,9 @@
 
 use crate::codec::{LspDecoder, encode};
 use crate::protocol::{
-    Location, Position, did_open_params, initialize_params, parse_diagnostics, parse_hover,
-    parse_locations, references_params, text_document_position,
+    CompletionItem, Location, Position, did_change_params, did_open_params, initialize_params,
+    parse_completion, parse_diagnostics, parse_hover, parse_locations, references_params,
+    text_document_position,
 };
 use dadhichi_core::{Event, EventBus};
 use std::collections::HashMap;
@@ -38,6 +39,17 @@ pub enum LspError {
         code: i64,
         /// JSON-RPC error message.
         message: String,
+    },
+    /// No language server is registered for this file type.
+    #[error("no language server for {0}")]
+    Unsupported(String),
+    /// The registered server couldn't be started (usually: not installed).
+    #[error("language server '{command}' unavailable: {reason}")]
+    Unavailable {
+        /// The server executable that failed to launch.
+        command: String,
+        /// Why (spawn error, failed handshake).
+        reason: String,
     },
 }
 
@@ -157,6 +169,31 @@ impl LspClient {
             did_open_params(uri, language_id, text),
         )
         .await
+    }
+
+    /// Notify the server a document changed, replacing its whole text (full
+    /// sync). `version` must increase monotonically per document.
+    pub async fn did_change(&self, uri: &str, version: i64, text: &str) -> Result<(), LspError> {
+        self.notify(
+            "textDocument/didChange",
+            did_change_params(uri, version, text),
+        )
+        .await
+    }
+
+    /// Request completion suggestions at `position`.
+    pub async fn completion(
+        &self,
+        uri: &str,
+        position: Position,
+    ) -> Result<Vec<CompletionItem>, LspError> {
+        let result = self
+            .request(
+                "textDocument/completion",
+                text_document_position(uri, position),
+            )
+            .await?;
+        Ok(parse_completion(&result))
     }
 
     /// Request hover text at `position`, returning the plain-text contents.
@@ -349,6 +386,20 @@ mod tests {
                     ("textDocument/hover", Some(id)) => {
                         respond(&writer, id, serde_json::json!({ "contents": { "kind": "markdown", "value": "fn main()" } })).await;
                     }
+                    ("textDocument/completion", Some(id)) => {
+                        respond(
+                            &writer,
+                            id,
+                            serde_json::json!({
+                                "isIncomplete": false,
+                                "items": [
+                                    { "label": "main", "kind": 3, "detail": "fn main()" },
+                                    { "label": "map", "kind": 2, "insertText": "map()" }
+                                ]
+                            }),
+                        )
+                        .await;
+                    }
                     ("textDocument/definition", Some(id)) => {
                         respond(&writer, id, serde_json::json!([{
                             "uri": "file:///a.rs",
@@ -399,6 +450,20 @@ mod tests {
             .unwrap();
         assert_eq!(defs.len(), 1);
         assert_eq!(defs[0].range.start.line, 10);
+
+        // Sync an edit (a notification — fire and forget), then complete.
+        client
+            .did_change("file:///a.rs", 2, "fn main() { m }")
+            .await
+            .unwrap();
+        let items = client
+            .completion("file:///a.rs", Position::new(0, 13))
+            .await
+            .unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].label, "main");
+        assert_eq!(items[0].kind, "fn");
+        assert_eq!(items[1].insert, "map()");
 
         // The diagnostic pushed during initialize reaches the event bus.
         let event = diag.recv().await.unwrap();

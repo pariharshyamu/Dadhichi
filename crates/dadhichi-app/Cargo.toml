@@ -14,6 +14,7 @@ workspace = true
 [dependencies]
 dadhichi-core.workspace = true
 dadhichi-ui.workspace = true
+dadhichi-lsp.workspace = true
 dadhichi-agent.workspace = true
 dadhichi-skill.workspace = true
 dadhichi-ai.workspace = true

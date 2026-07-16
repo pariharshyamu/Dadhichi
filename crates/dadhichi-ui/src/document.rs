@@ -643,6 +643,33 @@ impl Document {
         self.go(t, true);
     }
 
+    /// The char offset where the identifier under the cursor begins (equal to
+    /// the cursor when it doesn't follow a word char).
+    fn prefix_start(&self) -> usize {
+        let mut i = self.cursor;
+        while i > 0 && is_word_char(self.rope.char(i - 1)) {
+            i -= 1;
+        }
+        i
+    }
+
+    /// The word prefix immediately before the cursor — the partial identifier
+    /// being typed. Drives completion filtering, and is what
+    /// [`accept_completion`](Self::accept_completion) replaces.
+    pub fn current_prefix(&self) -> String {
+        self.rope.slice(self.prefix_start()..self.cursor).to_string()
+    }
+
+    /// Replace the word prefix before the cursor with `insert` (accepting a
+    /// completion) as one discrete undo step.
+    pub fn accept_completion(&mut self, insert: &str) {
+        let start = self.prefix_start();
+        self.edit(start, self.cursor - start, insert, EditKind::Replace);
+        self.cursor = start + insert.chars().count();
+        self.anchor = None;
+        self.open_group = None;
+    }
+
     /// Delete from the previous word boundary to the cursor (Ctrl+Backspace) as
     /// one discrete undo step. With a selection active, deletes the selection.
     pub fn delete_word_back(&mut self) {

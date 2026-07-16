@@ -26,7 +26,13 @@
 
 pub mod client;
 pub mod codec;
+pub mod manager;
 pub mod protocol;
+pub mod registry;
 
 pub use client::{LspClient, LspError};
-pub use protocol::{Diagnostic, Location, Position, PublishDiagnostics, Range, Severity};
+pub use manager::LspManager;
+pub use protocol::{
+    CompletionItem, Diagnostic, Location, Position, PublishDiagnostics, Range, Severity,
+};
+pub use registry::{ServerSpec, server_for_path};
