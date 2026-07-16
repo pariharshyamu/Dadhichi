@@ -387,6 +387,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "dadhichi-acp"
+version = "0.1.13"
+dependencies = [
+ "async-trait",
+ "dadhichi-session",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "dadhichi-agent"
 version = "0.1.13"
 dependencies = [

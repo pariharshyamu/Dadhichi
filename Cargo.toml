@@ -9,6 +9,7 @@ members = [
     "crates/dadhichi-config",
     "crates/dadhichi-hooks",
     "crates/dadhichi-session",
+    "crates/dadhichi-acp",
     "crates/dadhichi-workspace",
     "crates/dadhichi-parse",
     "crates/dadhichi-index",
@@ -69,6 +70,7 @@ dadhichi-mcp = { path = "crates/dadhichi-mcp" }
 dadhichi-config = { path = "crates/dadhichi-config" }
 dadhichi-hooks = { path = "crates/dadhichi-hooks" }
 dadhichi-session = { path = "crates/dadhichi-session" }
+dadhichi-acp = { path = "crates/dadhichi-acp" }
 dadhichi-workspace = { path = "crates/dadhichi-workspace" }
 dadhichi-parse = { path = "crates/dadhichi-parse" }
 dadhichi-index = { path = "crates/dadhichi-index" }
