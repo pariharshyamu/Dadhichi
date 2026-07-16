@@ -48,8 +48,24 @@ use dadhichi_telemetry::Metrics;
 use dadhichi_wasm::WasmRuntime;
 use dadhichi_workspace::Workspace;
 
-#[tokio::main]
-async fn main() {
+fn main() {
+    // Apply the OS-level sandbox (if requested via DADHICHI_SANDBOX or config)
+    // *before* the async runtime spins up its worker threads, so the kernel
+    // confinement is inherited by every thread and child process — a sandbox
+    // applied on one tokio worker would not cover the others.
+    let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
+    if let Some(note) = policy::apply_sandbox(&cwd) {
+        println!("dadhichi ▸ {note}");
+    }
+
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("failed to build the tokio runtime")
+        .block_on(run());
+}
+
+async fn run() {
     // Fast-path flags before booting anything: packaging tools and installers
     // invoke `--version`/`--help` and expect an instant, side-effect-free
     // response on stdout with a zero exit code.
