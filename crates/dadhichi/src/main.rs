@@ -22,6 +22,7 @@ mod approve;
 mod cli;
 mod console;
 mod delegate_cmd;
+mod policy;
 mod session;
 mod skill;
 mod vault;
@@ -163,6 +164,14 @@ async fn main() {
                 .with(Permission::WriteWorkspace, PermissionMode::Interrupt),
         );
         tools.set_approver(Arc::new(approve::CliApprover));
+
+        // Layer the user's config (permission rules + mode) and lifecycle hooks
+        // on top of the default interactive policy, so a `.dadhichi/config.toml`
+        // deny or a PreToolUse hook takes effect for this run.
+        let session_id = format!("cli-{}", std::process::id());
+        for note in policy::activate(&tools, &cwd, &session_id) {
+            println!("dadhichi ▸ {note}");
+        }
 
         let mut ctx = AgentContext::new(
             router.clone(),
@@ -479,6 +488,13 @@ async fn run_chat() {
         t.set_approver(Arc::new(approve::CliApprover));
         Arc::new(t)
     };
+
+    // Layer config (permission rules + mode) and lifecycle hooks over the
+    // default interactive policy for the chat session.
+    let session_id = format!("cli-{}", std::process::id());
+    for note in policy::activate(&tools, &cwd, &session_id) {
+        println!("dadhichi ▸ {note}");
+    }
 
     let console = console::spawn(kernel.bus());
 
