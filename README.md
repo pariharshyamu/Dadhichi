@@ -62,6 +62,24 @@ secret scan, audit log, injection defense), and observability. See
 autonomous agentic IDE, and [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for
 the complete system design.
 
+## Screenshots
+
+**LSP-driven completion** — `Ctrl+Space` in the editor asks the language server
+for suggestions (rust-analyzer, typescript-language-server, pyright, gopls,
+clangd, …), shown in a popup at the cursor and filtered live by the prefix
+you've typed. The gutter `▲` and the Problems panel carry the server's
+diagnostics over the same event bus:
+
+![LSP completion popup in the Dadhichi TUI](docs/screenshots/lsp-completion.png)
+
+**The editor shell** — tabs with unsaved-change dots (`app.py ●`), syntax
+highlighting, a block caret, multi-line selection, and every match of the
+current find query highlighted through the buffer. Undo/redo, cut/copy/paste,
+word-wise motion, line move/duplicate/delete, comment toggling, auto-indent,
+and go-to-line all behave the way VS Code taught your fingers:
+
+![Editor tabs, selection and find highlighting](docs/screenshots/editor-tabs-selection.png)
+
 ## Install
 
 One-line installers detect your OS/architecture, download the matching release
