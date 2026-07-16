@@ -40,8 +40,8 @@ use dadhichi_core::Kernel;
 use dadhichi_index::store::SqliteSymbolStore;
 use dadhichi_index::{Indexer, store::SymbolStore};
 use dadhichi_mcp::{
-    ApprovalPolicy, EchoTool, FsListTool, FsReadTool, FsWriteTool, GrantSet, Permission,
-    PermissionMode, StateStore, TerminalTool, ToolRegistry, WorkspaceStore,
+    ApprovalPolicy, Decision, EchoTool, FixedApprover, FsListTool, FsReadTool, FsWriteTool,
+    GrantSet, Permission, PermissionMode, StateStore, TerminalTool, ToolRegistry, WorkspaceStore,
 };
 use dadhichi_skill::{Skill, SkillAgent, SkillRegistry, SkillStep};
 use dadhichi_telemetry::Metrics;
@@ -98,6 +98,10 @@ async fn run() {
         }
         cli::Command::Inspect => {
             print_project_rules();
+            return;
+        }
+        cli::Command::Headless { prompt, json } => {
+            run_headless(prompt, json).await;
             return;
         }
         cli::Command::Run { goal } => goal,
@@ -486,6 +490,108 @@ fn with_project_rules(agent: ReactAgent, cwd: &std::path::Path) -> ReactAgent {
             agent.with_project_rules(block)
         }
         None => agent,
+    }
+}
+
+/// Run one agent turn non-interactively and print the result — `dadhichi -p`.
+///
+/// Nothing but the result goes to stdout (banners/notes go to stderr) so
+/// `--output-format json` output stays clean and pipeable. Tool calls that
+/// would prompt are denied (never block); a persistent session is recorded so
+/// the run is resumable, and its id is reported in JSON mode.
+async fn run_headless(prompt: String, json: bool) {
+    // Keep logs off stdout so `--output-format json` output stays clean.
+    {
+        use tracing_subscriber::{EnvFilter, fmt};
+        let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
+        let _ = fmt()
+            .with_env_filter(filter)
+            .with_target(false)
+            .with_writer(std::io::stderr)
+            .try_init();
+    }
+    let plan = ProviderPlan::from_env();
+    let model_id = plan.default_model();
+    let router = Arc::new(plan.build_router());
+    let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
+    let fs_store: Arc<dyn StateStore> = Arc::new(WorkspaceStore::new(&cwd));
+    let cli_memory = shared_memory();
+    let kernel = Kernel::new();
+
+    let tools = {
+        let t = ToolRegistry::new();
+        t.register(Arc::new(EchoTool));
+        t.register(Arc::new(TerminalTool::in_dir(&cwd)));
+        t.register(Arc::new(FsReadTool::new(fs_store.clone())));
+        t.register(Arc::new(FsWriteTool::new(fs_store.clone())));
+        t.register(Arc::new(FsListTool::new(fs_store.clone())));
+        t.register(Arc::new(MemoryWriteTool::new(cli_memory.clone())));
+        t.register(Arc::new(MemoryRecallTool::new(cli_memory.clone())));
+        // Headless must never block on a prompt: interrupt the consequential
+        // capabilities and deny at the gate, so a would-be prompt is reported
+        // back to the model instead of waiting for input. Config `allow` rules
+        // (applied below) can still widen this for trusted automation.
+        t.set_policy(
+            ApprovalPolicy::default()
+                .with(Permission::RunCommands, PermissionMode::Interrupt)
+                .with(Permission::WriteWorkspace, PermissionMode::Interrupt),
+        );
+        t.set_approver(Arc::new(FixedApprover(Decision::Deny)));
+        Arc::new(t)
+    };
+
+    let session_label = format!("headless-{}", std::process::id());
+    for note in policy::activate(&tools, &cwd, &session_label) {
+        eprintln!("dadhichi ▸ {note}");
+    }
+
+    // Record a resumable session (best-effort; a store failure never aborts).
+    let session = dadhichi_session::SessionStore::at_home().and_then(|s| s.create(&cwd).ok());
+    if let Some(s) = &session {
+        let _ = s.append(&serde_json::json!({ "role": "user", "text": prompt }));
+    }
+
+    let mut ctx = AgentContext::new(
+        router.clone(),
+        tools.clone(),
+        GrantSet::from_iter([
+            Permission::ReadWorkspace,
+            Permission::WriteWorkspace,
+            Permission::RunCommands,
+        ]),
+        kernel.bus().clone(),
+    );
+    let agent = with_project_rules(ReactAgent::new(&model_id), &cwd);
+
+    match agent.run(&prompt, &mut ctx).await {
+        Ok(outcome) => {
+            if let Some(s) = &session {
+                let _ = s.append(&serde_json::json!({
+                    "role": "assistant",
+                    "text": outcome.summary,
+                    "status": format!("{:?}", outcome.status),
+                }));
+            }
+            if json {
+                let out = serde_json::json!({
+                    "sessionId": session.as_ref().map(|s| s.id()),
+                    "status": format!("{:?}", outcome.status),
+                    "result": outcome.summary,
+                    "confidence": outcome.confidence,
+                });
+                println!("{}", serde_json::to_string(&out).unwrap_or_default());
+            } else {
+                println!("{}", outcome.summary);
+            }
+        }
+        Err(e) => {
+            if json {
+                println!("{}", serde_json::json!({ "error": e.to_string() }));
+            } else {
+                eprintln!("dadhichi ▸ error: {e}");
+            }
+            std::process::exit(1);
+        }
     }
 }
 

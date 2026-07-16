@@ -39,6 +39,16 @@ pub enum Command {
     /// List the project rules (`AGENTS.md` / `.dadhichi/rules`) that would load
     /// for the current directory, with approximate token counts, then exit.
     Inspect,
+    /// Run one agent turn non-interactively (headless), print the result, and
+    /// exit — for scripting and CI. Any tool call that would prompt is denied
+    /// rather than blocking. With `json`, emit a machine-readable result
+    /// including a resumable session id.
+    Headless {
+        /// The prompt to run.
+        prompt: String,
+        /// Emit JSON (`--output-format json`) instead of plain text.
+        json: bool,
+    },
 }
 
 /// A `dadhichi skill …` subcommand for managing the on-disk skill library that
@@ -142,6 +152,11 @@ ARGS:
 OPTIONS:
     -h, --help       Print this help text and exit.
     -V, --version    Print version information and exit.
+    -p, --print GOAL...  Run one agent turn headlessly, print the result, exit
+                         (for scripting/CI). Tool calls that would prompt are
+                         denied rather than blocking. Add `--output-format json`
+                         (or `--json`) for a machine-readable result with a
+                         resumable session id.
 
 SUBCOMMANDS:
     chat                 Start an interactive multi-turn session: one persistent
@@ -221,6 +236,29 @@ where
     }
     if args.first().map(String::as_str) == Some("inspect") {
         return Command::Inspect;
+    }
+    // Headless: `-p`/`--print <prompt…>`, optionally `--output-format json` /
+    // `--json` (anywhere). Everything after the flag that isn't an output-format
+    // token forms the prompt.
+    if let Some(pos) = args.iter().position(|a| a == "-p" || a == "--print") {
+        let json = args.iter().any(|a| a == "--json")
+            || args.windows(2).any(|w| w[0] == "--output-format" && w[1] == "json");
+        let mut prompt_words = Vec::new();
+        let mut i = pos + 1;
+        while i < args.len() {
+            match args[i].as_str() {
+                "--json" => {}
+                "--output-format" => i += 1, // skip its value (e.g. `json`)
+                w => prompt_words.push(w.to_string()),
+            }
+            i += 1;
+        }
+        let prompt = prompt_words.join(" ");
+        return if prompt.is_empty() {
+            Command::Help
+        } else {
+            Command::Headless { prompt, json }
+        };
     }
 
     let mut goal_words: Vec<String> = Vec::new();
@@ -315,6 +353,28 @@ mod tests {
         assert_eq!(parse(["--interactive"]), Command::Chat);
         assert_eq!(parse(["repl"]), Command::Chat);
         assert_eq!(parse(["inspect"]), Command::Inspect);
+        assert_eq!(
+            parse(["-p", "do", "the", "thing"]),
+            Command::Headless {
+                prompt: "do the thing".into(),
+                json: false
+            }
+        );
+        assert_eq!(
+            parse(["-p", "hi", "--output-format", "json"]),
+            Command::Headless {
+                prompt: "hi".into(),
+                json: true
+            }
+        );
+        assert_eq!(
+            parse(["--print", "hi", "--json"]),
+            Command::Headless {
+                prompt: "hi".into(),
+                json: true
+            }
+        );
+        assert_eq!(parse(["-p"]), Command::Help); // empty prompt
     }
 
     #[test]

@@ -373,6 +373,7 @@ dependencies = [
  "dadhichi-mcp",
  "dadhichi-plugin",
  "dadhichi-security",
+ "dadhichi-session",
  "dadhichi-skill",
  "dadhichi-telemetry",
  "dadhichi-wasm",

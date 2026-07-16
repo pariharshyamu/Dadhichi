@@ -24,6 +24,7 @@ dadhichi-skill.workspace = true
 dadhichi-mcp.workspace = true
 dadhichi-config.workspace = true
 dadhichi-hooks.workspace = true
+dadhichi-session.workspace = true
 dadhichi-workspace.workspace = true
 dadhichi-git.workspace = true
 dadhichi-index.workspace = true
