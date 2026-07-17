@@ -22,6 +22,14 @@ fn path_arg(args: &serde_json::Value) -> Result<String, ToolError> {
         .ok_or_else(|| ToolError::InvalidArguments("missing `path`".into()))
 }
 
+/// Dadhichi's own bookkeeping (session memory, local config) — hidden from
+/// listing/search tools so the agent doesn't waste context re-reading its own
+/// serialized transcript. An explicit `fs.read` of such a path still works.
+fn is_internal(path: &str) -> bool {
+    let path = path.trim_start_matches(['/', '\\']);
+    path.starts_with(".dadhichi/") || path.starts_with(".dadhichi\\") || path == ".dadhichi"
+}
+
 /// Reads a file from the agent's state store.
 #[derive(Debug)]
 pub struct FsReadTool {
@@ -146,10 +154,13 @@ impl Tool for FsListTool {
 
     async fn invoke(&self, args: serde_json::Value) -> ToolResult {
         let prefix = args.get("prefix").and_then(|p| p.as_str()).unwrap_or("");
-        let entries = self
+        let entries: Vec<String> = self
             .store
             .list(prefix)
-            .map_err(|e| ToolError::Execution(e.to_string()))?;
+            .map_err(|e| ToolError::Execution(e.to_string()))?
+            .into_iter()
+            .filter(|p| !is_internal(p))
+            .collect();
         Ok(serde_json::json!({ "prefix": prefix, "entries": entries }))
     }
 }
@@ -213,6 +224,9 @@ impl Tool for FsGrepTool {
 
         let mut hits = Vec::new();
         'outer: for path in paths {
+            if is_internal(&path) {
+                continue;
+            }
             // A file that can't be read (binary, gone) is skipped, not fatal.
             let Ok(content) = self.store.read(&path) else {
                 continue;
@@ -321,7 +335,7 @@ impl Tool for FsGlobTool {
             .list("")
             .map_err(|e| ToolError::Execution(e.to_string()))?
             .into_iter()
-            .filter(|path| Self::matches(pattern, path))
+            .filter(|path| !is_internal(path) && Self::matches(pattern, path))
             .collect();
         Ok(serde_json::json!({
             "pattern": pattern,
@@ -359,6 +373,45 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(listed["entries"][0], "notes/a.md");
+    }
+
+    #[tokio::test]
+    async fn dadhichi_internals_are_hidden_from_listing_and_search() {
+        let store = store();
+        for (path, content) in [
+            (".dadhichi/session.json", "[{\"tier\":\"working\"}]"),
+            ("src/main.rs", "fn main() {}"),
+        ] {
+            store.write(path, content).unwrap();
+        }
+
+        // fs.ls omits the session file so the agent never "discovers" it.
+        let listed = FsListTool::new(store.clone())
+            .invoke(serde_json::json!({}))
+            .await
+            .unwrap();
+        let entries = listed["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0], "src/main.rs");
+
+        // fs.grep and fs.glob skip it too.
+        let hits = FsGrepTool::new(store.clone())
+            .invoke(serde_json::json!({ "query": "tier" }))
+            .await
+            .unwrap();
+        assert_eq!(hits["count"], 0);
+        let globbed = FsGlobTool::new(store.clone())
+            .invoke(serde_json::json!({ "pattern": "*.json" }))
+            .await
+            .unwrap();
+        assert!(globbed["entries"].as_array().unwrap().is_empty());
+
+        // An explicit read still works (deliberate access is fine).
+        let read = FsReadTool::new(store)
+            .invoke(serde_json::json!({ "path": ".dadhichi/session.json" }))
+            .await
+            .unwrap();
+        assert!(read["content"].as_str().unwrap().contains("tier"));
     }
 
     #[tokio::test]

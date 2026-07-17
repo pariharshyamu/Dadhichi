@@ -458,6 +458,30 @@ function renderTabs() {
   }
 }
 
+/* Refresh an open buffer from disk after the agent (or anything else) changed
+ * the file. A dirty buffer is never clobbered — the user is warned instead. */
+async function reloadFromDisk(rel) {
+  const entry = state.models.get(rel);
+  if (!entry) return;
+  if (isDirty(rel)) {
+    setStatus(`⚠ ${rel} changed on disk but your buffer has unsaved edits — saving would overwrite the agent's changes`);
+    return;
+  }
+  const res = await fetch(`/api/file?path=${encodeURIComponent(rel)}`);
+  if (!res.ok) return;
+  const { text } = await res.json();
+  if (entry.model.getValue() !== text) {
+    const view = state.active === rel ? state.editor.saveViewState() : null;
+    entry.model.setValue(text);
+    entry.savedVersion = entry.model.getAlternativeVersionId();
+    if (view && state.active === rel) state.editor.restoreViewState(view);
+    refreshDirty(rel);
+    setStatus(`reloaded ${rel} — updated by the agent`);
+  } else {
+    entry.savedVersion = entry.model.getAlternativeVersionId();
+  }
+}
+
 async function saveActive() {
   const rel = state.active;
   if (!rel) return;
@@ -582,8 +606,12 @@ function handleEvent(topic, p) {
       if (["completed", "failed", "error", "idle"].includes(status)) setPhase("idle");
       else if (["planning", "replanning"].includes(status)) setPhase("thinking");
       else if (status === "running") setPhase("thinking");
-      // Agent runs create and edit files — keep the explorer honest.
-      if (status === "completed") refreshTree();
+      // Agent runs create and edit files — keep the explorer and every open
+      // buffer honest (a stale buffer + Ctrl+S would undo the agent's work).
+      if (status === "completed") {
+        refreshTree();
+        for (const rel of state.openOrder) reloadFromDisk(rel);
+      }
       chatEvent(`● ${status}`, "plan");
       break;
     }
@@ -599,6 +627,12 @@ function handleEvent(topic, p) {
     }
     case "agent.tool.result": {
       chatEvent(`✓ ${trim(p.result ?? p.output ?? "", 400)}`, "ok");
+      // The agent wrote a file: refresh its open buffer immediately, so a
+      // later Ctrl+S can't clobber the agent's fix with stale editor text.
+      if (p.tool === "fs.write" && p.result && p.result.path) {
+        const rel = matchOpenPath(String(p.result.path));
+        if (rel) reloadFromDisk(rel);
+      }
       break;
     }
     case "agent.message": {

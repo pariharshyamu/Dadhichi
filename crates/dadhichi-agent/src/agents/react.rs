@@ -289,6 +289,34 @@ impl Agent for ReactAgent {
         // burning the whole budget repeating itself.
         let mut recent_calls: Vec<String> = Vec::new();
 
+        // Completion guard: a goal that asks for changes ("fix", "implement",
+        // "add"…) must not end after analysis alone — models love to describe
+        // the fix and stop. Track whether any state-changing tool succeeded and,
+        // if not, bounce the first attempts to finish back into the loop. Only
+        // tools this run is actually *granted* to use count: a read-only
+        // delegate can't be badgered into writing.
+        let mutating_tools: std::collections::HashSet<&str> = tool_specs
+            .iter()
+            .filter(|spec| {
+                spec.permissions.iter().any(|p| {
+                    matches!(
+                        p,
+                        dadhichi_mcp::Permission::WriteWorkspace
+                            | dadhichi_mcp::Permission::RunCommands
+                    )
+                }) && ctx.grants.allows(&spec.permissions)
+            })
+            .map(|spec| spec.name.as_str())
+            .collect();
+        let goal_wants_mutation = goal_implies_mutation(goal) && !mutating_tools.is_empty();
+        let mut mutated = false;
+        let mut completion_nudges = 0usize;
+        const MAX_COMPLETION_NUDGES: usize = 2;
+        const ACT_NUDGE: &str = "You have analysed the problem but not changed anything yet — the \
+             goal asks you to make changes, and no file write or command has run. Apply the fix \
+             now with tool calls (e.g. fs.write the corrected content), verify the result, and \
+             only then reply with \"final\".";
+
         // The outer loop runs re-planning rounds. Each round has a fresh step
         // budget; between rounds the agent is asked to reflect on progress and
         // decide what remains, so a long task continues coherently instead of
@@ -313,14 +341,30 @@ impl Agent for ReactAgent {
                 let reply = completion.content.trim().to_string();
                 let action = Self::extract_json(&reply);
 
-                // No parseable action ⇒ treat the whole reply as the final answer,
-                // so a model that just answers in prose still terminates cleanly.
+                // No parseable action ⇒ the model answered in prose. For a
+                // read-only goal that's a clean finish; for a mutation goal
+                // with nothing changed yet it's the classic analyse-and-stop
+                // failure, so push it back into the loop instead.
                 let Some(action) = action else {
+                    if goal_wants_mutation && !mutated && completion_nudges < MAX_COMPLETION_NUDGES
+                    {
+                        completion_nudges += 1;
+                        messages.push(Message::assistant(reply));
+                        messages.push(Message::user(ACT_NUDGE));
+                        continue;
+                    }
                     final_answer = Some(reply);
                     break 'rounds;
                 };
 
                 if let Some(final_text) = action.get("final").and_then(|f| f.as_str()) {
+                    if goal_wants_mutation && !mutated && completion_nudges < MAX_COMPLETION_NUDGES
+                    {
+                        completion_nudges += 1;
+                        messages.push(Message::assistant(reply));
+                        messages.push(Message::user(ACT_NUDGE));
+                        continue;
+                    }
                     final_answer = Some(final_text.to_string());
                     break 'rounds;
                 }
@@ -355,6 +399,9 @@ impl Agent for ReactAgent {
 
                 match ctx.tools.invoke(tool_name, args, &ctx.grants).await {
                     Ok(result) => {
+                        if mutating_tools.contains(tool_name) {
+                            mutated = true;
+                        }
                         ctx.emit(
                             "agent.tool.result",
                             serde_json::json!({ "tool": tool_name, "result": result }),
@@ -449,6 +496,18 @@ impl Agent for ReactAgent {
         );
         Ok(outcome)
     }
+}
+
+/// Whether a goal's wording asks for changes to be made (as opposed to a
+/// question or explanation), so the loop can insist on action before finishing.
+fn goal_implies_mutation(goal: &str) -> bool {
+    const VERBS: &[&str] = &[
+        "fix", "bug", "implement", "add ", "create", "write", "build", "make ", "update",
+        "refactor", "improve", "remove", "delete", "rename", "install", "scaffold", "generate",
+        "convert", "migrate", "set up", "setup",
+    ];
+    let goal = goal.to_lowercase();
+    VERBS.iter().any(|v| goal.contains(v))
 }
 
 #[cfg(test)]
@@ -615,6 +674,72 @@ mod tests {
             .unwrap();
         assert_eq!(outcome.status, AgentStatus::Completed);
         assert!(outcome.summary.contains("type-safe value"));
+    }
+
+    #[tokio::test]
+    async fn a_fix_goal_cannot_end_on_analysis_alone() {
+        // The model tries to finish twice with pure analysis (the exact
+        // failure seen in the wild: describe the bugs, change nothing, stop).
+        // The guard bounces it back until it actually writes, then lets the
+        // real final through.
+        let recorder = RecordingTool::default();
+        let calls = recorder.calls.clone();
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register(Arc::new(recorder));
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            "Here are the bugs I found: the margin property is misspelled.",
+            r#"{"final":"The bugs are the misspelled CSS properties."}"#,
+            r#"{"tool":"terminal.run","args":{"command":"apply-fix"}}"#,
+            r#"{"final":"Fixed the misspelled properties and verified."}"#,
+        ]));
+        let (mut ctx, _bus) = ctx_with(provider, tools);
+
+        let outcome = ReactAgent::new("mock")
+            .run("fix bugs in this file", &mut ctx)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.status, AgentStatus::Completed);
+        assert!(
+            outcome.summary.contains("Fixed"),
+            "run must end on the post-write final, got: {}",
+            outcome.summary
+        );
+        assert_eq!(
+            calls.lock().unwrap().len(),
+            1,
+            "the nudges must drive the model into actually acting"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stubborn_model_still_terminates_after_the_nudge_budget() {
+        // A model that never acts must not loop forever: two nudges, then its
+        // analysis is accepted as the final answer. (A mutating tool must be
+        // registered — the guard only arms when acting is actually possible.)
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register(Arc::new(RecordingTool::default()));
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            "Analysis only, attempt 1.",
+            "Analysis only, attempt 2.",
+            "Analysis only, attempt 3.",
+        ]));
+        let (mut ctx, _bus) = ctx_with(provider, tools);
+        let outcome = ReactAgent::new("mock")
+            .run("fix the parser bug", &mut ctx)
+            .await
+            .unwrap();
+        assert_eq!(outcome.status, AgentStatus::Completed);
+        assert!(outcome.summary.contains("attempt 3"));
+    }
+
+    #[test]
+    fn mutation_goals_are_recognised() {
+        assert!(goal_implies_mutation("fix bugs in this file"));
+        assert!(goal_implies_mutation("Implement a reverse function"));
+        assert!(goal_implies_mutation("add a scoreboard to it"));
+        assert!(!goal_implies_mutation("what is a type-safe value"));
+        assert!(!goal_implies_mutation("explain how the parser works"));
     }
 
     #[tokio::test]
