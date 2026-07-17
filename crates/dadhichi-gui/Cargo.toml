@@ -1,0 +1,28 @@
+[package]
+name = "dadhichi-gui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Dadhichi web GUI — a local, browser-served IDE frontend"
+
+[[bin]]
+name = "dadhichi-gui"
+path = "src/main.rs"
+
+[dependencies]
+dadhichi-app = { path = "../dadhichi-app" }
+dadhichi-core = { path = "../dadhichi-core" }
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+axum = { version = "0.8", features = ["ws"] }
+include_dir = "0.7"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+[dev-dependencies]
+tempfile = "3"

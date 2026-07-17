@@ -75,6 +75,61 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
+name = "axum"
+version = "0.8.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "31b698c5f9a010f6573133b09e0de5408834d0c82f8d7475a89fc1867a71cd90"
+dependencies = [
+ "axum-core",
+ "base64",
+ "bytes",
+ "form_urlencoded",
+ "futures-util",
+ "http",
+ "http-body",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "itoa",
+ "matchit",
+ "memchr",
+ "mime",
+ "percent-encoding",
+ "pin-project-lite",
+ "serde_core",
+ "serde_json",
+ "serde_path_to_error",
+ "serde_urlencoded",
+ "sha1",
+ "sync_wrapper",
+ "tokio",
+ "tokio-tungstenite 0.29.0",
+ "tower",
+ "tower-layer",
+ "tower-service",
+ "tracing",
+]
+
+[[package]]
+name = "axum-core"
+version = "0.5.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "08c78f31d7b1291f7ee735c1c6780ccde7785daae9a9206026862dab7d8792d1"
+dependencies = [
+ "bytes",
+ "futures-core",
+ "http",
+ "http-body",
+ "http-body-util",
+ "mime",
+ "pin-project-lite",
+ "sync_wrapper",
+ "tower-layer",
+ "tower-service",
+ "tracing",
+]
+
+[[package]]
 name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -358,7 +413,7 @@ dependencies = [
 
 [[package]]
 name = "dadhichi"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "async-trait",
  "dadhichi-acp",
@@ -389,7 +444,7 @@ dependencies = [
 
 [[package]]
 name = "dadhichi-acp"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "async-trait",
  "dadhichi-session",
@@ -402,7 +457,7 @@ dependencies = [
 
 [[package]]
 name = "dadhichi-agent"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "async-trait",
  "dadhichi-ai",
@@ -421,7 +476,7 @@ dependencies = [
 
 [[package]]
 name = "dadhichi-ai"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "async-trait",
  "bytes",
@@ -436,7 +491,7 @@ dependencies = [
 
 [[package]]
 name = "dadhichi-app"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "async-trait",
  "dadhichi-agent",
@@ -453,13 +508,13 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
- "tokio-tungstenite",
+ "tokio-tungstenite 0.24.0",
  "uuid",
 ]
 
 [[package]]
 name = "dadhichi-cache"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "rocksdb",
  "tempfile",
@@ -468,7 +523,7 @@ dependencies = [
 
 [[package]]
 name = "dadhichi-collab"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "serde",
  "serde_json",
@@ -476,7 +531,7 @@ dependencies = [
 
 [[package]]
 name = "dadhichi-config"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "dadhichi-mcp",
  "serde",
@@ -487,7 +542,7 @@ dependencies = [
 
 [[package]]
 name = "dadhichi-core"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "async-trait",
  "serde",
@@ -500,7 +555,7 @@ dependencies = [
 
 [[package]]
 name = "dadhichi-dap"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "dadhichi-core",
  "serde",
@@ -512,7 +567,7 @@ dependencies = [
 
 [[package]]
 name = "dadhichi-git"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "git2",
  "tempfile",
@@ -520,8 +575,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "dadhichi-gui"
+version = "0.1.15"
+dependencies = [
+ "axum",
+ "dadhichi-app",
+ "dadhichi-core",
+ "include_dir",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "dadhichi-hooks"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "async-trait",
  "dadhichi-mcp",
@@ -537,7 +609,7 @@ dependencies = [
 
 [[package]]
 name = "dadhichi-index"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "dadhichi-cache",
  "dadhichi-core",
@@ -554,7 +626,7 @@ dependencies = [
 
 [[package]]
 name = "dadhichi-lsp"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "dadhichi-core",
  "serde",
@@ -567,7 +639,7 @@ dependencies = [
 
 [[package]]
 name = "dadhichi-mcp"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "async-trait",
  "futures",
@@ -577,13 +649,13 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
- "tokio-tungstenite",
+ "tokio-tungstenite 0.24.0",
  "tracing",
 ]
 
 [[package]]
 name = "dadhichi-parse"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "dadhichi-workspace",
  "serde",
@@ -593,7 +665,7 @@ dependencies = [
 
 [[package]]
 name = "dadhichi-plugin"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "async-trait",
  "dadhichi-core",
@@ -607,7 +679,7 @@ dependencies = [
 
 [[package]]
 name = "dadhichi-security"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "chacha20poly1305",
  "landlock",
@@ -620,7 +692,7 @@ dependencies = [
 
 [[package]]
 name = "dadhichi-session"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "serde",
  "serde_json",
@@ -630,7 +702,7 @@ dependencies = [
 
 [[package]]
 name = "dadhichi-skill"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "async-trait",
  "dadhichi-agent",
@@ -647,7 +719,7 @@ dependencies = [
 
 [[package]]
 name = "dadhichi-telemetry"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "serde",
  "serde_json",
@@ -655,7 +727,7 @@ dependencies = [
 
 [[package]]
 name = "dadhichi-term"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "portable-pty",
  "thiserror 2.0.18",
@@ -663,7 +735,7 @@ dependencies = [
 
 [[package]]
 name = "dadhichi-tui"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "crossterm",
  "dadhichi-app",
@@ -677,7 +749,7 @@ dependencies = [
 
 [[package]]
 name = "dadhichi-ui"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "dadhichi-core",
  "ropey",
@@ -686,7 +758,7 @@ dependencies = [
 
 [[package]]
 name = "dadhichi-vector"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "serde",
  "serde_json",
@@ -695,7 +767,7 @@ dependencies = [
 
 [[package]]
 name = "dadhichi-wasm"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "thiserror 2.0.18",
  "wasmi",
@@ -704,7 +776,7 @@ dependencies = [
 
 [[package]]
 name = "dadhichi-workspace"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "serde",
  "serde_json",
@@ -1173,6 +1245,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6dbf3de79e51f3d586ab4cb9d5c3e2c14aa28ed23d180cf89b4df0454a69cc87"
 
 [[package]]
+name = "httpdate"
+version = "1.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
+
+[[package]]
 name = "hyper"
 version = "1.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1185,6 +1263,7 @@ dependencies = [
  "http",
  "http-body",
  "httparse",
+ "httpdate",
  "itoa",
  "pin-project-lite",
  "smallvec",
@@ -1337,6 +1416,25 @@ checksum = "3acae9609540aa318d1bc588455225fb2085b9ed0c4f6bd0d9d5bcd86f1a0344"
 dependencies = [
  "icu_normalizer",
  "icu_properties",
+]
+
+[[package]]
+name = "include_dir"
+version = "0.7.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "923d117408f1e49d914f1a379a309cffe4f18c05cf4e3d12e613a15fc81bd0dd"
+dependencies = [
+ "include_dir_macros",
+]
+
+[[package]]
+name = "include_dir_macros"
+version = "0.7.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7cab85a7ed0bd5f0e76d93846e0147172bed2e2d3f859bcc33a8d9699cad1a75"
+dependencies = [
+ "proc-macro2",
+ "quote",
 ]
 
 [[package]]
@@ -1644,6 +1742,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "matchit"
+version = "0.8.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
+
+[[package]]
 name = "memchr"
 version = "2.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1657,6 +1761,12 @@ checksum = "5aa361d4faea93603064a027415f07bd8e1d5c88c9fbf68bf56a285428fd79ce"
 dependencies = [
  "autocfg",
 ]
+
+[[package]]
+name = "mime"
+version = "0.3.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
 
 [[package]]
 name = "minimal-lexical"
@@ -2343,6 +2453,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_path_to_error"
+version = "0.1.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "10a9ff822e371bb5403e391ecd83e182e0e77ba7f6fe0160b795797109d1b457"
+dependencies = [
+ "itoa",
+ "serde",
+ "serde_core",
+]
+
+[[package]]
 name = "serde_spanned"
 version = "0.6.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2787,8 +2908,20 @@ dependencies = [
  "rustls-pki-types",
  "tokio",
  "tokio-rustls",
- "tungstenite",
+ "tungstenite 0.24.0",
  "webpki-roots 0.26.11",
+]
+
+[[package]]
+name = "tokio-tungstenite"
+version = "0.29.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f72a05e828585856dacd553fba484c242c46e391fb0e58917c942ee9202915c"
+dependencies = [
+ "futures-util",
+ "log",
+ "tokio",
+ "tungstenite 0.29.0",
 ]
 
 [[package]]
@@ -2858,6 +2991,7 @@ dependencies = [
  "tokio",
  "tower-layer",
  "tower-service",
+ "tracing",
 ]
 
 [[package]]
@@ -2896,6 +3030,7 @@ version = "0.1.44"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "63e71662fa4b2a2c3a26f570f037eb95bb1f85397f3cd8076caed2f026a6d100"
 dependencies = [
+ "log",
  "pin-project-lite",
  "tracing-attributes",
  "tracing-core",
@@ -3005,6 +3140,22 @@ dependencies = [
  "sha1",
  "thiserror 1.0.69",
  "utf-8",
+]
+
+[[package]]
+name = "tungstenite"
+version = "0.29.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c01152af293afb9c7c2a57e4b559c5620b421f6d133261c60dd2d0cdb38e6b8"
+dependencies = [
+ "bytes",
+ "data-encoding",
+ "http",
+ "httparse",
+ "log",
+ "rand 0.9.4",
+ "sha1",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

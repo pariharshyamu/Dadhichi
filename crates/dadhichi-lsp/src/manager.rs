@@ -14,7 +14,7 @@
 
 use crate::client::{LspClient, LspError};
 use crate::protocol::{CompletionItem, Position};
-use crate::registry::{ServerSpec, server_for_path};
+use crate::registry::{ServerSpec, server_for_path_in_root};
 use dadhichi_core::EventBus;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -56,9 +56,16 @@ impl std::fmt::Debug for LspManager {
 
 impl LspManager {
     /// A manager for the workspace at `root`, using the built-in
-    /// [server registry](crate::registry). Diagnostics are published on `bus`.
+    /// [server registry](crate::registry) with project-aware overrides (e.g.
+    /// Angular workspaces). Diagnostics are published on `bus`.
     pub fn new(root: impl Into<PathBuf>, bus: Option<EventBus>) -> Self {
-        Self::with_resolver(root, bus, Box::new(server_for_path))
+        let root = root.into();
+        let resolver_root = root.clone();
+        Self::with_resolver(
+            root,
+            bus,
+            Box::new(move |path| server_for_path_in_root(&resolver_root, path)),
+        )
     }
 
     /// A manager with a custom file→server resolver (tests, user overrides).
@@ -80,6 +87,26 @@ impl LspManager {
         text: &str,
         position: Position,
     ) -> Result<Vec<CompletionItem>, LspError> {
+        let (client, uri) = self.ensure_synced(path, text).await?;
+        client.completion(&uri, position).await
+    }
+
+    /// Sync `path`'s current `text` with its language server without asking for
+    /// anything back — spawning and initializing the server on first sight.
+    /// This is what makes diagnostics flow on file *open* and *save*: servers
+    /// only publish problems for documents they've been told about, so without
+    /// this the Problems panel stayed empty until the first completion request.
+    pub async fn sync(&self, path: &Path, text: &str) -> Result<(), LspError> {
+        self.ensure_synced(path, text).await.map(|_| ())
+    }
+
+    /// The running (or newly spawned + initialized) client for `path`'s
+    /// language, with the document's text synced via `didOpen`/`didChange`.
+    async fn ensure_synced(
+        &self,
+        path: &Path,
+        text: &str,
+    ) -> Result<(Arc<LspClient>, String), LspError> {
         let spec = (self.resolver)(path)
             .ok_or_else(|| LspError::Unsupported(path.display().to_string()))?;
 
@@ -141,7 +168,7 @@ impl LspManager {
             }
         }
 
-        client.completion(&uri, position).await
+        Ok((client, uri))
     }
 
     /// The workspace root this manager serves.
@@ -159,8 +186,18 @@ impl LspManager {
 }
 
 /// A `file://` URI for a filesystem path.
+///
+/// Windows paths need care: separators become `/`, a drive-letter path gets the
+/// empty-authority third slash (`file:///C:/...`), and spaces are
+/// percent-encoded — servers reject `file://C:\Users\...` outright, which on
+/// Windows silently broke document sync and every diagnostic keyed by URI.
 fn to_uri(path: &Path) -> String {
-    format!("file://{}", path.display())
+    let s = path.display().to_string().replace('\\', "/").replace(' ', "%20");
+    if s.starts_with('/') {
+        format!("file://{s}")
+    } else {
+        format!("file:///{s}")
+    }
 }
 
 #[cfg(test)]
@@ -242,6 +279,46 @@ while True:
             .await
             .unwrap();
         assert_eq!(items[0].label, "sync_v2", "second call synced the change");
+    }
+
+    #[test]
+    fn uris_are_valid_on_both_unix_and_windows_shapes() {
+        // Unix absolute path: authority-less file URI.
+        assert_eq!(to_uri(Path::new("/home/x/main.rs")), "file:///home/x/main.rs");
+        // Windows drive-letter path: forward slashes and the third slash.
+        let uri = to_uri(Path::new(r"C:\Users\x\src\main.rs"));
+        assert_eq!(uri, "file:///C:/Users/x/src/main.rs");
+        // Spaces are percent-encoded so the URI parses.
+        let uri = to_uri(Path::new(r"C:\My Projects\app.ts"));
+        assert_eq!(uri, "file:///C:/My%20Projects/app.ts");
+    }
+
+    /// End-to-end against a real rust-analyzer, which rejects malformed URIs —
+    /// exactly what broke on Windows. Ignored by default (needs rust-analyzer
+    /// on PATH and a few seconds); run with `cargo test -- --ignored`.
+    #[tokio::test]
+    #[ignore = "requires rust-analyzer on PATH"]
+    async fn real_rust_analyzer_accepts_windows_uris() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"smoke\"\nversion = \"0.0.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir(dir.path().join("src")).unwrap();
+        let text = "fn main() { let value = 1; val }\n";
+        std::fs::write(dir.path().join("src/main.rs"), text).unwrap();
+
+        let manager = LspManager::new(dir.path(), None);
+        // The old file://C:\... URIs made initialize/didOpen fail outright, so
+        // an Ok here proves the server accepted the workspace and document.
+        let result = manager
+            .completions(Path::new("src/main.rs"), text, Position::new(0, 30))
+            .await;
+        assert!(
+            result.is_ok(),
+            "rust-analyzer rejected the session: {result:?}"
+        );
     }
 
     #[tokio::test]

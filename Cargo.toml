@@ -27,11 +27,12 @@ members = [
     "crates/dadhichi-wasm",
     "crates/dadhichi-app",
     "crates/dadhichi-plugin",
+    "crates/dadhichi-gui",
     "crates/dadhichi",
 ]
 
 [workspace.package]
-version = "0.1.14"
+version = "0.1.15"
 edition = "2024"
 rust-version = "1.85"
 license = "Apache-2.0"

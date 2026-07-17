@@ -1,16 +1,15 @@
-//! Cross-invocation session memory for the CLI.
+//! Cross-invocation session memory, shared by every frontend.
 //!
-//! Each `dadhichi <goal>` invocation boots a fresh kernel, so without this the
-//! agent would forget everything the moment it exits — a follow-up like
-//! "now add a scoreboard to it" would have no idea what "it" is. This module
-//! persists the agent's memory to `.dadhichi/session.json` in the workspace and
-//! reloads it on the next run, giving the one-shot CLI the same continuity the
-//! long-lived TUI session enjoys.
+//! A workspace's agent memory is persisted to `.dadhichi/session.json` and
+//! reloaded on the next boot, so a follow-up like "now add a scoreboard to it"
+//! still knows what "it" is — whether the previous turn ran in the one-shot
+//! CLI, the `dadhichi chat` REPL, or the TUI. All frontends share the one file,
+//! so a session started in the CLI can be continued in the TUI and vice versa.
 //!
 //! The store is a plain JSON array of [`MemoryItem`]s, capped to a recent window
 //! so the file (and the context it seeds) can't grow without bound.
 
-use dadhichi_agent::{Memory, MemoryItem, Tier};
+use crate::memory::{Memory, MemoryItem, Tier};
 use std::path::{Path, PathBuf};
 
 /// The most recent memory items to keep across runs. Enough to carry the thread
@@ -44,7 +43,7 @@ pub fn seed_memory(items: &[MemoryItem]) -> Memory {
     memory
 }
 
-/// A one-line, human-readable recap of the last session for the CLI banner, so
+/// A one-line, human-readable recap of the last session for a resume banner, so
 /// the user can see continuity was restored. `None` when there is nothing yet.
 pub fn recap(items: &[MemoryItem]) -> Option<String> {
     let last = items.iter().rev().find(|i| !i.content.trim().is_empty())?;

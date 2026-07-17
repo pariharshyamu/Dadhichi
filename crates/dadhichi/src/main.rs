@@ -23,9 +23,12 @@ mod cli;
 mod console;
 mod delegate_cmd;
 mod policy;
-mod session;
 mod skill;
 mod vault;
+
+// Session persistence moved into dadhichi-agent so the TUI shares the same
+// `.dadhichi/session.json` continuity as the CLI and chat REPL.
+use dadhichi_agent::session;
 
 use std::sync::Arc;
 

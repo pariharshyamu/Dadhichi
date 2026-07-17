@@ -16,8 +16,8 @@
 
 use dadhichi_agent::{
     Agent, AgentContext, DelegationReview, Delegator, MemoryRecallTool, MemoryWriteTool,
-    ModelCritic, Orchestrator, ReactAgent, SpecialistAgent, SubAgentSpec, TaskTool,
-    agents::ConversationalAgent, shared_memory,
+    ModelCritic, Orchestrator, ReactAgent, SharedMemory, SpecialistAgent, SubAgentSpec, TaskTool,
+    agents::ConversationalAgent, session, shared_memory,
 };
 use dadhichi_ai::{ModelRouter, ProviderPlan};
 use dadhichi_core::{Command, Event, Kernel, KernelError, RecvError, Subscription};
@@ -42,6 +42,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 pub mod approval;
+mod htmlcheck;
 pub use approval::{BusApprover, PendingApprovals};
 // Re-exported so a frontend can answer prompts without depending on dadhichi-mcp.
 pub use dadhichi_mcp::Decision;
@@ -78,6 +79,9 @@ pub struct AppController {
     root: PathBuf,
     /// The default model id delegated agents and the critic run under.
     model_id: String,
+    /// The model the next `agent.run` executes under — switchable at runtime
+    /// (the GUI's model picker writes here).
+    current_model: Arc<std::sync::RwLock<String>>,
     /// A delegated sub-agent's staged work held pending the user's land/discard
     /// decision. `Some` while the Review panel is up; `resolve_delegation` takes it.
     pending_delegation: Arc<Mutex<Option<PendingDelegation>>>,
@@ -217,8 +221,17 @@ impl AppController {
         // store confined by a PathJail to `root`, so an fs.write can never
         // escape the project. Shared behind the fs.* tools.
         let fs_store: Arc<dyn StateStore> = Arc::new(WorkspaceStore::new(&root));
-        // Shared memory the agent and its delegates record to / recall from.
+        // Shared memory the agent and its delegates record to / recall from,
+        // resumed from the workspace's persisted session (the same
+        // `.dadhichi/session.json` the CLI and chat REPL use) so the agent
+        // remembers previous runs and previous sessions alike.
         let agent_memory = shared_memory();
+        let prior_session = session::load(&root);
+        if !prior_session.is_empty()
+            && let Ok(mut mem) = agent_memory.lock()
+        {
+            *mem = session::seed_memory(&prior_session);
+        }
 
         let tools = {
             let t = ToolRegistry::new();
@@ -298,30 +311,10 @@ impl AppController {
             .ok()
         };
 
-        let orchestrator = {
-            let mut orch = Orchestrator::new();
-            // The tool-using ReAct agent is the default: it can actually perform
-            // tasks (run commands, read/write files) via the approval-gated tool
-            // loop, not just answer in prose.
-            orch.register(Arc::new(ReactAgent::new(&model_id)));
-            orch.register(Arc::new(ConversationalAgent::new(&model_id)));
-            for agent in [
-                SpecialistAgent::code(),
-                SpecialistAgent::refactor(),
-                SpecialistAgent::test(),
-                SpecialistAgent::docs(),
-                SpecialistAgent::review(),
-                SpecialistAgent::git(),
-                SpecialistAgent::security(),
-                // Full-stack roles for frontend, backend, and database work.
-                SpecialistAgent::frontend(),
-                SpecialistAgent::backend(),
-                SpecialistAgent::database(),
-            ] {
-                orch.register(Arc::new(agent.with_model(&model_id)));
-            }
-            Arc::new(orch)
-        };
+        // The active model, switchable at runtime (`agent.run` builds its
+        // orchestrator from whatever this holds at dispatch time).
+        let current_model = Arc::new(std::sync::RwLock::new(model_id.clone()));
+        let orchestrator = build_orchestrator(&model_id);
 
         // Register the `task` delegation tool so any agent (or a model tool-loop)
         // can spawn a specialist with an isolated context. Sub-agents run under a
@@ -338,7 +331,7 @@ impl AppController {
             &kernel,
             &router,
             &tools,
-            &orchestrator,
+            &current_model,
             &skills,
             &mcp_config,
             &mcp,
@@ -346,6 +339,7 @@ impl AppController {
             &model_id,
             &root,
             &indexer,
+            &agent_memory,
         )
         .await;
 
@@ -400,6 +394,7 @@ impl AppController {
             router: router.clone(),
             root: root.clone(),
             model_id: model_id.clone(),
+            current_model,
             pending_delegation: Arc::new(Mutex::new(None)),
             lsp,
         }
@@ -410,6 +405,44 @@ impl AppController {
     /// the approval policy.
     pub fn tools(&self) -> &Arc<ToolRegistry> {
         &self.tools
+    }
+
+    /// A fresh subscription to every kernel event — how alternative frontends
+    /// (the web GUI) stream agent progress, diagnostics, terminal output, and
+    /// approval prompts without going through the TUI view-models.
+    pub fn subscribe_events(&self) -> Subscription {
+        self.kernel.bus().subscribe()
+    }
+
+    /// The workspace root this controller serves.
+    pub fn workspace_root(&self) -> &Path {
+        &self.root
+    }
+
+    /// The model id runs currently execute under (for display).
+    pub fn model_label(&self) -> String {
+        self.current_model
+            .read()
+            .map(|m| m.clone())
+            .unwrap_or_else(|_| self.model_id.clone())
+    }
+
+    /// Switch the model future `agent.run`s execute under. The provider stays
+    /// as resolved at boot (the router routes unknown model names to the
+    /// default provider), so for Ollama this changes which local/cloud model
+    /// the requests name. Announced as a `model.changed` event.
+    pub fn set_model(&self, model: &str) {
+        let model = model.trim();
+        if model.is_empty() {
+            return;
+        }
+        if let Ok(mut current) = self.current_model.write() {
+            *current = model.to_string();
+        }
+        self.kernel.bus().publish(Event::new(
+            "model.changed",
+            serde_json::json!({ "model": model }),
+        ));
     }
 
     /// Immutable access to the UI view-models.
@@ -444,6 +477,8 @@ impl AppController {
             "editor.saved",
             serde_json::json!({ "ok": true, "path": path.display().to_string() }),
         ));
+        // Refresh the file's diagnostics now that its saved text changed.
+        self.sync_active_document();
         Ok(true)
     }
 
@@ -518,9 +553,16 @@ impl AppController {
         };
         let text = doc.text();
         let (line, col) = doc.cursor_line_col();
-        let position = dadhichi_lsp::Position::new(line as u32, col as u32);
         self.ui.status = "completing…".into();
+        self.request_completions_at(path, text, line as u32, col as u32);
+    }
 
+    /// Request LSP completions for any `path`/`text`/cursor, **without
+    /// blocking** — the path-based seam alternative frontends (the web GUI)
+    /// drive directly. The result is published as an `lsp.completion` event
+    /// (or a quiet `lsp.status` on failure).
+    pub fn request_completions_at(&self, path: PathBuf, text: String, line: u32, col: u32) {
+        let position = dadhichi_lsp::Position::new(line, col);
         let lsp = self.lsp.clone();
         let bus = self.kernel.bus().clone();
         tokio::spawn(async move {
@@ -538,6 +580,66 @@ impl AppController {
                         serde_json::json!({ "message": err.to_string() }),
                     ));
                 }
+            }
+        });
+    }
+
+    /// Push the active buffer's current text to its language server **without
+    /// blocking**, so the server publishes fresh diagnostics for it (routed to
+    /// the Problems panel via `lsp.diagnostics`). Servers only report problems
+    /// for documents they've been told about, so this runs on file open and
+    /// save — not just on completion requests. Failures (usually: the language
+    /// server isn't installed) surface as a quiet `lsp.status` event.
+    pub fn sync_active_document(&self) {
+        let Some(doc) = self.ui.active_document() else {
+            return;
+        };
+        let Some(path) = doc.path.clone() else {
+            return;
+        };
+        let text = doc.text();
+        self.sync_document_at(path, text);
+    }
+
+    /// Push any `path`/`text` to its language server so diagnostics refresh —
+    /// the path-based seam alternative frontends (the web GUI) drive directly.
+    pub fn sync_document_at(&self, path: PathBuf, text: String) {
+        // HTML gets a built-in structural check: the HTML language server
+        // reports nothing for unclosed/crossed tags, so those are found here
+        // and published straight onto the Problems seam.
+        let is_html = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("html") || e.eq_ignore_ascii_case("htm"));
+        if is_html {
+            let problems: Vec<serde_json::Value> = htmlcheck::diagnostics(&text)
+                .into_iter()
+                .map(|(line, message)| {
+                    serde_json::json!({
+                        "range": { "start": { "line": line, "character": 0 },
+                                   "end": { "line": line, "character": 1 } },
+                        "severity": "error",
+                        "message": message,
+                    })
+                })
+                .collect();
+            self.kernel.bus().publish(Event::new(
+                "lsp.diagnostics",
+                serde_json::json!({
+                    "uri": path.display().to_string(),
+                    "diagnostics": problems,
+                }),
+            ));
+        }
+
+        let lsp = self.lsp.clone();
+        let bus = self.kernel.bus().clone();
+        tokio::spawn(async move {
+            if let Err(err) = lsp.sync(&path, &text).await {
+                bus.publish(Event::new(
+                    "lsp.status",
+                    serde_json::json!({ "message": err.to_string() }),
+                ));
             }
         });
     }
@@ -1200,12 +1302,40 @@ fn str_arg(cmd: &Command, key: &str) -> Result<String, KernelError> {
         .ok_or_else(|| KernelError::command_failed(format!("missing `{key}` argument")))
 }
 
+/// The agent roster for one model: the default ReAct engine, the plain
+/// conversational agent, and every specialist. Rebuilt cheaply whenever the
+/// active model changes, so a GUI model switch takes effect on the next run.
+fn build_orchestrator(model_id: &str) -> Arc<Orchestrator> {
+    let mut orch = Orchestrator::new();
+    // The tool-using ReAct agent is the default: it can actually perform
+    // tasks (run commands, read/write files) via the approval-gated tool
+    // loop, not just answer in prose.
+    orch.register(Arc::new(ReactAgent::new(model_id)));
+    orch.register(Arc::new(ConversationalAgent::new(model_id)));
+    for agent in [
+        SpecialistAgent::code(),
+        SpecialistAgent::refactor(),
+        SpecialistAgent::test(),
+        SpecialistAgent::docs(),
+        SpecialistAgent::review(),
+        SpecialistAgent::git(),
+        SpecialistAgent::security(),
+        // Full-stack roles for frontend, backend, and database work.
+        SpecialistAgent::frontend(),
+        SpecialistAgent::backend(),
+        SpecialistAgent::database(),
+    ] {
+        orch.register(Arc::new(agent.with_model(model_id)));
+    }
+    Arc::new(orch)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn register_commands(
     kernel: &Kernel,
     router: &Arc<ModelRouter>,
     tools: &Arc<ToolRegistry>,
-    orchestrator: &Arc<Orchestrator>,
+    current_model: &Arc<std::sync::RwLock<String>>,
     skills: &SharedSkills,
     mcp_config: &Arc<Mutex<McpServersConfig>>,
     mcp: &Arc<Mutex<McpConnections>>,
@@ -1213,13 +1343,17 @@ async fn register_commands(
     model_id: &str,
     root: &Path,
     indexer: &Indexer,
+    agent_memory: &SharedMemory,
 ) {
     // agent.run — run an agent against a goal; its progress streams as agent.*.
     {
         let router = router.clone();
         let tools = tools.clone();
-        let orchestrator = orchestrator.clone();
+        let current_model = current_model.clone();
+        let fallback_model = model_id.to_string();
         let bus = kernel.bus().clone();
+        let agent_memory = agent_memory.clone();
+        let root = root.to_path_buf();
         kernel
             .commands()
             .register(
@@ -1227,9 +1361,19 @@ async fn register_commands(
                 Arc::new(move |cmd: Command| {
                     let router = router.clone();
                     let tools = tools.clone();
-                    let orchestrator = orchestrator.clone();
+                    let current_model = current_model.clone();
+                    let fallback_model = fallback_model.clone();
                     let bus = bus.clone();
+                    let agent_memory = agent_memory.clone();
+                    let root = root.clone();
                     async move {
+                        // The roster is built from the *current* model, so a
+                        // switch in the GUI applies to this very run.
+                        let model = current_model
+                            .read()
+                            .map(|m| m.clone())
+                            .unwrap_or(fallback_model);
+                        let orchestrator = build_orchestrator(&model);
                         let goal = cmd
                             .args
                             .get("goal")
@@ -1257,10 +1401,29 @@ async fn register_commands(
                             ]),
                             bus,
                         );
-                        let outcome = orchestrator
-                            .run(&agent, &goal, &mut ctx)
-                            .await
-                            .map_err(KernelError::command_failed)?;
+                        // Seed the run with everything remembered so far — prior
+                        // turns this session, memory.write notes, and the persisted
+                        // session from previous boots — so the agent can actually
+                        // recall earlier chats instead of starting blank each goal.
+                        let seeded = match agent_memory.lock() {
+                            Ok(mem) => {
+                                ctx.memory.restore(mem.snapshot());
+                                ctx.memory.len()
+                            }
+                            Err(_) => 0,
+                        };
+                        let result = orchestrator.run(&agent, &goal, &mut ctx).await;
+                        // Whatever the outcome, carry this run's new memories (the
+                        // goal, tool results, the closing summary) back into the
+                        // shared store and persist it, so the next goal — and the
+                        // next session — can pick up the thread.
+                        if let Ok(mut mem) = agent_memory.lock() {
+                            for item in ctx.memory.snapshot().into_iter().skip(seeded) {
+                                mem.remember(item.tier, item.content);
+                            }
+                            let _ = session::save(&root, &mem);
+                        }
+                        let outcome = result.map_err(KernelError::command_failed)?;
                         Ok(serde_json::json!({
                             "agent": agent,
                             "status": format!("{:?}", outcome.status),

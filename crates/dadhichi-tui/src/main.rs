@@ -340,10 +340,14 @@ async fn handle_key(ctrl: &mut AppController, code: KeyCode, mods: KeyModifiers)
                 _ => {}
             },
             // Tab indents (line-aware with a selection); Shift+Tab leaves the
-            // editor, since Tab itself is taken by indentation.
+            // editor, since Tab itself is taken by indentation. With no open
+            // document there is nothing to indent, so Tab keeps cycling panels
+            // instead of trapping focus in an empty editor.
             KeyCode::Tab => {
                 if let Some(doc) = ctrl.ui_mut().active_document_mut() {
                     doc.indent();
+                } else {
+                    ctrl.ui_mut().cycle_focus();
                 }
             }
             KeyCode::BackTab => ctrl.ui_mut().cycle_focus(),
@@ -605,6 +609,9 @@ fn activate(ctrl: &mut AppController) {
         Ok(text) => {
             ctrl.ui_mut().open_document(Some(row.path.clone()), &text);
             ctrl.ui_mut().set_focus(Focus::Editor);
+            // Tell the file's language server about it so diagnostics arrive
+            // in the Problems panel without waiting for a completion request.
+            ctrl.sync_active_document();
         }
         Err(err) => {
             ctrl.ui_mut()

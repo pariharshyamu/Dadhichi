@@ -45,6 +45,7 @@ pub mod orchestrator;
 pub mod plan;
 pub mod rules;
 pub mod semantic;
+pub mod session;
 pub mod task_tool;
 pub mod verify;
 pub mod workflow;

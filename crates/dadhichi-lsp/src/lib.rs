@@ -35,4 +35,4 @@ pub use manager::LspManager;
 pub use protocol::{
     CompletionItem, Diagnostic, Location, Position, PublishDiagnostics, Range, Severity,
 };
-pub use registry::{ServerSpec, server_for_path};
+pub use registry::{ServerSpec, server_for_path, server_for_path_in_root};

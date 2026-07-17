@@ -32,6 +32,21 @@
   </provides>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.1.15" date="2026-07-17">
+      <description>
+        <p>A full web GUI (dadhichi-gui): a local, offline, browser-served IDE
+        with the Monaco editor, live agent console with approval cards, Problems
+        panel with in-editor markers, runtime Ollama model switching, an
+        Integrations panel for MCP connectors (including Claude Code and Gemini
+        CLI presets), and Open Folder / new file / new folder workspace loading.
+        Windows language servers fixed end-to-end (valid file URIs, npm .cmd
+        server spawning, backslash path matching), Angular (ngserver) support
+        added, diagnostics now flow on file open/save with a built-in HTML
+        structural checker, and TUI/GUI sessions share the CLI's persistent
+        cross-run memory. Plus a TUI Tab focus-trap fix and Windows fixes for
+        the coding-eval harness.</p>
+      </description>
+    </release>
     <release version="0.1.14" date="2026-07-16">
       <description>
         <p>CLI usability: unquoted multi-word goals are no longer truncated to the

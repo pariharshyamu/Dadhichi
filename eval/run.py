@@ -39,16 +39,19 @@ FIXTURE_SKIP = {"task.txt", "verify.sh", "script.jsonl"}
 SCRIPT_MODE = os.environ.get("DADHICHI_EVAL_MODE") == "script"
 
 
+BIN_NAME = "dadhichi.exe" if os.name == "nt" else "dadhichi"
+
+
 def find_binary() -> str:
     # Absolute, because tasks run with cwd set to a temp workspace.
     if env := os.environ.get("DADHICHI_BIN"):
         p = Path(env)
         return str(p if p.is_absolute() else (Path.cwd() / p).resolve())
     for profile in ("release", "debug"):
-        candidate = REPO / "target" / profile / "dadhichi"
+        candidate = REPO / "target" / profile / BIN_NAME
         if candidate.exists():
             return str(candidate)
-    return str(REPO / "target" / "debug" / "dadhichi")
+    return str(REPO / "target" / "debug" / BIN_NAME)
 
 
 def provider_label() -> str:
@@ -58,7 +61,7 @@ def provider_label() -> str:
         return f"anthropic ({os.environ.get('DADHICHI_MODEL', 'default')})"
     if os.environ.get("OPENAI_API_KEY"):
         return f"openai ({os.environ.get('DADHICHI_MODEL', 'default')})"
-    if os.environ.get("OLLAMA_HOST"):
+    if os.environ.get("OLLAMA_HOST") or os.environ.get("OLLAMA_MODEL") or os.environ.get("DADHICHI_PROVIDER") == "ollama":
         return f"ollama ({os.environ.get('OLLAMA_MODEL', 'default')})"
     return "mock (offline — expect 0; baseline only)"
 

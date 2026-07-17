@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dadhichi</title>
+<link rel="stylesheet" href="/style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>◆</text></svg>">
+</head>
+<body>
+<div id="shell">
+  <header id="topbar">
+    <div class="brand">◆ <span>Dadhichi</span></div>
+    <button id="workspace-name" class="workspace ws-btn" title="Open folder…"></button>
+    <div class="spacer"></div>
+    <div id="agent-phase" class="phase idle"><span class="dot"></span><span id="phase-label">idle</span></div>
+    <select id="model-select" class="chip model-select" title="Switch model"></select>
+  </header>
+
+  <aside id="explorer">
+    <div class="panel-title explorer-head">
+      <span>Explorer</span>
+      <span class="explorer-actions">
+        <button id="new-file" title="New file…">＋</button>
+        <button id="new-folder" title="New folder…">🗀</button>
+        <button id="refresh-tree" title="Refresh">⟳</button>
+      </span>
+    </div>
+    <div id="tree" class="tree"></div>
+  </aside>
+
+  <main id="center">
+    <div id="tabstrip"></div>
+    <div id="editor-host">
+      <div id="editor"></div>
+      <div id="welcome">
+        <div class="w-mark">◆</div>
+        <h1>Dadhichi</h1>
+        <p>The agent-native IDE.</p>
+        <p class="w-hint">Open a file from the Explorer, or give the agent a goal on the right.</p>
+      </div>
+    </div>
+    <section id="bottom">
+      <div class="bottom-tabs">
+        <button class="btab active" data-tab="problems">Problems <span id="problem-count" class="badge">0</span></button>
+        <button class="btab" data-tab="integrations">Integrations</button>
+        <button class="btab" data-tab="log">Events</button>
+      </div>
+      <div id="problems" class="bottom-body"></div>
+      <div id="integrations" class="bottom-body hidden"></div>
+      <div id="log" class="bottom-body hidden"></div>
+    </section>
+  </main>
+
+  <aside id="agent">
+    <div class="panel-title">Agent Console</div>
+    <div id="chat"></div>
+    <div id="composer">
+      <textarea id="goal" rows="2" placeholder="Describe a goal for the agent…  (Enter to run)"></textarea>
+    </div>
+  </aside>
+
+  <div id="folder-modal" class="modal hidden">
+    <div class="modal-card">
+      <div class="modal-title">Open Folder</div>
+      <input id="folder-path" type="text" placeholder="Type a path, or browse below…" spellcheck="false">
+      <div id="folder-recent" class="folder-recent"></div>
+      <div id="folder-list" class="folder-list"></div>
+      <div class="modal-actions">
+        <button id="folder-cancel">Cancel</button>
+        <button id="folder-open" class="primary">Open this folder</button>
+      </div>
+    </div>
+  </div>
+
+  <footer id="statusbar">
+    <span id="conn" class="conn off">●</span>
+    <span id="status-text">connecting…</span>
+    <div class="spacer"></div>
+    <span id="cursor-pos"></span>
+  </footer>
+</div>
+
+<script>
+  // Monaco worker bootstrap: everything is served same-origin from the binary.
+  self.MonacoEnvironment = {
+    getWorkerUrl: function () { return '/vs/base/worker/workerMain.js'; }
+  };
+</script>
+<script src="/vs/loader.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>

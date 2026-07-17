@@ -6,3 +6,6 @@
 .vscode/
 *.log
 /dadhichi.db
+# Per-workspace agent session memory (written by the CLI, chat REPL, TUI, and
+# GUI — including copies test runs leave inside crate directories).
+**/.dadhichi/session.json

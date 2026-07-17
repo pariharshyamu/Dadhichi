@@ -111,13 +111,31 @@ impl LspClient {
         bus: Option<EventBus>,
     ) -> Result<Self, LspError> {
         use std::process::Stdio;
-        let mut child = tokio::process::Command::new(command)
-            .args(args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|e| LspError::Io(e.to_string()))?;
+        let spawn_direct = || {
+            let mut cmd = tokio::process::Command::new(command);
+            cmd.args(args)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null());
+            cmd.spawn()
+        };
+        let mut child = match spawn_direct() {
+            Ok(child) => child,
+            // npm-installed servers (typescript-language-server, pyright,
+            // ngserver, ...) are `.cmd` shims on Windows, which CreateProcess
+            // can't launch by bare name — let cmd.exe resolve PATHEXT.
+            Err(err) if cfg!(windows) && err.kind() == std::io::ErrorKind::NotFound => {
+                let mut cmd = tokio::process::Command::new("cmd");
+                cmd.arg("/C")
+                    .arg(command)
+                    .args(args)
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null());
+                cmd.spawn().map_err(|e| LspError::Io(e.to_string()))?
+            }
+            Err(err) => return Err(LspError::Io(err.to_string())),
+        };
 
         let stdout = child.stdout.take().ok_or(LspError::Closed)?;
         let stdin = child.stdin.take().ok_or(LspError::Closed)?;

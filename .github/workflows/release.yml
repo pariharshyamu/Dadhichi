@@ -59,7 +59,7 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Build release binaries
-        run: cargo build --release --locked --target ${{ matrix.target }} --bin dadhichi --bin dadhichi-tui
+        run: cargo build --release --locked --target ${{ matrix.target }} --bin dadhichi --bin dadhichi-tui --bin dadhichi-gui
 
       - name: Package (Unix)
         if: matrix.ext == 'tar.gz'
@@ -69,6 +69,7 @@ jobs:
           mkdir -p "$staging"
           cp "target/${{ matrix.target }}/release/${BIN_NAME}" "$staging/"
           cp "target/${{ matrix.target }}/release/${BIN_NAME}-tui" "$staging/"
+          cp "target/${{ matrix.target }}/release/${BIN_NAME}-gui" "$staging/"
           cp README.md LICENSE "$staging/"
           cp packaging/linux/dadhichi.1 "$staging/" 2>/dev/null || true
           tar -czf "${staging}.tar.gz" "$staging"
@@ -82,6 +83,7 @@ jobs:
           mkdir -p "$staging"
           cp "target/${{ matrix.target }}/release/${BIN_NAME}.exe" "$staging/"
           cp "target/${{ matrix.target }}/release/${BIN_NAME}-tui.exe" "$staging/"
+          cp "target/${{ matrix.target }}/release/${BIN_NAME}-gui.exe" "$staging/"
           cp README.md LICENSE "$staging/"
           7z a "${staging}.zip" "$staging" >/dev/null
           certutil -hashfile "${staging}.zip" SHA256 | sed -n 2p | tr -d ' \r' > "${staging}.zip.sha256"
@@ -109,7 +111,7 @@ jobs:
       - name: Install packagers
         run: cargo install cargo-deb cargo-generate-rpm --locked
       - name: Build release binaries
-        run: cargo build --release --locked --bin dadhichi --bin dadhichi-tui
+        run: cargo build --release --locked --bin dadhichi --bin dadhichi-tui --bin dadhichi-gui
       - name: Build .deb
         run: cargo deb -p dadhichi --no-build --output dist/
       - name: Build .rpm

@@ -143,8 +143,28 @@ impl ProblemsPanel {
 /// stripping the URI scheme, or when one is a suffix of the other on a path
 /// separator boundary (so a relative editor path lines up with an absolute URI).
 fn paths_match(diag_file: &str, doc: &str) -> bool {
-    let d = diag_file.strip_prefix("file://").unwrap_or(diag_file);
-    d == doc || ends_on_boundary(d, doc) || ends_on_boundary(doc, d)
+    let d = normalize_path(diag_file);
+    let doc = normalize_path(doc);
+    d == doc || ends_on_boundary(&d, &doc) || ends_on_boundary(&doc, &d)
+}
+
+/// A comparable form of a URI or path: scheme stripped, `%20` decoded,
+/// backslashes forward-slashed, and the URI's extra slash before a Windows
+/// drive letter dropped (with the drive letter lower-cased, since servers and
+/// editors disagree about its case) — so `file:///C:/A%20B/x.rs` and
+/// `c:\A B\x.rs` compare equal.
+fn normalize_path(s: &str) -> String {
+    let s = s.strip_prefix("file://").unwrap_or(s);
+    let mut s = s.replace('\\', "/").replace("%20", " ");
+    let b = s.as_bytes();
+    if b.len() >= 3 && b[0] == b'/' && b[1].is_ascii_alphabetic() && b[2] == b':' {
+        s.remove(0);
+    }
+    let mut bytes = s.into_bytes();
+    if bytes.len() >= 2 && bytes[1] == b':' {
+        bytes[0] = bytes[0].to_ascii_lowercase();
+    }
+    String::from_utf8(bytes).expect("ascii-only edits keep the string utf-8")
 }
 
 /// `long` ends with `short` at a `/` boundary (or equals it).
@@ -220,6 +240,27 @@ mod tests {
         // No diagnostic on other lines, and no false match on a partial name.
         assert_eq!(panel.severity_on_line("/home/x/src/main.rs", 5), None);
         assert_eq!(panel.severity_on_line("ain.rs", 4), None, "not a boundary");
+    }
+
+    #[test]
+    fn windows_uris_match_backslash_editor_paths() {
+        let mut panel = ProblemsPanel::new();
+        panel.apply(&diag(
+            "file:///C:/My%20Projects/app/src/main.rs",
+            2,
+            "error",
+            "mismatch",
+        ));
+
+        // Absolute Windows path, backslashes, different drive-letter case.
+        assert_eq!(
+            panel.severity_on_line(r"c:\My Projects\app\src\main.rs", 2),
+            Some("error")
+        );
+        // Relative editor path with backslashes lines up on a boundary.
+        assert_eq!(panel.severity_on_line(r"src\main.rs", 2), Some("error"));
+        // Still no false match on a partial file name.
+        assert_eq!(panel.severity_on_line(r"ain.rs", 2), None);
     }
 
     #[test]

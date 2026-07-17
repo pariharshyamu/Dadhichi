@@ -32,6 +32,55 @@ impl ServerSpec {
     }
 }
 
+/// The language server for `path` within the workspace at `root` — like
+/// [`server_for_path`], plus project-aware overrides: inside an Angular
+/// workspace (a directory with `angular.json` between the file and the root),
+/// TypeScript and template files are served by the Angular language server
+/// (`ngserver`, from `@angular/language-server`), which layers template
+/// intelligence over the plain TypeScript server.
+pub fn server_for_path_in_root(root: &Path, path: &Path) -> Option<ServerSpec> {
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    if matches!(ext, "ts" | "html")
+        && let Some(ng_root) = angular_root(root, path)
+    {
+        let node_modules = ng_root.join("node_modules").display().to_string();
+        let language_id = if ext == "ts" { "typescript" } else { "html" };
+        return Some(ServerSpec::new(
+            language_id,
+            "ngserver",
+            &[
+                "--stdio",
+                "--tsProbeLocations",
+                &node_modules,
+                "--ngProbeLocations",
+                &node_modules,
+            ],
+        ));
+    }
+    server_for_path(path)
+}
+
+/// The nearest ancestor of `path` (up to and including `root`) holding an
+/// `angular.json`, i.e. the Angular workspace the file belongs to.
+fn angular_root(root: &Path, path: &Path) -> Option<std::path::PathBuf> {
+    let abs = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        root.join(path)
+    };
+    let mut dir = abs.parent();
+    while let Some(d) = dir {
+        if d.join("angular.json").is_file() {
+            return Some(d.to_path_buf());
+        }
+        if d == root {
+            break;
+        }
+        dir = d.parent();
+    }
+    None
+}
+
 /// The language server for `path`, by extension — `None` for files no entry in
 /// the table covers.
 pub fn server_for_path(path: &Path) -> Option<ServerSpec> {
@@ -102,5 +151,33 @@ mod tests {
         // Unknown extensions and extension-less files have no server.
         assert!(server_for_path(Path::new("notes.txt")).is_none());
         assert!(server_for_path(Path::new("Makefile")).is_none());
+    }
+
+    #[test]
+    fn angular_workspaces_get_the_angular_language_server() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("angular.json"), "{}").unwrap();
+        std::fs::create_dir_all(root.join("src/app")).unwrap();
+
+        // Components and templates inside the workspace resolve to ngserver,
+        // pointed at the workspace's node_modules for its probe locations.
+        let spec = server_for_path_in_root(root, Path::new("src/app/app.component.ts")).unwrap();
+        assert_eq!(spec.command, "ngserver");
+        assert_eq!(spec.language_id, "typescript");
+        assert!(spec.args.iter().any(|a| a.contains("node_modules")));
+
+        let spec = server_for_path_in_root(root, Path::new("src/app/app.component.html")).unwrap();
+        assert_eq!(spec.command, "ngserver");
+        assert_eq!(spec.language_id, "html");
+
+        // Other languages in the same workspace keep their own servers.
+        let spec = server_for_path_in_root(root, Path::new("tools/gen.go")).unwrap();
+        assert_eq!(spec.command, "gopls");
+
+        // Outside an Angular workspace, .ts falls back to the TS server.
+        let plain = tempfile::tempdir().unwrap();
+        let spec = server_for_path_in_root(plain.path(), Path::new("src/app.ts")).unwrap();
+        assert_eq!(spec.command, "typescript-language-server");
     }
 }

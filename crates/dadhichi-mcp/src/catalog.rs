@@ -179,6 +179,30 @@ pub fn builtin_connectors() -> &'static [Connector] {
             secrets: &[],
             homepage: "https://github.com/modelcontextprotocol/servers/tree/main/src/time",
         },
+        // External agentic CLIs exposed as MCP tool servers, so Dadhichi's
+        // agents can delegate to them (and their tools show in the palette).
+        Connector {
+            id: "claude-code",
+            description: "Claude Code as a tool server: delegate coding tasks to Anthropic's agentic CLI",
+            command: "claude",
+            args: &["mcp", "serve"],
+            grants: &[
+                Permission::ReadWorkspace,
+                Permission::WriteWorkspace,
+                Permission::RunCommands,
+            ],
+            secrets: &[],
+            homepage: "https://docs.anthropic.com/en/docs/claude-code/mcp",
+        },
+        Connector {
+            id: "gemini-cli",
+            description: "Google's Gemini CLI as a tool server (experimental MCP mode)",
+            command: "gemini",
+            args: &["mcp", "serve"],
+            grants: &[Permission::ReadWorkspace, Permission::RunCommands],
+            secrets: &[],
+            homepage: "https://github.com/google-gemini/gemini-cli",
+        },
     ]
 }
 
