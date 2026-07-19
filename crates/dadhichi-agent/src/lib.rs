@@ -53,7 +53,7 @@ pub mod workflow;
 #[cfg(test)]
 mod test_support;
 
-pub use agent::{Agent, AgentContext, AgentError, AgentOutcome, AgentStatus};
+pub use agent::{Agent, AgentContext, AgentError, AgentOutcome, AgentStatus, RunControl};
 pub use agents::{ClaudeCodeAgent, ConversationalAgent, ReactAgent, SpecialistAgent};
 pub use compaction::{CompactionPolicy, CompactionReport, estimate_tokens};
 pub use delegate::{

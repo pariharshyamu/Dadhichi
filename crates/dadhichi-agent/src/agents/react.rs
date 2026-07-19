@@ -78,6 +78,11 @@ pub fn full_stack_system_prompt() -> &'static str {
      work, use `memory.write` to record durable facts and decisions so later turns can pick them \
      up.\n\
      - COMMIT sensibly when asked, with clear messages.\n\
+     - TOKEN DISCIPLINE: use the cheapest tool that answers the question. Locate before you \
+     read: `fs.grep`/`fs.glob` to find the place, then `fs.read` with offset/limit for just \
+     that slice — never re-read a file you already have in context. Change existing files with \
+     `fs.edit` (send only the snippet that changes); reserve `fs.write` for new files or full \
+     rewrites. After an edit, `code.check` the file instead of re-reading it whole.\n\
      - Prefer the project's existing conventions and dependencies; match the surrounding code."
 }
 
@@ -276,7 +281,26 @@ impl Agent for ReactAgent {
         ctx.emit_plan(&plan);
 
         let tool_specs = ctx.tools.list();
-        let system = self.system_prompt(&Self::describe_tools(&tool_specs));
+        let mut system = self.system_prompt(&Self::describe_tools(&tool_specs));
+
+        // Self-improvement: lessons distilled from previous runs in this
+        // workspace (stored as `lesson:` long-term memories) are injected up
+        // front, so past mistakes inform this run before it repeats them.
+        let lessons: Vec<String> = ctx
+            .memory
+            .recall_tier(Tier::LongTerm)
+            .iter()
+            .filter(|item| item.content.starts_with("lesson:"))
+            .rev()
+            .take(5)
+            .map(|item| item.content.trim_start_matches("lesson:").trim().to_string())
+            .collect();
+        if !lessons.is_empty() {
+            system.push_str("\n\nLESSONS from previous runs in this workspace:\n");
+            for lesson in lessons.iter().rev() {
+                system.push_str(&format!("- {lesson}\n"));
+            }
+        }
 
         let mut messages = vec![Message::system(system), Message::user(goal)];
 
@@ -321,8 +345,26 @@ impl Agent for ReactAgent {
         // budget; between rounds the agent is asked to reflect on progress and
         // decide what remains, so a long task continues coherently instead of
         // hard-stopping the moment a fixed tool-call count is reached.
+        let mut cancelled = false;
+        let mut last_check_clean: Option<bool> = None;
+        let mut had_tool_errors = false;
+
         'rounds: for round in 0..self.max_rounds {
             for step_in_round in 0..self.max_steps {
+                // The user pressed Stop: wind down immediately but cleanly.
+                if ctx.control.is_cancelled() {
+                    cancelled = true;
+                    break 'rounds;
+                }
+                // Mid-run steering: messages the user typed while the agent
+                // worked join the conversation as fresh user turns.
+                for steer in ctx.control.drain_messages() {
+                    ctx.emit("agent.steered", serde_json::json!({ "text": steer }));
+                    messages.push(Message::user(format!(
+                        "USER (mid-run steering): {steer}"
+                    )));
+                }
+
                 let request = CompletionRequest {
                     model: self.model.clone(),
                     messages: messages.clone(),
@@ -397,6 +439,9 @@ impl Agent for ReactAgent {
                 );
                 messages.push(Message::assistant(reply));
 
+                let edited_path = matches!(tool_name, "fs.write" | "fs.edit")
+                    .then(|| args.get("path").and_then(|p| p.as_str()).map(String::from))
+                    .flatten();
                 match ctx.tools.invoke(tool_name, args, &ctx.grants).await {
                     Ok(result) => {
                         if mutating_tools.contains(tool_name) {
@@ -406,11 +451,23 @@ impl Agent for ReactAgent {
                             "agent.tool.result",
                             serde_json::json!({ "tool": tool_name, "result": result }),
                         );
-                        messages.push(Message::user(format!(
+                        // Large results are clipped before joining the context;
+                        // the model is told how to fetch a targeted slice.
+                        messages.push(Message::user(clip_result(&format!(
                             "TOOL RESULT [{tool_name}]: {result}"
-                        )));
+                        ))));
+
+                        // Verification loop: an edit is immediately checked
+                        // (when a `code.check` tool is registered) and any
+                        // problems go straight back to the model — an agent
+                        // must not declare victory on a file it just broke.
+                        if let Some(path) = edited_path {
+                            last_check_clean =
+                                self.auto_check(ctx, &path, &mut messages).await;
+                        }
                     }
                     Err(err) => {
+                        had_tool_errors = true;
                         let msg = err.to_string();
                         ctx.emit(
                             "agent.tool.error",
@@ -468,13 +525,19 @@ impl Agent for ReactAgent {
         plan.complete(step_act);
         ctx.emit_plan(&plan);
 
-        let summary = final_answer.unwrap_or_else(|| {
-            format!(
-                "Reached the tool-call budget ({} calls across {} rounds) with substantial work \
-                 done but no explicit final answer. See the transcript for what was accomplished.",
-                steps_taken, self.max_rounds
-            )
-        });
+        let summary = if cancelled {
+            ctx.emit("agent.status", serde_json::json!({ "status": "cancelled" }));
+            format!("Stopped by the user after {steps_taken} tool call(s).")
+        } else {
+            final_answer.unwrap_or_else(|| {
+                format!(
+                    "Reached the tool-call budget ({} calls across {} rounds) with substantial \
+                     work done but no explicit final answer. See the transcript for what was \
+                     accomplished.",
+                    steps_taken, self.max_rounds
+                )
+            })
+        };
         ctx.memory.remember(Tier::Conversation, summary.clone());
         ctx.emit(
             "agent.message",
@@ -484,10 +547,30 @@ impl Agent for ReactAgent {
         plan.complete(step_report);
         ctx.emit_plan(&plan);
 
+        // Self-improvement: distill one durable lesson from an eventful run
+        // (tool errors, verification failures) into long-term memory. The
+        // session store persists it, so the *next* run starts smarter.
+        if !cancelled && (had_tool_errors || last_check_clean == Some(false) || steps_taken >= 4) {
+            self.reflect(ctx, &mut messages).await;
+        }
+
+        // Confidence is earned, not asserted: edits that were verified clean
+        // score high; unverified edits medium; a broken check low.
+        let confidence = match (mutated, last_check_clean) {
+            (true, Some(true)) => 0.9,
+            (true, None) => 0.7,
+            (true, Some(false)) => 0.4,
+            (false, _) => 0.75,
+        };
+
         let outcome = AgentOutcome {
-            status: AgentStatus::Completed,
+            status: if cancelled {
+                AgentStatus::Cancelled
+            } else {
+                AgentStatus::Completed
+            },
             summary,
-            confidence: 0.9,
+            confidence,
             plan,
         };
         ctx.emit(
@@ -496,6 +579,101 @@ impl Agent for ReactAgent {
         );
         Ok(outcome)
     }
+}
+
+impl ReactAgent {
+    /// Run the registered `code.check` tool (if any) against a just-edited
+    /// file and feed problems back into the conversation. Returns whether the
+    /// check came back clean (`None` when no checker is available or the file
+    /// type isn't supported).
+    async fn auto_check(
+        &self,
+        ctx: &mut AgentContext,
+        path: &str,
+        messages: &mut Vec<Message>,
+    ) -> Option<bool> {
+        if !ctx.tools.list().iter().any(|s| s.name == "code.check") {
+            return None;
+        }
+        let result = ctx
+            .tools
+            .invoke(
+                "code.check",
+                serde_json::json!({ "path": path }),
+                &ctx.grants,
+            )
+            .await
+            .ok()?;
+        if !result.get("supported").and_then(|s| s.as_bool()).unwrap_or(true) {
+            return None;
+        }
+        ctx.emit(
+            "agent.tool.result",
+            serde_json::json!({ "tool": "code.check", "result": result }),
+        );
+        let count = result.get("count").and_then(|c| c.as_u64()).unwrap_or(0);
+        if count > 0 {
+            messages.push(Message::user(clip_result(&format!(
+                "VERIFICATION [{path}]: your edit left {count} problem(s): {}. Fix them with \
+                 fs.edit before finishing.",
+                result.get("problems").cloned().unwrap_or_default()
+            ))));
+            Some(false)
+        } else {
+            Some(true)
+        }
+    }
+
+    /// Ask the model for one durable, workspace-specific lesson from this run
+    /// and store it as long-term memory (`lesson: …`). One cheap extra call;
+    /// the session store persists it, so future runs are seeded with it.
+    async fn reflect(&self, ctx: &mut AgentContext, messages: &mut Vec<Message>) {
+        messages.push(Message::user(
+            "Final step: in ONE line of at most 120 characters, state the single most useful \
+             lesson from this run for future work in this workspace (a pitfall, a convention, a \
+             faster route). Reply with exactly `lesson: <text>` and nothing else. If there is no \
+             lesson worth keeping, reply `lesson: none`.",
+        ));
+        let request = CompletionRequest {
+            model: self.model.clone(),
+            messages: messages.clone(),
+            params: Default::default(),
+        };
+        let Ok(completion) = ctx.models.complete(request).await else {
+            return;
+        };
+        let line = completion.content.trim();
+        if let Some(text) = line.strip_prefix("lesson:") {
+            let text = text.trim();
+            if !text.is_empty() && text != "none" && text.len() <= 200 {
+                ctx.memory.remember(Tier::LongTerm, format!("lesson: {text}"));
+                ctx.emit("agent.lesson", serde_json::json!({ "lesson": text }));
+            }
+        }
+    }
+}
+
+/// Clip an oversized tool result before it joins the conversation, telling the
+/// model how to fetch precisely what it needs instead. Keeps one careless read
+/// from flooding the context window.
+fn clip_result(text: &str) -> String {
+    const MAX_CHARS: usize = 6000;
+    const HEAD: usize = 4500;
+    const TAIL: usize = 800;
+    if text.len() <= MAX_CHARS {
+        return text.to_string();
+    }
+    let head_end = (0..=HEAD).rev().find(|i| text.is_char_boundary(*i)).unwrap_or(0);
+    let tail_start = (text.len() - TAIL..text.len())
+        .find(|i| text.is_char_boundary(*i))
+        .unwrap_or(text.len());
+    format!(
+        "{}\n…[{} chars clipped — use fs.read with offset/limit or fs.grep to fetch exactly \
+         what you need]…\n{}",
+        &text[..head_end],
+        text.len() - head_end - (text.len() - tail_start),
+        &text[tail_start..]
+    )
 }
 
 /// Whether a goal's wording asks for changes to be made (as opposed to a
@@ -731,6 +909,123 @@ mod tests {
             .unwrap();
         assert_eq!(outcome.status, AgentStatus::Completed);
         assert!(outcome.summary.contains("attempt 3"));
+    }
+
+    /// A fake tool with a configurable name/permissions and canned reply.
+    #[derive(Debug)]
+    struct FakeTool {
+        name: &'static str,
+        permissions: Vec<Permission>,
+        reply: serde_json::Value,
+    }
+
+    #[async_trait]
+    impl Tool for FakeTool {
+        fn spec(&self) -> ToolSpec {
+            ToolSpec {
+                name: self.name.into(),
+                description: "fake".into(),
+                input_schema: serde_json::json!({ "type": "object" }),
+                permissions: self.permissions.clone(),
+            }
+        }
+        async fn invoke(&self, _args: serde_json::Value) -> ToolResult {
+            Ok(self.reply.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stopped_run_reports_cancelled() {
+        let tools = Arc::new(ToolRegistry::new());
+        let provider = Arc::new(ScriptedProvider::new(vec!["should never be consumed"]));
+        let (mut ctx, _bus) = ctx_with(provider, tools);
+        ctx.control.stop();
+
+        let outcome = ReactAgent::new("mock")
+            .run("what is up", &mut ctx)
+            .await
+            .unwrap();
+        assert_eq!(outcome.status, AgentStatus::Cancelled);
+        assert!(outcome.summary.contains("Stopped by the user"));
+    }
+
+    #[tokio::test]
+    async fn steering_messages_reach_the_conversation_and_the_bus() {
+        let tools = Arc::new(ToolRegistry::new());
+        let provider = Arc::new(ScriptedProvider::new(vec![r#"{"final":"noted"}"#]));
+        let (mut ctx, bus) = ctx_with(provider, tools);
+        let mut steered = bus.subscribe_topic("agent.steered");
+        ctx.control.say("only touch the parser module");
+
+        let outcome = ReactAgent::new("mock")
+            .run("what is up", &mut ctx)
+            .await
+            .unwrap();
+        assert_eq!(outcome.status, AgentStatus::Completed);
+        let event = steered.recv().await.unwrap();
+        assert_eq!(event.payload["text"], "only touch the parser module");
+        assert!(ctx.control.drain_messages().is_empty(), "inbox was drained");
+    }
+
+    #[tokio::test]
+    async fn an_eventful_run_distills_a_lesson_into_memory() {
+        // A tool error makes the run "eventful"; the reflection turn's
+        // `lesson:` line must land in long-term memory for future seeding.
+        let tools = Arc::new(ToolRegistry::new());
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            r#"{"tool":"terminal.run","args":{"command":"x"}}"#,
+            r#"{"final":"could not run it"}"#,
+            "lesson: the terminal tool is unavailable here; use fs tools instead",
+        ]));
+        let (mut ctx, _bus) = ctx_with(provider, tools);
+
+        ReactAgent::new("mock").run("do a thing", &mut ctx).await.unwrap();
+
+        let lessons = ctx.memory.recall("lesson:");
+        assert_eq!(lessons.len(), 1);
+        assert!(lessons[0].content.contains("terminal tool is unavailable"));
+    }
+
+    #[tokio::test]
+    async fn edits_are_auto_checked_and_broken_ones_dent_confidence() {
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register(Arc::new(FakeTool {
+            name: "fs.write",
+            permissions: vec![Permission::RunCommands],
+            reply: serde_json::json!({ "path": "a.html", "bytes": 10 }),
+        }));
+        tools.register(Arc::new(FakeTool {
+            name: "code.check",
+            permissions: vec![],
+            reply: serde_json::json!({ "count": 2, "problems": ["unclosed <div>"] }),
+        }));
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            r#"{"tool":"fs.write","args":{"path":"a.html","content":"<div>"}}"#,
+            r#"{"final":"wrote the file"}"#,
+        ]));
+        let (mut ctx, _bus) = ctx_with(provider, tools);
+
+        let outcome = ReactAgent::new("mock")
+            .run("fix the page", &mut ctx)
+            .await
+            .unwrap();
+        assert_eq!(outcome.status, AgentStatus::Completed);
+        assert!(
+            outcome.confidence < 0.5,
+            "a failing post-edit check must dent confidence, got {}",
+            outcome.confidence
+        );
+    }
+
+    #[test]
+    fn clip_result_bounds_huge_results_with_guidance() {
+        let huge = "x".repeat(50_000);
+        let clipped = clip_result(&huge);
+        assert!(clipped.len() < 7_000);
+        assert!(clipped.contains("chars clipped"));
+        assert!(clipped.contains("fs.read"));
+        // Small results pass through untouched.
+        assert_eq!(clip_result("small"), "small");
     }
 
     #[test]

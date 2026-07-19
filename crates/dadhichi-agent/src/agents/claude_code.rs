@@ -178,7 +178,14 @@ impl Agent for ClaudeCodeAgent {
 
         let mut result: Option<(String, bool)> = None;
         let mut last_text = String::new();
+        let mut was_cancelled = false;
         while let Ok(Some(line)) = lines.next_line().await {
+            // The Stop button reaches headless Claude too: kill the subprocess.
+            if ctx.control.is_cancelled() {
+                let _ = child.kill().await;
+                was_cancelled = true;
+                break;
+            }
             match parse_stream_line(&line) {
                 StreamEvent::Tool(name, input) => {
                     ctx.emit(
@@ -201,6 +208,18 @@ impl Agent for ClaudeCodeAgent {
 
         plan.complete(step_run);
         ctx.emit_plan(&plan);
+
+        if was_cancelled {
+            ctx.emit("agent.status", serde_json::json!({ "status": "cancelled" }));
+            let summary = "Stopped by the user.".to_string();
+            ctx.memory.remember(Tier::Conversation, summary.clone());
+            return Ok(AgentOutcome {
+                status: AgentStatus::Cancelled,
+                summary,
+                confidence: 0.1,
+                plan,
+            });
+        }
 
         let (summary, failed) = match result {
             Some((text, is_error)) => (text, is_error),

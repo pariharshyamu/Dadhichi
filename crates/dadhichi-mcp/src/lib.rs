@@ -48,7 +48,7 @@ pub use connector::{
     connect_servers, resolve_env,
 };
 pub use devtools::{BuildTool, DbQueryTool, ScaffoldTool, TestRunnerTool};
-pub use fs::{FsGlobTool, FsGrepTool, FsListTool, FsReadTool, FsWriteTool};
+pub use fs::{FsEditTool, FsGlobTool, FsGrepTool, FsListTool, FsReadTool, FsWriteTool};
 pub use hooks::{GateDecision, PreToolUseGate};
 pub use permission::{
     Pattern, PermissionRule, RuleAction, RuleParseError, RuleSet, SessionMode, ToolCall, ToolClass,

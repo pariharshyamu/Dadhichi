@@ -60,6 +60,9 @@ impl Approver for BusApprover {
                 "tool": request.tool,
                 "permission": request.permission.to_string(),
                 "summary": request.summary(),
+                // The full arguments, so a frontend can render a real preview
+                // (e.g. a diff for fs.write) instead of a truncated one-liner.
+                "args": request.args,
             }),
         ));
 

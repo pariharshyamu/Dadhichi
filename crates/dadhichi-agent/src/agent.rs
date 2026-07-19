@@ -62,6 +62,50 @@ pub enum AgentError {
     Cancelled,
 }
 
+/// Live handles for a frontend to stop or steer a run in progress.
+///
+/// Cheap to clone (the run and the console hold the same handles). A default
+/// control is inert: never cancelled, empty inbox — so contexts built without
+/// a frontend behave exactly as before.
+#[derive(Debug, Clone, Default)]
+pub struct RunControl {
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+    inbox: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl RunControl {
+    /// A fresh, un-cancelled control.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Ask the run to stop at its next loop iteration.
+    pub fn stop(&self) {
+        self.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Whether a stop has been requested.
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Queue a user message for injection into the run's next model turn —
+    /// mid-run steering ("focus on the parser first", "skip the tests").
+    pub fn say(&self, text: impl Into<String>) {
+        if let Ok(mut inbox) = self.inbox.lock() {
+            inbox.push(text.into());
+        }
+    }
+
+    /// Take every queued steering message (oldest first).
+    pub fn drain_messages(&self) -> Vec<String> {
+        self.inbox
+            .lock()
+            .map(|mut inbox| std::mem::take(&mut *inbox))
+            .unwrap_or_default()
+    }
+}
+
 /// Everything an agent needs to do its work.
 ///
 /// The context bundles the shared services (model router, tool registry, event
@@ -82,6 +126,8 @@ pub struct AgentContext {
     pub correlation_id: Uuid,
     /// When to compact the conversation to stay inside the context window.
     pub compaction: CompactionPolicy,
+    /// Stop/steer handles shared with the frontend driving this run.
+    pub control: RunControl,
     bus: EventBus,
 }
 
@@ -100,6 +146,7 @@ impl AgentContext {
             memory: Memory::new(),
             correlation_id: Uuid::new_v4(),
             compaction: CompactionPolicy::from_env(),
+            control: RunControl::new(),
             bus,
         }
     }
@@ -203,6 +250,8 @@ impl AgentContext {
             memory: Memory::new(),
             correlation_id: Uuid::new_v4(),
             compaction: self.compaction,
+            // Shared deliberately: stopping a run stops its delegates too.
+            control: self.control.clone(),
             bus: self.bus.clone(),
         }
     }

@@ -25,10 +25,10 @@ use dadhichi_git::GitRepo;
 use dadhichi_index::Indexer;
 use dadhichi_index::store::SqliteSymbolStore;
 use dadhichi_mcp::{
-    ApprovalPolicy, BuildTool, DbQueryTool, EchoTool, FsGlobTool, FsGrepTool, FsListTool,
-    FsReadTool, FsWriteTool, GrantSet, McpConnection, McpConnections, McpServersConfig, Permission,
-    PermissionMode, ScaffoldTool, StateStore, TerminalTool, TestRunnerTool, ToolRegistry,
-    WorkspaceStore, connect_servers, connector,
+    ApprovalPolicy, BuildTool, DbQueryTool, EchoTool, FsEditTool, FsGlobTool, FsGrepTool,
+    FsListTool, FsReadTool, FsWriteTool, GrantSet, McpConnection, McpConnections,
+    McpServersConfig, Permission, PermissionMode, ScaffoldTool, StateStore, TerminalTool,
+    TestRunnerTool, ToolRegistry, WorkspaceStore, connect_servers, connector,
 };
 use dadhichi_security::{SecretResolver, Vault, VaultData};
 use dadhichi_skill::{
@@ -42,7 +42,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 pub mod approval;
+mod checktool;
 mod htmlcheck;
+
+use checktool::CodeCheckTool;
 pub use approval::{BusApprover, PendingApprovals};
 // Re-exported so a frontend can answer prompts without depending on dadhichi-mcp.
 pub use dadhichi_mcp::Decision;
@@ -82,6 +85,9 @@ pub struct AppController {
     /// The model the next `agent.run` executes under — switchable at runtime
     /// (the GUI's model picker writes here).
     current_model: Arc<std::sync::RwLock<String>>,
+    /// The stop/steer handles of the run in flight, if any — how the console's
+    /// Stop button and mid-run messages reach the loop.
+    active_run: Arc<Mutex<Option<dadhichi_agent::RunControl>>>,
     /// A delegated sub-agent's staged work held pending the user's land/discard
     /// decision. `Some` while the Review panel is up; `resolve_delegation` takes it.
     pending_delegation: Arc<Mutex<Option<PendingDelegation>>>,
@@ -247,6 +253,10 @@ impl AppController {
             t.register(Arc::new(FsReadTool::new(fs_store.clone())));
             t.register(Arc::new(FsWriteTool::new(fs_store.clone())));
             t.register(Arc::new(FsListTool::new(fs_store.clone())));
+            // Surgical edits (token-cheap alternative to full rewrites) and
+            // the structural checker the ReAct loop runs after every edit.
+            t.register(Arc::new(FsEditTool::new(fs_store.clone())));
+            t.register(Arc::new(CodeCheckTool::new(fs_store.clone())));
             // Search tools: content grep and filename glob over the sandbox.
             t.register(Arc::new(FsGrepTool::new(fs_store.clone())));
             t.register(Arc::new(FsGlobTool::new(fs_store.clone())));
@@ -319,6 +329,8 @@ impl AppController {
         // The active model, switchable at runtime (`agent.run` builds its
         // orchestrator from whatever this holds at dispatch time).
         let current_model = Arc::new(std::sync::RwLock::new(model_id.clone()));
+        let active_run: Arc<Mutex<Option<dadhichi_agent::RunControl>>> =
+            Arc::new(Mutex::new(None));
         let orchestrator = build_orchestrator(&model_id, &root);
 
         // Register the `task` delegation tool so any agent (or a model tool-loop)
@@ -345,6 +357,7 @@ impl AppController {
             &root,
             &indexer,
             &agent_memory,
+            &active_run,
         )
         .await;
 
@@ -400,8 +413,33 @@ impl AppController {
             root: root.clone(),
             model_id: model_id.clone(),
             current_model,
+            active_run,
             pending_delegation: Arc::new(Mutex::new(None)),
             lsp,
+        }
+    }
+
+    /// Stop the run in flight, if any. Returns whether one was running.
+    pub fn stop_active_run(&self) -> bool {
+        match self.active_run.lock().ok().and_then(|g| g.clone()) {
+            Some(control) => {
+                control.stop();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Queue a mid-run message for the agent in flight. Returns whether a run
+    /// was there to receive it (otherwise the caller should treat `text` as a
+    /// fresh goal).
+    pub fn steer_active_run(&self, text: &str) -> bool {
+        match self.active_run.lock().ok().and_then(|g| g.clone()) {
+            Some(control) => {
+                control.say(text);
+                true
+            }
+            None => false,
         }
     }
 
@@ -1353,6 +1391,7 @@ async fn register_commands(
     root: &Path,
     indexer: &Indexer,
     agent_memory: &SharedMemory,
+    active_run: &Arc<Mutex<Option<dadhichi_agent::RunControl>>>,
 ) {
     // agent.run — run an agent against a goal; its progress streams as agent.*.
     {
@@ -1363,6 +1402,7 @@ async fn register_commands(
         let bus = kernel.bus().clone();
         let agent_memory = agent_memory.clone();
         let root = root.to_path_buf();
+        let active_run = active_run.clone();
         kernel
             .commands()
             .register(
@@ -1375,6 +1415,7 @@ async fn register_commands(
                     let bus = bus.clone();
                     let agent_memory = agent_memory.clone();
                     let root = root.clone();
+                    let active_run = active_run.clone();
                     async move {
                         // The roster is built from the *current* model, so a
                         // switch in the GUI applies to this very run. Selecting
@@ -1428,7 +1469,16 @@ async fn register_commands(
                             }
                             Err(_) => 0,
                         };
+                        // Expose this run's stop/steer handles to the frontend.
+                        let control = dadhichi_agent::RunControl::new();
+                        ctx.control = control.clone();
+                        if let Ok(mut slot) = active_run.lock() {
+                            *slot = Some(control);
+                        }
                         let result = orchestrator.run(&agent, &goal, &mut ctx).await;
+                        if let Ok(mut slot) = active_run.lock() {
+                            *slot = None;
+                        }
                         // Whatever the outcome, carry this run's new memories (the
                         // goal, tool results, the closing summary) back into the
                         // shared store and persist it, so the next goal — and the

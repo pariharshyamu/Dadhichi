@@ -46,15 +46,26 @@ impl FsReadTool {
     }
 }
 
+/// Reads larger than this many lines are paged by default, so one `fs.read`
+/// can't flood the context with a file the model only needed a corner of.
+const READ_PAGE_LINES: usize = 400;
+
 #[async_trait]
 impl Tool for FsReadTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: Self::NAME.into(),
-            description: "Read a file from the workspace/state store by path.".into(),
+            description: "Read a file by path. Large files are paged: pass `offset` (0-based \
+                          line) and `limit` to read a specific slice instead of re-reading \
+                          everything."
+                .into(),
             input_schema: serde_json::json!({
                 "type": "object",
-                "properties": { "path": { "type": "string" } },
+                "properties": {
+                    "path": { "type": "string" },
+                    "offset": { "type": "integer", "description": "0-based first line" },
+                    "limit": { "type": "integer", "description": "max lines to return" }
+                },
                 "required": ["path"]
             }),
             permissions: vec![Permission::ReadWorkspace],
@@ -67,7 +78,130 @@ impl Tool for FsReadTool {
             .store
             .read(&path)
             .map_err(|e| ToolError::Execution(e.to_string()))?;
-        Ok(serde_json::json!({ "path": path, "content": content }))
+        let offset = args.get("offset").and_then(|o| o.as_u64()).map(|o| o as usize);
+        let limit = args.get("limit").and_then(|l| l.as_u64()).map(|l| l as usize);
+
+        let total = content.lines().count();
+        let explicit = offset.is_some() || limit.is_some();
+        let start = offset.unwrap_or(0);
+        let take = limit.unwrap_or(if explicit { READ_PAGE_LINES } else { total });
+
+        // Small files (or explicit full requests within the page size) come
+        // back whole; anything else is a slice with paging guidance.
+        if !explicit && total <= READ_PAGE_LINES {
+            return Ok(serde_json::json!({ "path": path, "content": content, "lines": total }));
+        }
+        let take = if explicit { take } else { READ_PAGE_LINES };
+        let slice: String = content
+            .lines()
+            .skip(start)
+            .take(take)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let end = (start + take).min(total);
+        Ok(serde_json::json!({
+            "path": path,
+            "content": slice,
+            "lines": total,
+            "showing": format!("lines {}..{} of {}", start, end, total),
+            "note": if end < total {
+                format!("file continues — fs.read {{\"path\":\"{path}\",\"offset\":{end}}} for more, \
+                         or fs.grep to jump straight to what you need")
+            } else {
+                String::new()
+            },
+        }))
+    }
+}
+
+/// Surgical find-and-replace in one file — the token-cheap way to change code.
+/// Sending only the changed snippet instead of rewriting the whole file with
+/// `fs.write` keeps large-file edits from costing tens of thousands of tokens.
+#[derive(Debug)]
+pub struct FsEditTool {
+    store: Arc<dyn StateStore>,
+}
+
+impl FsEditTool {
+    /// The registry name for this tool.
+    pub const NAME: &'static str = "fs.edit";
+
+    /// Edit files in `store`.
+    pub fn new(store: Arc<dyn StateStore>) -> Self {
+        Self { store }
+    }
+}
+
+#[async_trait]
+impl Tool for FsEditTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: Self::NAME.into(),
+            description: "Replace an exact text snippet in a file (surgical edit). `find` must \
+                          match exactly once — include surrounding lines to disambiguate — or \
+                          pass replace_all:true. Prefer this over fs.write for changes to \
+                          existing files."
+                .into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "find": { "type": "string" },
+                    "replace": { "type": "string" },
+                    "replace_all": { "type": "boolean" }
+                },
+                "required": ["path", "find", "replace"]
+            }),
+            permissions: vec![Permission::WriteWorkspace],
+        }
+    }
+
+    async fn invoke(&self, args: serde_json::Value) -> ToolResult {
+        let path = path_arg(&args)?;
+        let find = args
+            .get("find")
+            .and_then(|f| f.as_str())
+            .filter(|f| !f.is_empty())
+            .ok_or_else(|| ToolError::InvalidArguments("missing `find`".into()))?;
+        let replace = args
+            .get("replace")
+            .and_then(|r| r.as_str())
+            .ok_or_else(|| ToolError::InvalidArguments("missing `replace`".into()))?;
+        let replace_all = args
+            .get("replace_all")
+            .and_then(|a| a.as_bool())
+            .unwrap_or(false);
+
+        let content = self
+            .store
+            .read(&path)
+            .map_err(|e| ToolError::Execution(e.to_string()))?;
+        let count = content.matches(find).count();
+        if count == 0 {
+            return Err(ToolError::Execution(format!(
+                "`find` text not found in {path} — fs.read the relevant slice and match it \
+                 exactly (whitespace included)"
+            )));
+        }
+        if count > 1 && !replace_all {
+            return Err(ToolError::Execution(format!(
+                "`find` matches {count} places in {path} — include more surrounding context to \
+                 make it unique, or pass replace_all:true"
+            )));
+        }
+        let updated = if replace_all {
+            content.replace(find, replace)
+        } else {
+            content.replacen(find, replace, 1)
+        };
+        self.store
+            .write(&path, &updated)
+            .map_err(|e| ToolError::Execution(e.to_string()))?;
+        Ok(serde_json::json!({
+            "path": path,
+            "replacements": if replace_all { count } else { 1 },
+            "bytes": updated.len(),
+        }))
     }
 }
 
@@ -373,6 +507,73 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(listed["entries"][0], "notes/a.md");
+    }
+
+    #[tokio::test]
+    async fn large_reads_are_paged_and_slices_are_addressable() {
+        let store = store();
+        let big: String = (0..1000).map(|i| format!("line {i}\n")).collect();
+        store.write("big.txt", &big).unwrap();
+
+        // Default read of a large file returns the first page plus guidance.
+        let read = FsReadTool::new(store.clone())
+            .invoke(serde_json::json!({ "path": "big.txt" }))
+            .await
+            .unwrap();
+        assert_eq!(read["lines"], 1000);
+        let content = read["content"].as_str().unwrap();
+        assert!(content.contains("line 0") && content.contains("line 399"));
+        assert!(!content.contains("line 400"));
+        assert!(read["note"].as_str().unwrap().contains("offset"));
+
+        // An explicit slice returns exactly that window.
+        let read = FsReadTool::new(store.clone())
+            .invoke(serde_json::json!({ "path": "big.txt", "offset": 500, "limit": 2 }))
+            .await
+            .unwrap();
+        assert_eq!(read["content"], "line 500\nline 501");
+
+        // Small files still come back whole, unpaged.
+        store.write("small.txt", "just this").unwrap();
+        let read = FsReadTool::new(store)
+            .invoke(serde_json::json!({ "path": "small.txt" }))
+            .await
+            .unwrap();
+        assert_eq!(read["content"], "just this");
+    }
+
+    #[tokio::test]
+    async fn edit_replaces_exactly_and_refuses_ambiguity() {
+        let store = store();
+        store
+            .write("app.py", "x = 1\ny = 1\nprint(x)\n")
+            .unwrap();
+
+        // Ambiguous find is refused with guidance.
+        let err = FsEditTool::new(store.clone())
+            .invoke(serde_json::json!({ "path": "app.py", "find": "= 1", "replace": "= 2" }))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("2 places"));
+
+        // A unique find edits in place.
+        FsEditTool::new(store.clone())
+            .invoke(serde_json::json!({ "path": "app.py", "find": "x = 1", "replace": "x = 42" }))
+            .await
+            .unwrap();
+        assert!(store.read("app.py").unwrap().contains("x = 42"));
+
+        // replace_all handles the rest; a missing find errors clearly.
+        FsEditTool::new(store.clone())
+            .invoke(serde_json::json!({ "path": "app.py", "find": "= 1", "replace": "= 7", "replace_all": true }))
+            .await
+            .unwrap();
+        assert!(store.read("app.py").unwrap().contains("y = 7"));
+        let err = FsEditTool::new(store)
+            .invoke(serde_json::json!({ "path": "app.py", "find": "zzz", "replace": "" }))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("not found"));
     }
 
     #[tokio::test]

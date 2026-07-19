@@ -530,6 +530,17 @@ async fn handle_ws(socket: ws::WebSocket, state: AppState) {
                     ctrl.start_agent_goal(goal);
                 }
             }
+            "stop" => {
+                ctrl.stop_active_run();
+            }
+            "steer" => {
+                if let Some(text) = value.get("text").and_then(|t| t.as_str())
+                    && !ctrl.steer_active_run(text)
+                {
+                    // Nothing running any more — treat it as a fresh goal.
+                    ctrl.start_agent_goal(text);
+                }
+            }
             "approval" => {
                 let id = value.get("id").and_then(|i| i.as_str()).unwrap_or("");
                 let approve = value

@@ -21,6 +21,10 @@ const state = {
   pendingCompletions: new Map(), // rel path -> resolve fn
   treeCache: new Map(),   // rel dir -> children rows
   phaseTimer: null,
+  phase: "idle",          // mirrors the phase chip, gates steering vs new goal
+  autoAllow: new Set(),   // tool names auto-approved for this session
+  fileCache: new Map(),   // rel path -> last-known text (diff baselines)
+  lastToolCard: null,     // the open card awaiting its tool result
 };
 
 /* ---------------- boot ---------------- */
@@ -393,6 +397,7 @@ async function openFile(rel, revealLine) {
       return;
     }
     const { text } = await res.json();
+    state.fileCache.set(rel, text);
     const model = monaco.editor.createModel(text, undefined, langUri(rel));
     entry = { model, savedVersion: model.getAlternativeVersionId() };
     model.onDidChangeContent(() => refreshDirty(rel));
@@ -470,6 +475,7 @@ async function reloadFromDisk(rel) {
   const res = await fetch(`/api/file?path=${encodeURIComponent(rel)}`);
   if (!res.ok) return;
   const { text } = await res.json();
+  state.fileCache.set(rel, text);
   if (entry.model.getValue() !== text) {
     const view = state.active === rel ? state.editor.saveViewState() : null;
     entry.model.setValue(text);
@@ -494,6 +500,7 @@ async function saveActive() {
   });
   if (res.ok) {
     entry.savedVersion = entry.model.getAlternativeVersionId();
+    state.fileCache.set(rel, text);
     refreshDirty(rel);
     setStatus(`saved ${rel}`);
   } else {
@@ -603,7 +610,7 @@ function handleEvent(topic, p) {
   switch (topic) {
     case "agent.status": {
       const status = p.status || "";
-      if (["completed", "failed", "error", "idle"].includes(status)) setPhase("idle");
+      if (["completed", "failed", "error", "idle", "cancelled"].includes(status)) setPhase("idle");
       else if (["planning", "replanning"].includes(status)) setPhase("thinking");
       else if (status === "running") setPhase("thinking");
       // Agent runs create and edit files — keep the explorer and every open
@@ -622,17 +629,31 @@ function handleEvent(topic, p) {
     }
     case "agent.tool": {
       setPhase("running");
-      chatEvent(`↳ ${p.tool || "tool"} ${compact(p.args)}`, "tool");
+      state.lastToolCard = toolCard(p.tool || "tool", p.args || {});
       break;
     }
     case "agent.tool.result": {
-      chatEvent(`✓ ${trim(p.result ?? p.output ?? "", 400)}`, "ok");
-      // The agent wrote a file: refresh its open buffer immediately, so a
+      attachToolResult(p);
+      // The agent changed a file: refresh its open buffer immediately, so a
       // later Ctrl+S can't clobber the agent's fix with stale editor text.
-      if (p.tool === "fs.write" && p.result && p.result.path) {
-        const rel = matchOpenPath(String(p.result.path));
+      if ((p.tool === "fs.write" || p.tool === "fs.edit") && p.result && p.result.path) {
+        const written = String(p.result.path);
+        const rel = matchOpenPath(written);
         if (rel) reloadFromDisk(rel);
+        else if (p.tool === "fs.write") state.fileCache.delete(written);
       }
+      break;
+    }
+    case "agent.tool.error": {
+      attachToolError(p);
+      break;
+    }
+    case "agent.steered": {
+      chatEvent(`↪ steering delivered: ${trim(p.text || "", 160)}`, "deleg");
+      break;
+    }
+    case "agent.lesson": {
+      chatEvent(`☆ lesson kept for future runs: ${trim(p.lesson || "", 200)}`, "plan");
       break;
     }
     case "agent.message": {
@@ -717,13 +738,23 @@ function wireComposer() {
   input.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      const goal = input.value.trim();
-      if (!goal) return;
+      const text = input.value.trim();
+      if (!text) return;
       input.value = "";
-      chatBubble(goal, "user");
-      setPhase("thinking");
-      send({ type: "goal", goal });
+      if (state.phase !== "idle") {
+        // A run is in flight — steer it instead of starting another.
+        chatBubble(`↪ ${text}`, "user");
+        send({ type: "steer", text });
+      } else {
+        chatBubble(text, "user");
+        setPhase("thinking");
+        send({ type: "goal", goal: text });
+      }
     }
+  });
+  $("stop-btn").addEventListener("click", () => {
+    send({ type: "stop" });
+    setStatus("stopping the run…");
   });
 }
 
@@ -748,22 +779,179 @@ function appendChat(el) {
   if (stick) chat.scrollTop = chat.scrollHeight;
 }
 
+/* ---------------- tool cards & diffs ---------------- */
+
+/* A short human handle for a tool call: the path, command, or query. */
+function argPreview(tool, args) {
+  const v = args.path || args.command || args.query || args.pattern || args.stack || "";
+  return trim(String(v), 80);
+}
+
+function toolCard(tool, args) {
+  const el = document.createElement("div");
+  el.className = "tool-card";
+  el.innerHTML = `
+    <div class="tc-head">
+      <span class="tc-status">…</span>
+      <span class="tc-tool"></span>
+      <span class="tc-preview"></span>
+      <span class="tc-toggle">▸</span>
+    </div>
+    <div class="tc-body hidden"></div>`;
+  el.querySelector(".tc-tool").textContent = tool;
+  el.querySelector(".tc-preview").textContent = argPreview(tool, args);
+  const body = el.querySelector(".tc-body");
+
+  // Expandable detail: a diff for edits, raw args otherwise.
+  let expanded = false;
+  el.querySelector(".tc-head").addEventListener("click", () => {
+    expanded = !expanded;
+    el.querySelector(".tc-toggle").textContent = expanded ? "▾" : "▸";
+    body.classList.toggle("hidden", !expanded);
+    if (expanded && !body.dataset.filled) {
+      body.dataset.filled = "1";
+      fillToolDetail(body, tool, args);
+    }
+  });
+  appendChat(el);
+  return { el, tool, args, body };
+}
+
+function fillToolDetail(body, tool, args) {
+  if (tool === "fs.write" && typeof args.content === "string") {
+    const old = state.fileCache.get(String(args.path)) ?? "";
+    mountDiff(body, String(args.path || "file.txt"), old, args.content);
+    return;
+  }
+  if (tool === "fs.edit" && typeof args.find === "string") {
+    mountDiff(body, String(args.path || "snippet.txt"), args.find, String(args.replace ?? ""));
+    return;
+  }
+  const pre = document.createElement("pre");
+  pre.className = "tc-raw";
+  pre.textContent = trim(JSON.stringify(args, null, 2), 4000);
+  body.appendChild(pre);
+}
+
+function attachToolResult(p) {
+  const card = state.lastToolCard;
+  if (!card || card.tool !== p.tool) {
+    // A result with no matching card (e.g. the automatic code.check) gets a
+    // compact line of its own.
+    const label = p.tool === "code.check"
+      ? checkSummary(p.result)
+      : `✓ ${p.tool}: ${trim(compact(p.result), 220)}`;
+    chatEvent(label, p.tool === "code.check" && (p.result?.count || 0) > 0 ? "err" : "ok");
+    return;
+  }
+  card.el.querySelector(".tc-status").textContent = "✓";
+  card.el.classList.add("ok");
+  const r = p.result || {};
+  const note = r.bytes != null ? `${r.bytes} bytes`
+    : r.replacements != null ? `${r.replacements} replacement(s)`
+    : r.status != null ? `exit ${r.status}`
+    : r.count != null ? `${r.count} match(es)`
+    : "";
+  card.el.querySelector(".tc-preview").textContent =
+    `${argPreview(card.tool, card.args)}${note ? "  ·  " + note : ""}`;
+  // After a successful write, the new content is the next diff baseline.
+  if (card.tool === "fs.write" && typeof card.args.content === "string" && r.path) {
+    state.fileCache.set(String(r.path), card.args.content);
+  }
+  state.lastToolCard = null;
+}
+
+function checkSummary(result) {
+  const count = (result && result.count) || 0;
+  return count > 0
+    ? `⚠ code.check: ${count} problem(s) — sent back to the agent to fix`
+    : `✓ code.check: clean`;
+}
+
+function attachToolError(p) {
+  const card = state.lastToolCard;
+  if (card && card.tool === p.tool) {
+    card.el.querySelector(".tc-status").textContent = "✗";
+    card.el.classList.add("err");
+    const msg = document.createElement("div");
+    msg.className = "tc-error";
+    msg.textContent = trim(String(p.error || "failed"), 300);
+    card.el.appendChild(msg);
+    state.lastToolCard = null;
+  } else {
+    chatEvent(`✗ ${p.tool}: ${trim(String(p.error || ""), 300)}`, "err");
+  }
+}
+
+let diffCounter = 0;
+function mountDiff(container, path, original, modified) {
+  const host = document.createElement("div");
+  host.className = "diff-host";
+  container.appendChild(host);
+  const id = ++diffCounter;
+  const name = path.split("/").pop() || "file.txt";
+  const orig = monaco.editor.createModel(original ?? "", undefined,
+    monaco.Uri.file(`/dadhichi-diff/${id}/a/${name}`));
+  const mod = monaco.editor.createModel(modified ?? "", undefined,
+    monaco.Uri.file(`/dadhichi-diff/${id}/b/${name}`));
+  const editor = monaco.editor.createDiffEditor(host, {
+    readOnly: true,
+    renderSideBySide: false,
+    automaticLayout: true,
+    minimap: { enabled: false },
+    lineNumbers: "off",
+    folding: false,
+    scrollBeyondLastLine: false,
+    theme: "dadhichi-dark",
+  });
+  editor.setModel({ original: orig, modified: mod });
+}
+
 function approvalCard(p) {
+  // Session auto-allow: the user already trusted this tool — approve at once,
+  // leave a compact audit line.
+  if (p.tool && state.autoAllow.has(p.tool)) {
+    send({ type: "approval", id: p.id, approve: true });
+    chatEvent(`✓ auto-allowed ${p.tool} (${trim(p.summary || "", 120)})`, "ok");
+    return;
+  }
+  realApprovalCard(p);
+}
+
+function realApprovalCard(p) {
   const el = document.createElement("div");
   el.className = "approval";
   el.dataset.id = p.id || "";
   el.innerHTML = `
     <div class="a-head">⚠ approval required — ${escapeHtml(p.permission || "")}</div>
     <div class="a-sum"></div>
+    <div class="a-preview"></div>
     <div class="a-actions">
       <button class="allow">Allow</button>
+      <button class="always" title="Auto-approve this tool for the rest of the session">Always (session)</button>
       <button class="deny">Deny</button>
       <span class="a-verdict"></span>
     </div>`;
   el.querySelector(".a-sum").textContent = p.summary || p.tool || "";
+
+  // See exactly what you're approving: a diff for edits, not a truncated blob.
+  const args = p.args || {};
+  const preview = el.querySelector(".a-preview");
+  if (p.tool === "fs.write" && typeof args.content === "string") {
+    const old = state.fileCache.get(String(args.path)) ?? "";
+    mountDiff(preview, String(args.path || "file.txt"), old, args.content);
+  } else if (p.tool === "fs.edit" && typeof args.find === "string") {
+    mountDiff(preview, String(args.path || "snippet.txt"), args.find, String(args.replace ?? ""));
+  }
+
   el.querySelector(".allow").addEventListener("click", () =>
     send({ type: "approval", id: p.id, approve: true })
   );
+  el.querySelector(".always").addEventListener("click", () => {
+    if (p.tool) state.autoAllow.add(p.tool);
+    send({ type: "approval", id: p.id, approve: true });
+    setStatus(`${p.tool} auto-allowed for this session`);
+  });
   el.querySelector(".deny").addEventListener("click", () =>
     send({ type: "approval", id: p.id, approve: false })
   );
@@ -780,9 +968,15 @@ function resolveCard(id, decision) {
 }
 
 function setPhase(phase) {
+  state.phase = phase;
   const el = $("agent-phase");
   el.className = `phase ${phase}`;
   $("phase-label").textContent = phase;
+  const active = phase !== "idle";
+  $("stop-btn").classList.toggle("hidden", !active);
+  $("goal").placeholder = active
+    ? "Message the running agent…  (Enter to send)"
+    : "Describe a goal for the agent…  (Enter to run)";
 }
 
 /* ---------------- problems & markers ---------------- */
