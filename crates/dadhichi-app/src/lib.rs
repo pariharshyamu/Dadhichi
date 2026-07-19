@@ -15,9 +15,9 @@
 //! events back into the Agent Console panel — all through the same bus.
 
 use dadhichi_agent::{
-    Agent, AgentContext, DelegationReview, Delegator, MemoryRecallTool, MemoryWriteTool,
-    ModelCritic, Orchestrator, ReactAgent, SharedMemory, SpecialistAgent, SubAgentSpec, TaskTool,
-    agents::ConversationalAgent, session, shared_memory,
+    Agent, AgentContext, ClaudeCodeAgent, DelegationReview, Delegator, MemoryRecallTool,
+    MemoryWriteTool, ModelCritic, Orchestrator, ReactAgent, SharedMemory, SpecialistAgent,
+    SubAgentSpec, TaskTool, agents::ConversationalAgent, session, shared_memory,
 };
 use dadhichi_ai::{ModelRouter, ProviderPlan};
 use dadhichi_core::{Command, Event, Kernel, KernelError, RecvError, Subscription};
@@ -125,9 +125,14 @@ fn mcp_secret_resolver() -> Arc<SecretResolver> {
 /// projects and restarts.
 fn home_dadhichi() -> Option<PathBuf> {
     let nonempty = |v: std::ffi::OsString| (!v.is_empty()).then_some(v);
-    std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
+    // DADHICHI_HOME relocates all user-level state (tests/CI isolation).
+    std::env::var_os("DADHICHI_HOME")
         .and_then(nonempty)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .or_else(|| std::env::var_os("USERPROFILE"))
+                .and_then(nonempty)
+        })
         .map(|home| PathBuf::from(home).join(".dadhichi"))
 }
 
@@ -314,7 +319,7 @@ impl AppController {
         // The active model, switchable at runtime (`agent.run` builds its
         // orchestrator from whatever this holds at dispatch time).
         let current_model = Arc::new(std::sync::RwLock::new(model_id.clone()));
-        let orchestrator = build_orchestrator(&model_id);
+        let orchestrator = build_orchestrator(&model_id, &root);
 
         // Register the `task` delegation tool so any agent (or a model tool-loop)
         // can spawn a specialist with an isolated context. Sub-agents run under a
@@ -1303,15 +1308,19 @@ fn str_arg(cmd: &Command, key: &str) -> Result<String, KernelError> {
 }
 
 /// The agent roster for one model: the default ReAct engine, the plain
-/// conversational agent, and every specialist. Rebuilt cheaply whenever the
-/// active model changes, so a GUI model switch takes effect on the next run.
-fn build_orchestrator(model_id: &str) -> Arc<Orchestrator> {
+/// conversational agent, every specialist, and the Claude Code backend.
+/// Rebuilt cheaply whenever the active model changes, so a GUI model switch
+/// takes effect on the next run.
+fn build_orchestrator(model_id: &str, root: &Path) -> Arc<Orchestrator> {
     let mut orch = Orchestrator::new();
     // The tool-using ReAct agent is the default: it can actually perform
     // tasks (run commands, read/write files) via the approval-gated tool
     // loop, not just answer in prose.
     orch.register(Arc::new(ReactAgent::new(model_id)));
     orch.register(Arc::new(ConversationalAgent::new(model_id)));
+    // Claude Code as a switchable backend: selected via the model picker
+    // (model id "claude-code") or addressed directly as an agent.
+    orch.register(Arc::new(ClaudeCodeAgent::new(root)));
     for agent in [
         SpecialistAgent::code(),
         SpecialistAgent::refactor(),
@@ -1368,23 +1377,30 @@ async fn register_commands(
                     let root = root.clone();
                     async move {
                         // The roster is built from the *current* model, so a
-                        // switch in the GUI applies to this very run.
+                        // switch in the GUI applies to this very run. Selecting
+                        // "claude-code" in the picker routes the goal to the
+                        // Claude Code backend instead of the native loop.
                         let model = current_model
                             .read()
                             .map(|m| m.clone())
                             .unwrap_or(fallback_model);
-                        let orchestrator = build_orchestrator(&model);
+                        let default_agent = if model == ClaudeCodeAgent::NAME {
+                            ClaudeCodeAgent::NAME
+                        } else {
+                            "react-agent"
+                        };
+                        let agent = cmd
+                            .args
+                            .get("agent")
+                            .and_then(|a| a.as_str())
+                            .unwrap_or(default_agent)
+                            .to_string();
+                        let orchestrator = build_orchestrator(&model, &root);
                         let goal = cmd
                             .args
                             .get("goal")
                             .and_then(|g| g.as_str())
                             .unwrap_or("Explain what makes Dadhichi agent-native.")
-                            .to_string();
-                        let agent = cmd
-                            .args
-                            .get("agent")
-                            .and_then(|a| a.as_str())
-                            .unwrap_or("react-agent")
                             .to_string();
 
                         // The default run may act, not just read: grant the write

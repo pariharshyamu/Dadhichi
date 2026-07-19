@@ -402,10 +402,33 @@ async fn api_models(State(state): State<AppState>) -> Response {
             .map(String::from)
             .collect();
     }
+    // Claude Code is a switchable backend, not an Ollama model — offer it
+    // whenever its CLI is resolvable (PATH, env, or the editor extension).
+    let claude = "claude-code".to_string();
+    if !models.contains(&claude)
+        && (which_claude_exists() || current == claude)
+    {
+        models.push(claude);
+    }
     if !models.contains(&current) {
         models.insert(0, current.clone());
     }
     axum::Json(serde_json::json!({ "current": current, "models": models })).into_response()
+}
+
+/// Whether a launchable Claude Code CLI can be found on this machine.
+fn which_claude_exists() -> bool {
+    let resolved = dadhichi_mcp::resolve_launcher("claude");
+    if resolved != "claude" {
+        return true;
+    }
+    // Bare name: check PATH (with Windows launcher extensions).
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    std::env::split_paths(&path).any(|dir| {
+        ["claude", "claude.exe", "claude.cmd", "claude.ps1"]
+            .iter()
+            .any(|n| dir.join(n).is_file())
+    })
 }
 
 /// `OLLAMA_HOST` accepts bare hostnames and host:port; requests need a scheme.

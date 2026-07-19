@@ -42,7 +42,7 @@ pub use approval::{
 };
 pub use bridge::McpToolBridge;
 pub use catalog::{Connector, SecretRequirement, builtin_connectors, connector};
-pub use client::McpConnection;
+pub use client::{McpConnection, resolve_launcher};
 pub use connector::{
     ConnectReport, ConnectedServer, McpConnections, McpServerConfig, McpServersConfig, ServerError,
     connect_servers, resolve_env,

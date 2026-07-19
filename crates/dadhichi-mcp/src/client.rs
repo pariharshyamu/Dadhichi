@@ -89,7 +89,10 @@ impl McpConnection {
                 .envs(env.iter().map(|(k, v)| (k.clone(), v.clone())))
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
-                .stderr(Stdio::null());
+                .stderr(Stdio::null())
+                // The server's lifetime is the connection's: dropping the
+                // transport must reap the subprocess, not orphan it.
+                .kill_on_drop(true);
             cmd.spawn()
         };
         let mut child = match spawn_direct() {
@@ -106,7 +109,8 @@ impl McpConnection {
                     .envs(env.iter().map(|(k, v)| (k.clone(), v.clone())))
                     .stdin(Stdio::piped())
                     .stdout(Stdio::piped())
-                    .stderr(Stdio::null());
+                    .stderr(Stdio::null())
+                    .kill_on_drop(true);
                 cmd.spawn().map_err(|e| McpError::Transport(e.to_string()))?
             }
             Err(err) => return Err(McpError::Transport(err.to_string())),
@@ -697,6 +701,10 @@ async fn ws_read_loop(mut source: futures::stream::SplitStream<WsStream>, pendin
 /// order: PATH-installed name as-is if an env override is absent →
 /// `CLAUDE_CODE_EXECPATH` (set inside Claude Code sessions) → the newest
 /// VS Code extension's `native-binary/claude(.exe)`.
+pub fn resolve_launcher(command: &str) -> String {
+    resolve_command(command)
+}
+
 fn resolve_command(command: &str) -> String {
     if command != "claude" {
         return command.to_string();

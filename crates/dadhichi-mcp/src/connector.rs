@@ -142,15 +142,24 @@ impl McpServersConfig {
 }
 
 /// The candidate `mcp.json` paths for `project_root`, in increasing precedence.
+/// `DADHICHI_HOME` relocates the user-level directory (and is how tests and CI
+/// isolate themselves from a developer's real `~/.dadhichi/mcp.json` — without
+/// it, every test boot would launch the user's personal connectors).
 fn config_files_in(project_root: &std::path::Path) -> Vec<std::path::PathBuf> {
     use std::path::PathBuf;
     let nonempty = |v: std::ffi::OsString| (!v.is_empty()).then_some(v);
     let mut paths = Vec::new();
-    if let Some(home) = std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
+    if let Some(home) = std::env::var_os("DADHICHI_HOME")
         .and_then(nonempty)
+        .map(|h| PathBuf::from(h).join(".dadhichi"))
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .or_else(|| std::env::var_os("USERPROFILE"))
+                .and_then(nonempty)
+                .map(|h| PathBuf::from(h).join(".dadhichi"))
+        })
     {
-        paths.push(PathBuf::from(home).join(".dadhichi").join("mcp.json"));
+        paths.push(home.join("mcp.json"));
     }
     paths.push(project_root.join(".dadhichi").join("mcp.json"));
     if let Some(explicit) = std::env::var_os("DADHICHI_MCP_CONFIG").and_then(nonempty) {
@@ -322,8 +331,24 @@ where
     let mut connections = McpConnections::default();
     let mut report = ConnectReport::default();
 
+    // A stalled server (bad launcher, waiting-for-login CLI, dead endpoint)
+    // must not hang the whole boot: cap each server's connect + handshake.
+    const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
     for (name, server) in config.enabled() {
-        match connect_one(name, server, registry, &resolve).await {
+        let attempt = tokio::time::timeout(
+            CONNECT_TIMEOUT,
+            connect_one(name, server, registry, &resolve),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            Err(format!(
+                "timed out after {}s connecting (is `{}` installed and logged in?)",
+                CONNECT_TIMEOUT.as_secs(),
+                server.command
+            ))
+        });
+        match attempt {
             Ok((conn, tools)) => {
                 connections.insert(name.clone(), conn, tools.clone());
                 report.connected.push(ConnectedServer {

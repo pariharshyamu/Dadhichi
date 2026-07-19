@@ -15,6 +15,7 @@ path = "src/main.rs"
 [dependencies]
 dadhichi-app = { path = "../dadhichi-app" }
 dadhichi-core = { path = "../dadhichi-core" }
+dadhichi-mcp = { path = "../dadhichi-mcp" }
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true

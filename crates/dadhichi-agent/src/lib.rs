@@ -54,7 +54,7 @@ pub mod workflow;
 mod test_support;
 
 pub use agent::{Agent, AgentContext, AgentError, AgentOutcome, AgentStatus};
-pub use agents::{ConversationalAgent, ReactAgent, SpecialistAgent};
+pub use agents::{ClaudeCodeAgent, ConversationalAgent, ReactAgent, SpecialistAgent};
 pub use compaction::{CompactionPolicy, CompactionReport, estimate_tokens};
 pub use delegate::{
     CapabilityMode, Critic, CriticVerdict, DelegationReview, Delegator, Isolation, ModelCritic,
