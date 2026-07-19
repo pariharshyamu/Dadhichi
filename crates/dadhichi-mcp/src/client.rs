@@ -82,14 +82,35 @@ impl McpConnection {
         env: &[(String, String)],
     ) -> Result<Self, McpError> {
         use std::process::Stdio;
-        let mut child = tokio::process::Command::new(command)
-            .args(args)
-            .envs(env.iter().map(|(k, v)| (k.clone(), v.clone())))
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|e| McpError::Transport(e.to_string()))?;
+        let command = &resolve_command(command);
+        let spawn_direct = || {
+            let mut cmd = tokio::process::Command::new(command);
+            cmd.args(args)
+                .envs(env.iter().map(|(k, v)| (k.clone(), v.clone())))
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null());
+            cmd.spawn()
+        };
+        let mut child = match spawn_direct() {
+            Ok(child) => child,
+            // MCP servers are usually installed as npm/py launcher shims
+            // (`npx`, `uvx`, `claude`, `gemini` are .cmd/.ps1 wrappers on
+            // Windows) which CreateProcess can't start by bare name — fall
+            // back to cmd.exe, which resolves PATHEXT.
+            Err(err) if cfg!(windows) && err.kind() == std::io::ErrorKind::NotFound => {
+                let mut cmd = tokio::process::Command::new("cmd");
+                cmd.arg("/C")
+                    .arg(command)
+                    .args(args)
+                    .envs(env.iter().map(|(k, v)| (k.clone(), v.clone())))
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null());
+                cmd.spawn().map_err(|e| McpError::Transport(e.to_string()))?
+            }
+            Err(err) => return Err(McpError::Transport(err.to_string())),
+        };
         let stdout = child
             .stdout
             .take()
@@ -665,6 +686,77 @@ async fn ws_read_loop(mut source: futures::stream::SplitStream<WsStream>, pendin
         }
     }
     fail_all(&pending).await;
+}
+
+/// Resolve a connector command to something actually launchable.
+///
+/// Most commands pass through untouched (PATH lookup, plus the `cmd /C`
+/// PATHEXT fallback above). `claude` gets special care: many users run Claude
+/// Code only through their editor's extension, so the CLI is not on PATH at
+/// all — but the very same binary ships inside the extension. Resolution
+/// order: PATH-installed name as-is if an env override is absent →
+/// `CLAUDE_CODE_EXECPATH` (set inside Claude Code sessions) → the newest
+/// VS Code extension's `native-binary/claude(.exe)`.
+fn resolve_command(command: &str) -> String {
+    if command != "claude" {
+        return command.to_string();
+    }
+    // An explicit env override always wins (also set inside CC sessions).
+    if let Ok(path) = std::env::var("CLAUDE_CODE_EXECPATH")
+        && std::path::Path::new(&path).is_file()
+    {
+        return path;
+    }
+    // The editor extension's bundled binary, newest version first.
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .unwrap_or_default();
+    let extensions = std::path::Path::new(&home).join(".vscode").join("extensions");
+    if let Ok(entries) = std::fs::read_dir(&extensions) {
+        let mut candidates: Vec<std::path::PathBuf> = entries
+            .flatten()
+            .filter(|e| {
+                e.file_name()
+                    .to_str()
+                    .is_some_and(|n| n.starts_with("anthropic.claude-code-"))
+            })
+            .map(|e| e.path())
+            .collect();
+        candidates.sort();
+        for dir in candidates.into_iter().rev() {
+            for name in ["claude.exe", "claude"] {
+                let bin = dir.join("resources").join("native-binary").join(name);
+                if bin.is_file() {
+                    return bin.display().to_string();
+                }
+            }
+        }
+    }
+    command.to_string()
+}
+
+#[cfg(test)]
+mod resolve_tests {
+    use super::resolve_command;
+
+    #[test]
+    fn ordinary_commands_pass_through_untouched() {
+        assert_eq!(resolve_command("npx"), "npx");
+        assert_eq!(resolve_command("uvx"), "uvx");
+        assert_eq!(resolve_command("gemini"), "gemini");
+    }
+
+    #[test]
+    fn claude_resolves_to_a_real_binary_or_stays_bare() {
+        // Environment-dependent by design: inside a Claude Code session or on
+        // a machine with the VS Code extension this must yield an existing
+        // file; elsewhere the bare name comes back for normal PATH lookup.
+        let resolved = resolve_command("claude");
+        assert!(
+            resolved == "claude" || std::path::Path::new(&resolved).is_file(),
+            "resolved to a non-existent path: {resolved}"
+        );
+    }
 }
 
 #[cfg(test)]
