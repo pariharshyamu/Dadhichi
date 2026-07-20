@@ -205,6 +205,7 @@ mod tests {
             usage: Usage {
                 prompt_tokens: 1_000_000,
                 completion_tokens: 0,
+                cached_prompt_tokens: 0,
             },
             tool_calls: Vec::new(),
         };

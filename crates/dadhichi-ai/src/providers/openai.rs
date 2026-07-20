@@ -195,6 +195,16 @@ struct ApiUsage {
     prompt_tokens: u32,
     #[serde(default)]
     completion_tokens: u32,
+    /// OpenAI reports cached prompt tokens here (already counted in
+    /// `prompt_tokens`); Ollama omits it.
+    #[serde(default)]
+    prompt_tokens_details: PromptDetails,
+}
+
+#[derive(Deserialize, Default)]
+struct PromptDetails {
+    #[serde(default)]
+    cached_tokens: u32,
 }
 
 /// Parse a non-streamed completion response body.
@@ -240,6 +250,7 @@ fn parse_completion(json: &str, fallback_model: &str) -> ProviderResult<Completi
         usage: Usage {
             prompt_tokens: usage.prompt_tokens,
             completion_tokens: usage.completion_tokens,
+            cached_prompt_tokens: usage.prompt_tokens_details.cached_tokens,
         },
     })
 }

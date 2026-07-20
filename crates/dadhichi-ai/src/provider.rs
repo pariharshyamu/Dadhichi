@@ -131,6 +131,7 @@ impl LanguageModel for MockProvider {
                 .map(|m| m.content.len() as u32 / 4)
                 .sum(),
             completion_tokens: content.len() as u32 / 4,
+            cached_prompt_tokens: 0,
         };
         Ok(Completion {
             content,

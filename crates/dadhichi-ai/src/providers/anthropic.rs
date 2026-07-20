@@ -188,6 +188,12 @@ struct ApiUsage {
     input_tokens: u32,
     #[serde(default)]
     output_tokens: u32,
+    /// Prompt tokens served from the cache (billed ~10% of normal).
+    #[serde(default)]
+    cache_read_input_tokens: u32,
+    /// Tokens written to the cache on this call (billed ~125% once).
+    #[serde(default)]
+    cache_creation_input_tokens: u32,
 }
 
 /// Parse a non-streamed Messages response.
@@ -217,13 +223,18 @@ fn parse_completion(json: &str, fallback_model: &str) -> ProviderResult<Completi
     } else {
         resp.model
     };
+    // Anthropic reports `input_tokens` as the *uncached* prompt portion; cache
+    // reads/writes are separate. The true prompt size is their sum.
+    let cached = usage.cache_read_input_tokens;
+    let prompt_tokens = usage.input_tokens + cached + usage.cache_creation_input_tokens;
     Ok(Completion {
         content,
         model,
         tool_calls,
         usage: Usage {
-            prompt_tokens: usage.input_tokens,
+            prompt_tokens,
             completion_tokens: usage.output_tokens,
+            cached_prompt_tokens: cached,
         },
     })
 }
@@ -366,6 +377,62 @@ mod tests {
         let req = CompletionRequest::new("claude-sonnet-5").message(Message::user("hi"));
         let body = build_body(&req, false);
         assert_eq!(body["messages"][0]["content"], "hi");
+    }
+
+    #[test]
+    fn cache_read_tokens_fold_into_prompt_total_and_surface() {
+        // A cached response: input_tokens is only the *uncached* remainder;
+        // cache reads/writes are separate. The true prompt is the sum, and the
+        // cached slice is surfaced.
+        let json = r#"{
+            "model": "claude-sonnet-5",
+            "content": [{"type":"text","text":"ok"}],
+            "usage": {"input_tokens": 10, "output_tokens": 3,
+                      "cache_read_input_tokens": 900, "cache_creation_input_tokens": 90}
+        }"#;
+        let c = parse_completion(json, "m").unwrap();
+        assert_eq!(c.usage.prompt_tokens, 1000, "10 + 900 + 90");
+        assert_eq!(c.usage.cached_prompt_tokens, 900);
+        assert_eq!(c.usage.completion_tokens, 3);
+    }
+
+    #[test]
+    fn tools_are_advertised_with_input_schema() {
+        use crate::types::ToolDef;
+        let req = CompletionRequest::new("claude-sonnet-5")
+            .message(Message::user("go"))
+            .with_tools(vec![ToolDef {
+                name: "fs.read".into(),
+                description: "read".into(),
+                parameters: serde_json::json!({ "type": "object" }),
+            }]);
+        let body = build_body(&req, false);
+        assert_eq!(body["tools"][0]["name"], "fs.read");
+        assert_eq!(body["tools"][0]["input_schema"]["type"], "object");
+    }
+
+    #[test]
+    fn native_tool_use_round_trips_through_blocks() {
+        use crate::types::{Message, ToolCall};
+        // An assistant tool_use turn + a tool_result turn render as blocks.
+        let req = CompletionRequest::new("claude-sonnet-5")
+            .message(Message::assistant_calls(
+                "",
+                vec![ToolCall { id: "u1".into(), name: "fs.read".into(), arguments: serde_json::json!({ "path": "a" }) }],
+            ))
+            .message(Message::tool_result("u1", "contents"));
+        let body = build_body(&req, false);
+        assert_eq!(body["messages"][0]["content"][0]["type"], "tool_use");
+        assert_eq!(body["messages"][0]["content"][0]["id"], "u1");
+        assert_eq!(body["messages"][1]["content"][0]["type"], "tool_result");
+        assert_eq!(body["messages"][1]["content"][0]["tool_use_id"], "u1");
+
+        // And a tool_use response parses back into a ToolCall.
+        let json = r#"{"model":"m","content":[{"type":"tool_use","id":"x","name":"fs.read","input":{"path":"b"}}],"usage":{"input_tokens":5,"output_tokens":1}}"#;
+        let c = parse_completion(json, "m").unwrap();
+        assert_eq!(c.tool_calls.len(), 1);
+        assert_eq!(c.tool_calls[0].name, "fs.read");
+        assert_eq!(c.tool_calls[0].arguments["path"], "b");
     }
 
     #[test]

@@ -655,6 +655,10 @@ function handleEvent(topic, p) {
       chatEvent(`↪ steering delivered: ${trim(p.text || "", 160)}`, "deleg");
       break;
     }
+    case "agent.parallel": {
+      chatEvent(`⇉ running ${p.count ?? 0} tool calls in parallel`, "deleg");
+      break;
+    }
     case "agent.lesson": {
       chatEvent(`☆ lesson kept for future runs: ${trim(p.lesson || "", 200)}`, "plan");
       break;
@@ -672,9 +676,13 @@ function handleEvent(topic, p) {
       // End-of-run summary footer.
       const secs = ((p.elapsed_ms ?? 0) / 1000).toFixed(1);
       const think = ((p.thinking_ms ?? 0) / 1000).toFixed(1);
+      const cached = p.cached_prompt ?? 0;
+      const cacheNote = cached > 0
+        ? ` · ${fmtTokens(cached)} cached (cheap)`
+        : "";
       chatEvent(
         `Σ run: billed ${fmtTokens(p.billed_total ?? 0)} (${p.billed_prompt ?? 0} in / ` +
-        `${p.billed_completion ?? 0} out) · context ${fmtTokens(p.context_tokens ?? 0)} · ` +
+        `${p.billed_completion ?? 0} out)${cacheNote} · context ${fmtTokens(p.context_tokens ?? 0)} · ` +
         `${p.model_calls ?? 0} model calls · ${p.tool_calls ?? 0} tool calls · ` +
         `${secs}s total, ${think}s thinking`,
         "plan"

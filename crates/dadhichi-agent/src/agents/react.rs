@@ -323,7 +323,12 @@ impl Agent for ReactAgent {
             }
         }
 
-        let mut messages = vec![Message::system(system), Message::user(goal)];
+        // The system prompt (persona + full-stack playbook + tool descriptions
+        // + lessons) is identical on every call of the run — the ideal prompt-
+        // cache prefix. Marking it cached makes providers that support caching
+        // (Anthropic) bill the resend at a fraction, which matters a lot: on a
+        // multi-call run the system prompt is by far the largest resent block.
+        let mut messages = vec![Message::system(system).cached(), Message::user(goal)];
 
         ctx.emit("agent.status", serde_json::json!({ "status": "running" }));
 
@@ -337,6 +342,7 @@ impl Agent for ReactAgent {
         let run_start = std::time::Instant::now();
         let mut billed_prompt: u64 = 0;
         let mut billed_completion: u64 = 0;
+        let mut cached_prompt: u64 = 0;
         let mut context_tokens: u64 = 0;
         let mut model_calls: u64 = 0;
         // Total time spent waiting on the model — the "thinking" time, as
@@ -434,9 +440,11 @@ impl Agent for ReactAgent {
                 thinking_ms += call_ms;
 
                 // Billed = cumulative across calls; context = this call's prompt
-                // (the live window size), not a running sum.
+                // (the live window size), not a running sum. Cached = the slice
+                // of billed prompt that was served from the prompt cache.
                 billed_prompt += completion.usage.prompt_tokens as u64;
                 billed_completion += completion.usage.completion_tokens as u64;
+                cached_prompt += completion.usage.cached_prompt_tokens as u64;
                 context_tokens = completion.usage.prompt_tokens as u64
                     + completion.usage.completion_tokens as u64;
                 model_calls += 1;
@@ -447,6 +455,8 @@ impl Agent for ReactAgent {
                         "billed_prompt": billed_prompt,
                         "billed_completion": billed_completion,
                         "billed_total": billed_prompt + billed_completion,
+                        // Of billed prompt, how much was cache-served (cheap).
+                        "cached_prompt": cached_prompt,
                         // Live context-window size (does not grow with call count).
                         "context": context_tokens,
                         "calls": model_calls,
@@ -468,73 +478,125 @@ impl Agent for ReactAgent {
                         completion.content.clone(),
                         completion.tool_calls.clone(),
                     ));
-                    let mut any_error = false;
-                    for call in &completion.tool_calls {
-                        // A finish disguised as a tool call still finishes.
-                        if is_finish_alias(&call.name) {
-                            let answer = call
-                                .arguments
-                                .get("content")
-                                .or_else(|| call.arguments.get("answer"))
-                                .or_else(|| call.arguments.get("text"))
-                                .and_then(|v| v.as_str())
-                                .map(String::from)
-                                .filter(|s| !s.is_empty())
-                                .unwrap_or_else(|| completion.content.clone());
-                            if goal_wants_mutation
-                                && !mutated
-                                && completion_nudges < MAX_COMPLETION_NUDGES
-                            {
-                                completion_nudges += 1;
-                                messages.push(Message::user(ACT_NUDGE));
-                            } else {
-                                final_answer = Some(answer);
-                                break 'rounds;
-                            }
+
+                    // Split off a finish-alias if the model wrote one. A real
+                    // batch and a "final" call don't mix; honour the finish.
+                    let real_calls: Vec<&dadhichi_ai::ToolCall> = completion
+                        .tool_calls
+                        .iter()
+                        .filter(|c| !is_finish_alias(&c.name))
+                        .collect();
+                    if let Some(finish) =
+                        completion.tool_calls.iter().find(|c| is_finish_alias(&c.name))
+                        && real_calls.is_empty()
+                    {
+                        let answer = finish
+                            .arguments
+                            .get("content")
+                            .or_else(|| finish.arguments.get("answer"))
+                            .or_else(|| finish.arguments.get("text"))
+                            .and_then(|v| v.as_str())
+                            .map(String::from)
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or_else(|| completion.content.clone());
+                        if goal_wants_mutation
+                            && !mutated
+                            && completion_nudges < MAX_COMPLETION_NUDGES
+                        {
+                            completion_nudges += 1;
+                            messages.push(Message::user(ACT_NUDGE));
                             continue;
                         }
+                        final_answer = Some(answer);
+                        break 'rounds;
+                    }
+
+                    // Parallelise only when it's safe: every call is read-only
+                    // (no write/run permission) and there is more than one.
+                    // Mutating batches run sequentially so file edits and shell
+                    // commands can't race each other.
+                    let all_read_only = real_calls
+                        .iter()
+                        .all(|c| !mutating_tools.contains(c.name.as_str()));
+                    let parallel = real_calls.len() > 1 && all_read_only;
+
+                    // Announce all calls (in order) before running them.
+                    let mut planned = Vec::new();
+                    for call in &real_calls {
                         steps_taken += 1;
                         ctx.emit(
                             "agent.tool",
                             serde_json::json!({ "tool": call.name, "args": call.arguments, "step": steps_taken }),
                         );
-                        let edited_path = matches!(call.name.as_str(), "fs.write" | "fs.edit")
-                            .then(|| call.arguments.get("path").and_then(|p| p.as_str()).map(String::from))
-                            .flatten();
-                        match ctx.tools.invoke(&call.name, call.arguments.clone(), &ctx.grants).await {
-                            Ok(result) => {
-                                if mutating_tools.contains(call.name.as_str()) {
+                        planned.push((call.id.clone(), call.name.clone(), call.arguments.clone()));
+                    }
+
+                    // Run them — concurrently when safe, else in order — and
+                    // collect (id, name, result) preserving request order.
+                    let results: Vec<(String, String, Result<serde_json::Value, String>)> =
+                        if parallel {
+                            ctx.emit(
+                                "agent.parallel",
+                                serde_json::json!({ "count": planned.len() }),
+                            );
+                            let futures = planned.iter().map(|(id, name, args)| {
+                                let tools = ctx.tools.clone();
+                                let grants = ctx.grants.clone();
+                                let (id, name, args) = (id.clone(), name.clone(), args.clone());
+                                async move {
+                                    let r = tools
+                                        .invoke(&name, args, &grants)
+                                        .await
+                                        .map_err(|e| e.to_string());
+                                    (id, name, r)
+                                }
+                            });
+                            futures::future::join_all(futures).await
+                        } else {
+                            let mut out = Vec::new();
+                            for (id, name, args) in &planned {
+                                let r = ctx
+                                    .tools
+                                    .invoke(name, args.clone(), &ctx.grants)
+                                    .await
+                                    .map_err(|e| e.to_string());
+                                out.push((id.clone(), name.clone(), r));
+                            }
+                            out
+                        };
+
+                    // Thread results back in order, emit events, verify edits.
+                    for ((id, name, result), (_, _, args)) in results.into_iter().zip(planned.iter()) {
+                        match result {
+                            Ok(value) => {
+                                if mutating_tools.contains(name.as_str()) {
                                     mutated = true;
                                 }
                                 ctx.emit(
                                     "agent.tool.result",
-                                    serde_json::json!({ "tool": call.name, "result": result }),
+                                    serde_json::json!({ "tool": name, "result": value }),
                                 );
-                                messages.push(Message::tool_result(
-                                    &call.id,
-                                    clip_result(&result.to_string()),
-                                ));
-                                if let Some(path) = edited_path {
-                                    last_check_clean = self.auto_check(ctx, &path, &mut messages).await;
+                                messages.push(Message::tool_result(&id, clip_result(&value.to_string())));
+                                if matches!(name.as_str(), "fs.write" | "fs.edit")
+                                    && let Some(path) = args.get("path").and_then(|p| p.as_str())
+                                {
+                                    last_check_clean = self.auto_check(ctx, path, &mut messages).await;
                                 }
                             }
-                            Err(err) => {
-                                any_error = true;
+                            Err(msg) => {
                                 had_tool_errors = true;
-                                let msg = err.to_string();
                                 ctx.emit(
                                     "agent.tool.error",
-                                    serde_json::json!({ "tool": call.name, "error": msg }),
+                                    serde_json::json!({ "tool": name, "error": msg }),
                                 );
                                 messages.push(Message::tool_result(
-                                    &call.id,
+                                    &id,
                                     format!("ERROR: {msg}. Try a different approach or finish."),
                                 ));
                             }
                         }
                     }
                     ctx.maybe_compact(&self.model).await;
-                    let _ = any_error;
                     continue;
                 }
                 // ---- Text / JSON-scraping fallback path ---------------------
@@ -781,6 +843,7 @@ impl Agent for ReactAgent {
                 "billed_prompt": billed_prompt,
                 "billed_completion": billed_completion,
                 "billed_total": billed_prompt + billed_completion,
+                "cached_prompt": cached_prompt,
                 "context_tokens": context_tokens,
                 "model_calls": model_calls,
                 "tool_calls": steps_taken,
@@ -1019,6 +1082,7 @@ mod tests {
                 usage: Usage {
                     prompt_tokens: 100,
                     completion_tokens: 10,
+                    cached_prompt_tokens: 0,
                 },
                 tool_calls: Vec::new(),
             })
@@ -1061,7 +1125,7 @@ mod tests {
             Ok(Completion {
                 content: if n == 0 { String::new() } else { "all done".into() },
                 model: "mock".into(),
-                usage: Usage { prompt_tokens: 50, completion_tokens: 5 },
+                usage: Usage { prompt_tokens: 50, completion_tokens: 5, cached_prompt_tokens: 0 },
                 tool_calls,
             })
         }
@@ -1145,6 +1209,88 @@ mod tests {
                 .unwrap()
                 .contains("git repository")
         );
+    }
+
+    /// A tool with an arbitrary name and read-only permissions, whose invoke
+    /// sleeps briefly (so concurrency is observable) and echoes its args.
+    #[derive(Debug)]
+    struct SlowReadTool {
+        name: &'static str,
+    }
+
+    #[async_trait]
+    impl Tool for SlowReadTool {
+        fn spec(&self) -> ToolSpec {
+            ToolSpec {
+                name: self.name.into(),
+                description: "slow read".into(),
+                input_schema: serde_json::json!({ "type": "object" }),
+                permissions: vec![Permission::ReadWorkspace],
+            }
+        }
+        async fn invoke(&self, args: serde_json::Value) -> ToolResult {
+            tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+            Ok(serde_json::json!({ "tool": self.name, "echo": args }))
+        }
+    }
+
+    #[tokio::test]
+    async fn independent_native_calls_run_in_parallel() {
+        // Two read-only tools, each ~120ms. Run concurrently the pair should
+        // finish well under the ~240ms a sequential run would take — and both
+        // results must be threaded in request order.
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register(Arc::new(SlowReadTool { name: "fs.grep" }));
+        tools.register(Arc::new(SlowReadTool { name: "fs.glob" }));
+
+        #[derive(Debug)]
+        struct TwoCallProvider {
+            step: Mutex<u32>,
+        }
+        #[async_trait]
+        impl LanguageModel for TwoCallProvider {
+            fn id(&self) -> &str { "mock" }
+            fn capabilities(&self) -> ModelCapabilities {
+                ModelCapabilities { tools: true, local: true, ..Default::default() }
+            }
+            async fn complete(&self, _r: CompletionRequest) -> ProviderResult<Completion> {
+                let n = { let mut s = self.step.lock().unwrap(); let v = *s; *s += 1; v };
+                let tool_calls = if n == 0 {
+                    vec![
+                        dadhichi_ai::ToolCall { id: "a".into(), name: "fs.grep".into(), arguments: serde_json::json!({ "q": 1 }) },
+                        dadhichi_ai::ToolCall { id: "b".into(), name: "fs.glob".into(), arguments: serde_json::json!({ "q": 2 }) },
+                    ]
+                } else { Vec::new() };
+                Ok(Completion {
+                    content: if n == 0 { String::new() } else { "done".into() },
+                    model: "mock".into(),
+                    usage: Usage { prompt_tokens: 10, completion_tokens: 2, cached_prompt_tokens: 0 },
+                    tool_calls,
+                })
+            }
+        }
+
+        let (mut ctx, bus) = ctx_with(
+            Arc::new(TwoCallProvider { step: Mutex::new(0) }),
+            tools,
+        );
+        // Grant read so the tools are invokable.
+        ctx.grants = GrantSet::from_iter([Permission::ReadWorkspace]);
+        let mut parallel = bus.subscribe_topic("agent.parallel");
+        let mut results = bus.subscribe_topic("agent.tool.result");
+
+        let start = std::time::Instant::now();
+        let outcome = ReactAgent::new("mock").run("search two ways", &mut ctx).await.unwrap();
+        let elapsed = start.elapsed();
+
+        assert_eq!(outcome.status, AgentStatus::Completed);
+        // Ran concurrently ⇒ far under two sequential 120ms sleeps.
+        assert!(elapsed.as_millis() < 220, "took {}ms — not parallel", elapsed.as_millis());
+        // An agent.parallel event announced the batch.
+        assert_eq!(parallel.recv().await.unwrap().payload["count"], 2);
+        // Both results threaded, in request order.
+        assert_eq!(results.recv().await.unwrap().payload["result"]["tool"], "fs.grep");
+        assert_eq!(results.recv().await.unwrap().payload["result"]["tool"], "fs.glob");
     }
 
     #[tokio::test]

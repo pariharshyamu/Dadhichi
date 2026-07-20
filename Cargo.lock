@@ -465,6 +465,7 @@ dependencies = [
  "dadhichi-git",
  "dadhichi-mcp",
  "dadhichi-vector",
+ "futures",
  "serde",
  "serde_json",
  "tempfile",

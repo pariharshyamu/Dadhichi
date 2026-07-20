@@ -200,6 +200,16 @@ pub struct Usage {
     pub prompt_tokens: u32,
     /// Tokens produced in the completion.
     pub completion_tokens: u32,
+    /// Of the prompt tokens, how many were served from the provider's prompt
+    /// cache (billed at a large discount). `0` when caching didn't apply or the
+    /// provider doesn't report it. Purely informational — `prompt_tokens`
+    /// already includes these.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub cached_prompt_tokens: u32,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 impl Usage {

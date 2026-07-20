@@ -91,6 +91,7 @@ mod tests {
         let usage = Usage {
             prompt_tokens: 1_000_000,
             completion_tokens: 1_000_000,
+            ..Default::default()
         };
         assert!((pricing.cost_of(usage) - 18.0).abs() < 1e-9);
     }
@@ -100,6 +101,7 @@ mod tests {
         let usage = Usage {
             prompt_tokens: 5_000_000,
             completion_tokens: 5_000_000,
+            ..Default::default()
         };
         assert_eq!(ModelPricing::FREE.cost_of(usage), 0.0);
     }
@@ -112,6 +114,7 @@ mod tests {
         let usage = Usage {
             prompt_tokens: 1_000_000,
             completion_tokens: 0,
+            ..Default::default()
         };
         assert!((table.cost("gpt-x", usage) - 2.5).abs() < 1e-9);
         assert!((table.cost("mystery", usage) - 1.0).abs() < 1e-9);

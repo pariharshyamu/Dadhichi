@@ -154,7 +154,7 @@ impl<M: LanguageModel> LanguageModel for CachingModel<M> {
 mod tests {
     use super::*;
     use crate::provider::{LanguageModel, MockProvider};
-    use crate::types::{Message, Role};
+    use crate::types::Message;
     use std::sync::Arc;
     use std::sync::atomic::AtomicU64;
 
