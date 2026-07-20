@@ -37,10 +37,13 @@ fn action_protocol() -> &'static str {
      1. To run a tool:  {\"thought\": \"why\", \"tool\": \"<tool name>\", \"args\": { ... }}\n\
      2. To finish:      {\"thought\": \"why\", \"final\": \"<your answer to the user>\"}\n\n\
      Rules:\n\
+     - To FINISH, use shape 2 exactly: put the answer in a top-level \"final\" field. Do NOT \
+     write {\"tool\": \"final\", ...} — there is no tool named final; that is an error.\n\
      - Prefer acting over explaining. If the goal is a task, PERFORM it with tools, then \
      confirm what you did in \"final\".\n\
      - After each tool call you receive its result as the next message; use it to decide the \
-     next step. Read files before editing them; verify with a build/test tool after changing code.\n\
+     next step. To find code, fs.grep/fs.glob first, then fs.read the relevant slice — do not \
+     read whole files to look around. Verify with code.check or a build/test tool after edits.\n\
      - \"args\" must be valid JSON matching the tool's schema.\n\
      - Work in small, verifiable steps. Do not claim something is done until a tool result \
      confirms it.\n\
@@ -465,6 +468,32 @@ impl Agent for ReactAgent {
                 };
                 let args = action.get("args").cloned().unwrap_or(serde_json::json!({}));
 
+                // Models frequently write the finish as a *tool call*
+                // (`{"tool":"final","args":{"content":…}}`) instead of the
+                // `{"final":…}` shape. Treat those aliases as a real finish
+                // rather than trying to invoke a non-existent tool.
+                if matches!(
+                    tool_name.to_ascii_lowercase().as_str(),
+                    "final" | "finish" | "done" | "answer" | "final_answer" | "complete"
+                ) {
+                    let answer = args
+                        .get("content")
+                        .or_else(|| args.get("answer"))
+                        .or_else(|| args.get("text"))
+                        .or_else(|| args.get("final"))
+                        .and_then(|v| v.as_str())
+                        .map(String::from)
+                        .unwrap_or_else(|| reply.clone());
+                    if goal_wants_mutation && !mutated && completion_nudges < MAX_COMPLETION_NUDGES {
+                        completion_nudges += 1;
+                        messages.push(Message::assistant(reply));
+                        messages.push(Message::user(ACT_NUDGE));
+                        continue;
+                    }
+                    final_answer = Some(answer);
+                    break 'rounds;
+                }
+
                 // Stall guard: if the same tool+args has been issued repeatedly with
                 // no progress, break the round early to force a re-plan.
                 let signature = format!("{tool_name}:{args}");
@@ -612,7 +641,10 @@ impl Agent for ReactAgent {
         // session store persists it, so the *next* run starts smarter. Its
         // model call is folded into the run's token tally.
         if !cancelled && (had_tool_errors || last_check_clean == Some(false) || steps_taken >= 4) {
-            let (p, c) = self.reflect(ctx, &mut messages).await;
+            let total = prompt_tokens + completion_tokens;
+            let (p, c) = self
+                .reflect(ctx, &mut messages, total, model_calls)
+                .await;
             prompt_tokens += p;
             completion_tokens += c;
             if p + c > 0 {
@@ -711,13 +743,31 @@ impl ReactAgent {
     /// the session store persists it, so future runs are seeded with it.
     /// Returns the `(prompt, completion)` tokens it used so the caller can fold
     /// them into the run tally.
-    async fn reflect(&self, ctx: &mut AgentContext, messages: &mut Vec<Message>) -> (u64, u64) {
-        messages.push(Message::user(
+    async fn reflect(
+        &self,
+        ctx: &mut AgentContext,
+        messages: &mut Vec<Message>,
+        total_tokens: u64,
+        model_calls: u64,
+    ) -> (u64, u64) {
+        // A run that burned a lot of tokens should reflect on *efficiency*, so
+        // the lesson kept is "how to do this cheaper" rather than a restatement
+        // of what was done. Give the model the cost so it can judge.
+        let cost_hint = if total_tokens > 40_000 {
+            format!(
+                " This run used {total_tokens} tokens across {model_calls} model calls, which is \
+                 expensive — favour a lesson about how to reach the same answer with fewer / \
+                 cheaper tool calls (search before reading, read narrow slices)."
+            )
+        } else {
+            String::new()
+        };
+        messages.push(Message::user(format!(
             "Final step: in ONE line of at most 120 characters, state the single most useful \
              lesson from this run for future work in this workspace (a pitfall, a convention, a \
-             faster route). Reply with exactly `lesson: <text>` and nothing else. If there is no \
-             lesson worth keeping, reply `lesson: none`.",
-        ));
+             faster/cheaper route).{cost_hint} Reply with exactly `lesson: <text>` and nothing \
+             else. If there is no lesson worth keeping, reply `lesson: none`."
+        )));
         let request = CompletionRequest {
             model: self.model.clone(),
             messages: messages.clone(),
@@ -929,6 +979,28 @@ mod tests {
                 .unwrap()
                 .contains("git repository")
         );
+    }
+
+    #[tokio::test]
+    async fn a_final_shaped_as_a_tool_call_is_treated_as_the_answer() {
+        // The model writes the finish as a tool call — a very common mistake.
+        // It must terminate cleanly with the answer, not error on an unknown
+        // "final" tool.
+        let tools = Arc::new(ToolRegistry::new());
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            r#"{"tool":"final","args":{"content":"The repo is an AI-first IDE in Rust."}}"#,
+        ]));
+        let (mut ctx, bus) = ctx_with(provider, tools);
+        let mut errs = bus.subscribe_topic("agent.tool.error");
+
+        let outcome = ReactAgent::new("mock")
+            .run("what is this repo", &mut ctx)
+            .await
+            .unwrap();
+        assert_eq!(outcome.status, AgentStatus::Completed);
+        assert!(outcome.summary.contains("AI-first IDE in Rust"));
+        // No bogus "unknown tool: final" error was emitted.
+        assert!(matches!(errs.try_recv(), Ok(None)));
     }
 
     #[tokio::test]
