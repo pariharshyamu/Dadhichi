@@ -32,6 +32,25 @@
   </provides>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.1.16" date="2026-07-20">
+      <description>
+        <p>A far more capable and efficient agent. Models now call tools through
+        their provider's native function-calling channel instead of hand-written
+        JSON, cutting a typical task from ~11 model calls to ~2; the system-prompt
+        prefix is prompt-cached, and independent read-only tool calls run in
+        parallel. The agent self-improves (distilling a lesson from each run to
+        seed the next), verifies its own edits with code.check, and uses
+        token-cheap tools (fs.edit surgical edits, paged fs.read). Reliability:
+        transient 429/5xx errors are retried with backoff and fall back down the
+        provider chain; a repeatedly-failing tool is disabled mid-run so it can't
+        burn context. Console UX: a Stop button that interrupts in-flight model
+        calls instantly, mid-run steering, collapsible tool cards with inline
+        Monaco diffs, session auto-allow approvals, honest billed-vs-context token
+        accounting, and streamed natural-language replies. Claude Code is now a
+        selectable agent backend, and the broken claude-code MCP connector was
+        removed.</p>
+      </description>
+    </release>
     <release version="0.1.15" date="2026-07-17">
       <description>
         <p>A full web GUI (dadhichi-gui): a local, offline, browser-served IDE
