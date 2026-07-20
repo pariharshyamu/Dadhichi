@@ -313,13 +313,17 @@ impl Agent for ReactAgent {
 
         ctx.emit("agent.status", serde_json::json!({ "status": "running" }));
 
-        // Token and wall-clock accounting for the whole run. `agent.tokens`
-        // previously reported only the *last* call's usage, so the console
-        // number reset every step; these accumulate across the run and split
-        // prompt vs completion so cost can be computed.
+        // Token and wall-clock accounting for the whole run. Two distinct
+        // numbers matter, and conflating them is misleading:
+        //  * BILLED tokens — the sum across every model call. Because the whole
+        //    conversation is resent each call, prompt tokens are re-counted
+        //    every step; this sum is what the provider actually bills.
+        //  * CONTEXT tokens — the size of the *latest* prompt, i.e. how full the
+        //    context window is right now. This does not grow with call count.
         let run_start = std::time::Instant::now();
-        let mut prompt_tokens: u64 = 0;
-        let mut completion_tokens: u64 = 0;
+        let mut billed_prompt: u64 = 0;
+        let mut billed_completion: u64 = 0;
+        let mut context_tokens: u64 = 0;
         let mut model_calls: u64 = 0;
         // Total time spent waiting on the model — the "thinking" time, as
         // distinct from tool-execution time.
@@ -397,24 +401,39 @@ impl Agent for ReactAgent {
                 // reported live so the console can show an elapsed timer.
                 ctx.emit("agent.thinking", serde_json::json!({ "state": "start" }));
                 let call_start = std::time::Instant::now();
-                let completion = ctx
-                    .models
-                    .complete(request)
-                    .await
-                    .map_err(|e| AgentError::Model(e.to_string()))?;
+                // Race the (possibly multi-second) model call against a stop:
+                // pressing Stop abandons the in-flight call immediately rather
+                // than waiting for it to return.
+                let completion = tokio::select! {
+                    biased;
+                    _ = ctx.control.cancelled() => {
+                        ctx.emit("agent.thinking", serde_json::json!({ "state": "end", "ms": call_start.elapsed().as_millis() }));
+                        cancelled = true;
+                        break 'rounds;
+                    }
+                    result = ctx.models.complete(request) => {
+                        result.map_err(|e| AgentError::Model(e.to_string()))?
+                    }
+                };
                 let call_ms = call_start.elapsed().as_millis();
                 thinking_ms += call_ms;
 
-                // Accumulate real usage across the whole run (not per call).
-                prompt_tokens += completion.usage.prompt_tokens as u64;
-                completion_tokens += completion.usage.completion_tokens as u64;
+                // Billed = cumulative across calls; context = this call's prompt
+                // (the live window size), not a running sum.
+                billed_prompt += completion.usage.prompt_tokens as u64;
+                billed_completion += completion.usage.completion_tokens as u64;
+                context_tokens = completion.usage.prompt_tokens as u64
+                    + completion.usage.completion_tokens as u64;
                 model_calls += 1;
                 ctx.emit(
                     "agent.tokens",
                     serde_json::json!({
-                        "prompt": prompt_tokens,
-                        "completion": completion_tokens,
-                        "total": prompt_tokens + completion_tokens,
+                        // Billed totals (what you pay).
+                        "billed_prompt": billed_prompt,
+                        "billed_completion": billed_completion,
+                        "billed_total": billed_prompt + billed_completion,
+                        // Live context-window size (does not grow with call count).
+                        "context": context_tokens,
                         "calls": model_calls,
                         "last_call": completion.usage.total(),
                         "thinking_ms": thinking_ms,
@@ -641,12 +660,12 @@ impl Agent for ReactAgent {
         // session store persists it, so the *next* run starts smarter. Its
         // model call is folded into the run's token tally.
         if !cancelled && (had_tool_errors || last_check_clean == Some(false) || steps_taken >= 4) {
-            let total = prompt_tokens + completion_tokens;
+            let billed = billed_prompt + billed_completion;
             let (p, c) = self
-                .reflect(ctx, &mut messages, total, model_calls)
+                .reflect(ctx, &mut messages, billed, model_calls)
                 .await;
-            prompt_tokens += p;
-            completion_tokens += c;
+            billed_prompt += p;
+            billed_completion += c;
             if p + c > 0 {
                 model_calls += 1;
             }
@@ -661,15 +680,17 @@ impl Agent for ReactAgent {
             (false, _) => 0.75,
         };
 
-        // Final run accounting: cumulative tokens, model calls, thinking vs
-        // total wall time — the numbers the console footer reports.
+        // Final run accounting. `billed_*` is the true cost (sum over calls);
+        // `context_tokens` is the final window size — reported separately so the
+        // console doesn't present a re-counted prompt sum as one lump.
         let elapsed_ms = run_start.elapsed().as_millis();
         ctx.emit(
             "agent.usage",
             serde_json::json!({
-                "prompt_tokens": prompt_tokens,
-                "completion_tokens": completion_tokens,
-                "total_tokens": prompt_tokens + completion_tokens,
+                "billed_prompt": billed_prompt,
+                "billed_completion": billed_completion,
+                "billed_total": billed_prompt + billed_completion,
+                "context_tokens": context_tokens,
                 "model_calls": model_calls,
                 "tool_calls": steps_taken,
                 "thinking_ms": thinking_ms,
@@ -1182,9 +1203,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn token_usage_accumulates_across_calls_not_resets() {
-        // Two model calls (tool then final) at 110 tokens each ⇒ the run's
-        // final agent.usage must report the *sum*, not the last call.
+    async fn billed_tokens_accumulate_while_context_tracks_the_last_call() {
+        // Two model calls at 100 prompt / 10 completion each. Billed must be
+        // the SUM (200/20); context must be the LAST call (110), not the sum —
+        // that distinction is the whole point of the fix.
         let recorder = RecordingTool::default();
         let tools = Arc::new(ToolRegistry::new());
         tools.register(Arc::new(recorder));
@@ -1199,11 +1221,51 @@ mod tests {
 
         let event = usage.recv().await.unwrap();
         assert_eq!(event.payload["model_calls"], 2);
-        assert_eq!(event.payload["prompt_tokens"], 200);
-        assert_eq!(event.payload["completion_tokens"], 20);
-        assert_eq!(event.payload["total_tokens"], 220);
+        assert_eq!(event.payload["billed_prompt"], 200);
+        assert_eq!(event.payload["billed_completion"], 20);
+        assert_eq!(event.payload["billed_total"], 220);
+        assert_eq!(event.payload["context_tokens"], 110, "context is one call, not the sum");
         assert!(event.payload["elapsed_ms"].as_u64().is_some());
         assert!(event.payload["thinking_ms"].as_u64().is_some());
+    }
+
+    #[tokio::test]
+    async fn stop_interrupts_an_in_flight_model_call_immediately() {
+        // A provider that blocks forever; the run must still return promptly
+        // once stop() fires, proving the call is abandoned mid-flight rather
+        // than awaited to completion.
+        #[derive(Debug)]
+        struct HangingProvider;
+        #[async_trait]
+        impl LanguageModel for HangingProvider {
+            fn id(&self) -> &str { "mock" }
+            fn capabilities(&self) -> ModelCapabilities {
+                ModelCapabilities { tools: true, local: true, ..Default::default() }
+            }
+            async fn complete(&self, _r: CompletionRequest) -> ProviderResult<Completion> {
+                // Never resolves on its own.
+                std::future::pending::<()>().await;
+                unreachable!()
+            }
+        }
+        let tools = Arc::new(ToolRegistry::new());
+        let (mut ctx, _bus) = ctx_with(Arc::new(HangingProvider), tools);
+        let control = ctx.control.clone();
+
+        // Fire stop shortly after the run begins its (hanging) model call.
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            control.stop();
+        });
+
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            ReactAgent::new("mock").run("do something long", &mut ctx),
+        )
+        .await
+        .expect("run must return promptly after stop, not hang")
+        .unwrap();
+        assert_eq!(outcome.status, AgentStatus::Cancelled);
     }
 
     #[tokio::test]

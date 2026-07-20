@@ -660,10 +660,12 @@ function handleEvent(topic, p) {
       break;
     }
     case "agent.tokens": {
-      // Live cumulative token count for the running meter.
-      const total = p.total ?? 0;
-      state.runTokens = total;
-      $("run-tokens").textContent = fmtTokens(total);
+      // The meter shows billed (what you pay) with the live context size next
+      // to it — both matter and they are different numbers.
+      const billed = p.billed_total ?? 0;
+      const ctxTok = p.context ?? 0;
+      state.runTokens = billed;
+      $("run-tokens").textContent = `${fmtTokens(billed)} · ctx ${fmtTokens(ctxTok)}`;
       break;
     }
     case "agent.usage": {
@@ -671,9 +673,10 @@ function handleEvent(topic, p) {
       const secs = ((p.elapsed_ms ?? 0) / 1000).toFixed(1);
       const think = ((p.thinking_ms ?? 0) / 1000).toFixed(1);
       chatEvent(
-        `Σ run: ${fmtTokens(p.total_tokens ?? 0)} (${p.prompt_tokens ?? 0} in / ` +
-        `${p.completion_tokens ?? 0} out) · ${p.model_calls ?? 0} model calls · ` +
-        `${p.tool_calls ?? 0} tool calls · ${secs}s total, ${think}s thinking`,
+        `Σ run: billed ${fmtTokens(p.billed_total ?? 0)} (${p.billed_prompt ?? 0} in / ` +
+        `${p.billed_completion ?? 0} out) · context ${fmtTokens(p.context_tokens ?? 0)} · ` +
+        `${p.model_calls ?? 0} model calls · ${p.tool_calls ?? 0} tool calls · ` +
+        `${secs}s total, ${think}s thinking`,
         "plan"
       );
       break;

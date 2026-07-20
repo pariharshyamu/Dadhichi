@@ -71,6 +71,9 @@ pub enum AgentError {
 pub struct RunControl {
     cancel: Arc<std::sync::atomic::AtomicBool>,
     inbox: Arc<std::sync::Mutex<Vec<String>>>,
+    /// Woken the instant `stop()` is called, so a task awaiting a slow model
+    /// call can abandon it immediately instead of after it returns.
+    notify: Arc<tokio::sync::Notify>,
 }
 
 impl RunControl {
@@ -79,14 +82,33 @@ impl RunControl {
         Self::default()
     }
 
-    /// Ask the run to stop at its next loop iteration.
+    /// Ask the run to stop. Wakes any task awaiting [`cancelled`](Self::cancelled)
+    /// right away, so an in-flight model call is dropped without waiting for it.
     pub fn stop(&self) {
         self.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.notify.notify_waiters();
     }
 
     /// Whether a stop has been requested.
     pub fn is_cancelled(&self) -> bool {
         self.cancel.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Resolves as soon as a stop is requested. Use it in a `tokio::select!`
+    /// against a long await (a model call) so cancellation is immediate.
+    pub async fn cancelled(&self) {
+        // Already stopped ⇒ return at once; otherwise wait for the notify.
+        // (Register the waiter before re-checking to avoid a lost wakeup.)
+        loop {
+            if self.is_cancelled() {
+                return;
+            }
+            let waited = self.notify.notified();
+            if self.is_cancelled() {
+                return;
+            }
+            waited.await;
+        }
     }
 
     /// Queue a user message for injection into the run's next model turn —
