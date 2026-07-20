@@ -28,6 +28,7 @@ const state = {
   runStart: 0,            // ms epoch the current run began (0 = idle)
   runTokens: 0,           // cumulative tokens for the current run
   timerHandle: null,      // live elapsed-timer interval
+  streamBubble: null,     // the live assistant bubble being streamed into
 };
 
 /* ---------------- boot ---------------- */
@@ -613,6 +614,7 @@ function handleEvent(topic, p) {
   switch (topic) {
     case "agent.status": {
       const status = p.status || "";
+      if (status === "planning") state.streamBubble = null; // fresh reply next
       if (["completed", "failed", "error", "idle", "cancelled"].includes(status)) setPhase("idle");
       else if (["planning", "replanning"].includes(status)) setPhase("thinking");
       else if (status === "running") setPhase("thinking");
@@ -702,13 +704,31 @@ function handleEvent(topic, p) {
       );
       break;
     }
+    case "agent.delta": {
+      // Streaming natural-language reply: grow a single live bubble.
+      if (p.start) {
+        state.streamBubble = null; // a new reply begins
+      } else if (typeof p.text === "string") {
+        appendDelta(p.text);
+      }
+      break;
+    }
     case "agent.message": {
-      chatBubble(p.text || p.message || compact(p), "agent");
+      // The durable message. If we streamed it, the live bubble already holds
+      // the text — just seal it; otherwise render it fresh.
+      const text = p.content ?? p.text ?? p.message ?? "";
+      if (state.streamBubble) {
+        state.streamBubble.textContent = text || state.streamBubble.textContent;
+        state.streamBubble = null;
+      } else if (text) {
+        chatBubble(text, "agent");
+      }
       break;
     }
     case "agent.delegated": {
       setPhase("spawned");
       chatEvent(`⇥ delegated → ${p.agent || p.subagent || "specialist"}`, "deleg");
+      if (p.note) chatEvent(`ℹ ${p.note}`, "plan");
       break;
     }
     case "agent.error":
@@ -809,6 +829,19 @@ function chatBubble(text, who) {
   el.className = `msg ${who}`;
   el.textContent = text;
   appendChat(el);
+  return el;
+}
+
+/* Append a streamed text delta to the live assistant bubble, creating it on
+ * the first delta. Keeps the console pinned to the tail while it grows. */
+function appendDelta(text) {
+  if (!state.streamBubble) {
+    state.streamBubble = chatBubble("", "agent");
+  }
+  state.streamBubble.textContent += text;
+  const chat = $("chat");
+  const stick = chat.scrollTop + chat.clientHeight >= chat.scrollHeight - 40;
+  if (stick) chat.scrollTop = chat.scrollHeight;
 }
 
 function chatEvent(text, cls) {

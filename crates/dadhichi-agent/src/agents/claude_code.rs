@@ -124,7 +124,16 @@ impl Agent for ClaudeCodeAgent {
         ctx.emit("agent.status", serde_json::json!({ "status": "running" }));
         ctx.emit(
             "agent.delegated",
-            serde_json::json!({ "agent": "claude-code", "task": goal }),
+            serde_json::json!({
+                "agent": "claude-code",
+                "task": goal,
+                // Headless Claude Code runs its own tools under acceptEdits, so
+                // Dadhichi's per-tool approval gate does not apply — make that
+                // explicit rather than leaving the user wondering why no prompts
+                // appear. Stop still works (it kills the subprocess).
+                "auto_runs": true,
+                "note": "Claude Code runs autonomously (accepts edits); use Stop to halt it.",
+            }),
         );
 
         use std::process::Stdio;
@@ -194,10 +203,11 @@ impl Agent for ClaudeCodeAgent {
                     );
                 }
                 StreamEvent::Text(text) => {
-                    ctx.emit(
-                        "agent.message",
-                        serde_json::json!({ "role": "assistant", "content": text }),
-                    );
+                    // Claude Code narrates in natural language as it works —
+                    // stream each block as a conversational delta rather than a
+                    // separate finished message, so the console reads like a
+                    // flowing reply, not a stack of blobs.
+                    ctx.emit("agent.delta", serde_json::json!({ "text": text }));
                     last_text = text;
                 }
                 StreamEvent::Result(text, is_error) => result = Some((text, is_error)),
@@ -227,7 +237,7 @@ impl Agent for ClaudeCodeAgent {
                 // The stream ended without a result record — surface stderr.
                 let succeeded = status_code.map(|s| s.success()).unwrap_or(false);
                 if succeeded && !last_text.is_empty() {
-                    (last_text, false)
+                    (last_text.clone(), false)
                 } else {
                     (
                         format!(
@@ -240,9 +250,18 @@ impl Agent for ClaudeCodeAgent {
             }
         };
         ctx.memory.remember(Tier::Conversation, summary.clone());
+        // The result text is usually the tail of what was already narrated via
+        // deltas. If it adds nothing new, seal the streamed bubble empty (the
+        // GUI keeps the accumulated narration); otherwise emit it as the final
+        // message so nothing is lost.
+        let seal_content = if last_text.trim() == summary.trim() {
+            String::new()
+        } else {
+            summary.clone()
+        };
         ctx.emit(
             "agent.message",
-            serde_json::json!({ "role": "assistant", "content": summary }),
+            serde_json::json!({ "role": "assistant", "content": seal_content }),
         );
         plan.complete(step_report);
         ctx.emit_plan(&plan);

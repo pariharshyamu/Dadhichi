@@ -876,6 +876,13 @@ impl Agent for ReactAgent {
             })
         };
         ctx.memory.remember(Tier::Conversation, summary.clone());
+        // Deliver the final answer as a natural conversational message. It's
+        // already fully generated, but streaming it word-by-word makes the
+        // console read like a flowing reply instead of a JSON dump appearing at
+        // once. `agent.message` carries the whole text as the durable record.
+        if !cancelled {
+            stream_text(ctx, &summary).await;
+        }
         ctx.emit(
             "agent.message",
             serde_json::json!({ "role": "assistant", "content": summary }),
@@ -1065,6 +1072,28 @@ fn clip_result(text: &str) -> String {
         text.len() - head_end - (text.len() - tail_start),
         &text[tail_start..]
     )
+}
+
+/// Stream `text` to the console as a sequence of `agent.delta` events (a
+/// word-at-a-time reveal of the already-generated final answer), then let the
+/// caller emit the durable `agent.message`. A stop request ends it early.
+async fn stream_text(ctx: &AgentContext, text: &str) {
+    let text = text.trim();
+    if text.is_empty() {
+        return;
+    }
+    // Chunk on word boundaries so the reveal looks like natural typing. Very
+    // long answers stream in coarser chunks so we don't flood the bus.
+    let words: Vec<&str> = text.split_inclusive(char::is_whitespace).collect();
+    let group = (words.len() / 200).max(1);
+    ctx.emit("agent.delta", serde_json::json!({ "start": true }));
+    for chunk in words.chunks(group) {
+        if ctx.control.is_cancelled() {
+            break;
+        }
+        ctx.emit("agent.delta", serde_json::json!({ "text": chunk.concat() }));
+        tokio::time::sleep(std::time::Duration::from_millis(16)).await;
+    }
 }
 
 /// Record a tool failure; returns true when the tool has now failed enough
@@ -1421,6 +1450,37 @@ mod tests {
         // Both results threaded, in request order.
         assert_eq!(results.recv().await.unwrap().payload["result"]["tool"], "fs.grep");
         assert_eq!(results.recv().await.unwrap().payload["result"]["tool"], "fs.glob");
+    }
+
+    #[tokio::test]
+    async fn the_final_answer_is_streamed_as_deltas_then_sealed() {
+        // A plain-prose run must emit agent.delta chunks (the streamed reveal)
+        // and a final agent.message carrying the whole text.
+        let tools = Arc::new(ToolRegistry::new());
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            "A type-safe value is one the compiler guarantees matches its type.",
+        ]));
+        let (mut ctx, bus) = ctx_with(provider, tools);
+        let mut deltas = bus.subscribe_topic("agent.delta");
+        let mut msgs = bus.subscribe_topic("agent.message");
+
+        ReactAgent::new("mock").run("what is type safety", &mut ctx).await.unwrap();
+
+        // At least a start marker plus one text delta arrived.
+        let mut delta_texts = String::new();
+        let mut saw_start = false;
+        while let Ok(Some(ev)) = deltas.try_recv() {
+            if ev.payload.get("start").and_then(|s| s.as_bool()) == Some(true) {
+                saw_start = true;
+            } else if let Some(t) = ev.payload.get("text").and_then(|t| t.as_str()) {
+                delta_texts.push_str(t);
+            }
+        }
+        assert!(saw_start, "a delta start marker was emitted");
+        assert!(delta_texts.contains("type-safe"), "streamed text reassembles");
+        // The durable message carries the full answer under `content`.
+        let msg = msgs.recv().await.unwrap();
+        assert!(msg.payload["content"].as_str().unwrap().contains("type-safe"));
     }
 
     #[tokio::test]
