@@ -37,7 +37,7 @@ pub use embedding::{EmbeddingModel, MockEmbedder};
 pub use provider::{
     LanguageModel, MockProvider, ModelCapabilities, ProviderError, ProviderResult, ScriptProvider,
 };
-pub use router::ModelRouter;
+pub use router::{ModelRouter, RetryNotice};
 pub use types::{
     Completion, CompletionRequest, GenerationParams, Message, Role, StreamChunk, ToolCall,
     ToolDef, Usage,

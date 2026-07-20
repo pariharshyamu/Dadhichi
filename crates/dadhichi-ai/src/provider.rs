@@ -19,6 +19,36 @@ pub enum ProviderError {
     UnknownModel(String),
 }
 
+impl ProviderError {
+    /// Whether retrying the same request could plausibly succeed. Transport
+    /// blips and rate limits / server errors (HTTP 429, 5xx) are transient;
+    /// auth failures, bad requests, and unknown models are not — retrying those
+    /// just wastes time and tokens.
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            // A dropped connection or timeout is worth another try.
+            ProviderError::Transport(_) => true,
+            // The endpoint doesn't exist / the model is wrong — never retry.
+            ProviderError::UnknownModel(_) => false,
+            // Inspect the message: 429 and 5xx are transient; 4xx (auth, bad
+            // request) are permanent for this request.
+            ProviderError::Rejected(msg) => {
+                let m = msg.to_ascii_lowercase();
+                m.contains("429")
+                    || m.contains("too many requests")
+                    || m.contains("rate limit")
+                    || m.contains("overloaded")
+                    || m.contains(" 500")
+                    || m.contains(" 502")
+                    || m.contains(" 503")
+                    || m.contains(" 504")
+                    || m.contains("timeout")
+                    || m.contains("temporarily")
+            }
+        }
+    }
+}
+
 /// Result type for provider calls.
 pub type ProviderResult<T> = Result<T, ProviderError>;
 

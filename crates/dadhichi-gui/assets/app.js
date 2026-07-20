@@ -663,6 +663,15 @@ function handleEvent(topic, p) {
       chatEvent(`⊘ ${p.tool} disabled for this run (failed repeatedly)`, "err");
       break;
     }
+    case "agent.retry": {
+      if (p.falling_back) {
+        chatEvent(`↻ ${p.provider} failed — falling back to another model`, "err");
+      } else {
+        const secs = ((p.delay_ms ?? 0) / 1000).toFixed(1);
+        chatEvent(`↻ ${p.provider} rate-limited/errored — retry ${p.attempt} in ${secs}s`, "err");
+      }
+      break;
+    }
     case "agent.lesson": {
       chatEvent(`☆ lesson kept for future runs: ${trim(p.lesson || "", 200)}`, "plan");
       break;

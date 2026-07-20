@@ -445,6 +445,13 @@ impl Agent for ReactAgent {
                 // Race the (possibly multi-second) model call against a stop:
                 // pressing Stop abandons the in-flight call immediately rather
                 // than waiting for it to return.
+                // Resilient completion: transient failures (429 / 5xx / dropped
+                // connection) are retried with backoff, then the fallback chain
+                // is tried, so a rate-limited cloud model doesn't kill the run.
+                // Each retry/fallback surfaces on the bus as `agent.retry`.
+                let bus_for_retry = ctx.bus().clone();
+                let corr = ctx.correlation_id;
+                let router = ctx.models.clone();
                 let completion = tokio::select! {
                     biased;
                     _ = ctx.control.cancelled() => {
@@ -452,7 +459,20 @@ impl Agent for ReactAgent {
                         cancelled = true;
                         break 'rounds;
                     }
-                    result = ctx.models.complete(request) => {
+                    result = router.complete_resilient_with(request, |notice| {
+                        bus_for_retry.publish(
+                            dadhichi_core::Event::new(
+                                "agent.retry",
+                                serde_json::json!({
+                                    "provider": notice.provider,
+                                    "attempt": notice.attempt,
+                                    "delay_ms": notice.delay_ms,
+                                    "reason": notice.reason.chars().take(160).collect::<String>(),
+                                    "falling_back": notice.falling_back,
+                                }),
+                            ).with_correlation(corr),
+                        );
+                    }) => {
                         result.map_err(|e| AgentError::Model(e.to_string()))?
                     }
                 };
