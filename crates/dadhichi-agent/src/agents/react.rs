@@ -395,6 +395,16 @@ impl Agent for ReactAgent {
         let mut cancelled = false;
         let mut last_check_clean: Option<bool> = None;
         let mut had_tool_errors = false;
+        // Resilience: a tool that keeps failing (missing / broken bridged MCP
+        // tool, wrong platform command) must not be retried forever — each
+        // retry resends the whole context. After a tool errors this many times
+        // it is dropped from the advertised set and the model is told to stop
+        // using it, so one dead tool can't burn hundreds of thousands of tokens.
+        const MAX_TOOL_FAILURES: u32 = 2;
+        let mut tool_failures: std::collections::HashMap<String, u32> =
+            std::collections::HashMap::new();
+        let mut dead_tools: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
 
         'rounds: for round in 0..self.max_rounds {
             for step_in_round in 0..self.max_steps {
@@ -412,11 +422,21 @@ impl Agent for ReactAgent {
                     )));
                 }
 
+                // Don't advertise tools that have proven dead this run.
+                let live_tools: Vec<dadhichi_ai::ToolDef> = if dead_tools.is_empty() {
+                    tool_defs.clone()
+                } else {
+                    tool_defs
+                        .iter()
+                        .filter(|t| !dead_tools.contains(&t.name))
+                        .cloned()
+                        .collect()
+                };
                 let request = CompletionRequest {
                     model: self.model.clone(),
                     messages: messages.clone(),
                     params: Default::default(),
-                    tools: tool_defs.clone(),
+                    tools: live_tools,
                 };
                 // Time the model call — this is the run's "thinking" latency,
                 // reported live so the console can show an elapsed timer.
@@ -589,10 +609,28 @@ impl Agent for ReactAgent {
                                     "agent.tool.error",
                                     serde_json::json!({ "tool": name, "error": msg }),
                                 );
-                                messages.push(Message::tool_result(
-                                    &id,
-                                    format!("ERROR: {msg}. Try a different approach or finish."),
-                                ));
+                                let dropped = record_tool_failure(
+                                    &name,
+                                    &mut tool_failures,
+                                    &mut dead_tools,
+                                    MAX_TOOL_FAILURES,
+                                );
+                                let hint = if dropped {
+                                    format!(
+                                        "ERROR: {msg}. The tool `{name}` has failed repeatedly and \
+                                         is now disabled for this run — do NOT call it again; use a \
+                                         different tool."
+                                    )
+                                } else {
+                                    format!("ERROR: {msg}. Try a different approach or finish.")
+                                };
+                                if dropped {
+                                    ctx.emit(
+                                        "agent.tool.disabled",
+                                        serde_json::json!({ "tool": name }),
+                                    );
+                                }
+                                messages.push(Message::tool_result(&id, hint));
                             }
                         }
                     }
@@ -734,9 +772,27 @@ impl Agent for ReactAgent {
                             "agent.tool.error",
                             serde_json::json!({ "tool": tool_name, "error": msg }),
                         );
-                        messages.push(Message::user(format!(
-                            "TOOL ERROR [{tool_name}]: {msg}. Try a different approach or finish."
-                        )));
+                        let dropped = record_tool_failure(
+                            tool_name,
+                            &mut tool_failures,
+                            &mut dead_tools,
+                            MAX_TOOL_FAILURES,
+                        );
+                        if dropped {
+                            ctx.emit(
+                                "agent.tool.disabled",
+                                serde_json::json!({ "tool": tool_name }),
+                            );
+                            messages.push(Message::user(format!(
+                                "TOOL ERROR [{tool_name}]: {msg}. `{tool_name}` has failed \
+                                 repeatedly and is now disabled — do NOT call it again; use a \
+                                 different tool or finish."
+                            )));
+                        } else {
+                            messages.push(Message::user(format!(
+                                "TOOL ERROR [{tool_name}]: {msg}. Try a different approach or finish."
+                            )));
+                        }
                     }
                 }
 
@@ -991,6 +1047,24 @@ fn clip_result(text: &str) -> String {
     )
 }
 
+/// Record a tool failure; returns true when the tool has now failed enough
+/// times to be disabled for the run (added to `dead`).
+fn record_tool_failure(
+    name: &str,
+    failures: &mut std::collections::HashMap<String, u32>,
+    dead: &mut std::collections::HashSet<String>,
+    max: u32,
+) -> bool {
+    let count = failures.entry(name.to_string()).or_insert(0);
+    *count += 1;
+    if *count >= max && !dead.contains(name) {
+        dead.insert(name.to_string());
+        true
+    } else {
+        false
+    }
+}
+
 /// Whether a tool name is really a disguised "finish" — models emit these both
 /// as JSON `{"tool":"final"}` and as native calls to a nonexistent `final`.
 fn is_finish_alias(name: &str) -> bool {
@@ -1232,6 +1306,42 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(120)).await;
             Ok(serde_json::json!({ "tool": self.name, "echo": args }))
         }
+    }
+
+    #[test]
+    fn record_tool_failure_disables_after_the_limit() {
+        let mut failures = std::collections::HashMap::new();
+        let mut dead = std::collections::HashSet::new();
+        // First failure: not yet dead.
+        assert!(!record_tool_failure("bad.tool", &mut failures, &mut dead, 2));
+        assert!(dead.is_empty());
+        // Second failure: now disabled.
+        assert!(record_tool_failure("bad.tool", &mut failures, &mut dead, 2));
+        assert!(dead.contains("bad.tool"));
+        // Third failure: already dead, not re-reported.
+        assert!(!record_tool_failure("bad.tool", &mut failures, &mut dead, 2));
+    }
+
+    #[tokio::test]
+    async fn a_repeatedly_failing_tool_is_disabled_and_stops_being_advertised() {
+        // A model that keeps calling a broken tool: after MAX_TOOL_FAILURES the
+        // tool is dropped from the advertised set (so the model can't keep
+        // burning context on it) and an agent.tool.disabled event fires.
+        let tools = Arc::new(ToolRegistry::new());
+        // No tool registered under "ghost.tool" ⇒ every call errors.
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            r#"{"tool":"ghost.tool","args":{}}"#,
+            r#"{"tool":"ghost.tool","args":{}}"#,
+            r#"{"tool":"ghost.tool","args":{}}"#,
+            r#"{"final":"giving up"}"#,
+        ]));
+        let (mut ctx, bus) = ctx_with(provider, tools);
+        let mut disabled = bus.subscribe_topic("agent.tool.disabled");
+
+        let outcome = ReactAgent::new("mock").run("use the ghost tool", &mut ctx).await.unwrap();
+        assert_eq!(outcome.status, AgentStatus::Completed);
+        let ev = disabled.recv().await.unwrap();
+        assert_eq!(ev.payload["tool"], "ghost.tool");
     }
 
     #[tokio::test]

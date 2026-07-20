@@ -288,7 +288,16 @@ impl AppController {
         // so this reaches the tools every agent already holds). Secrets in the
         // config are `${...}` placeholders resolved from the environment or the
         // encrypted credential vault.
-        let (discovered_config, mcp_cfg_errors) = McpServersConfig::discover_in(&root);
+        let (mut discovered_config, mcp_cfg_errors) = McpServersConfig::discover_in(&root);
+        // Migration: earlier versions offered `claude-code`/`gemini-cli` as MCP
+        // connectors, but their `mcp serve` tools fail standalone and made the
+        // agent burn context retrying dead tools. Claude Code is now an agent
+        // backend, not a tool server — drop any persisted such server so it is
+        // no longer bridged. (The backend, selectable in the model picker, is
+        // unaffected.)
+        for stale in ["claude-code", "gemini-cli"] {
+            discovered_config.servers.remove(stale);
+        }
         let secrets = mcp_secret_resolver();
         let (mcp_conns, mcp_report) =
             connect_servers(&discovered_config, &tools, |key| secrets.resolve(key)).await;

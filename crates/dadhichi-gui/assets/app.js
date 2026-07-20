@@ -659,6 +659,10 @@ function handleEvent(topic, p) {
       chatEvent(`⇉ running ${p.count ?? 0} tool calls in parallel`, "deleg");
       break;
     }
+    case "agent.tool.disabled": {
+      chatEvent(`⊘ ${p.tool} disabled for this run (failed repeatedly)`, "err");
+      break;
+    }
     case "agent.lesson": {
       chatEvent(`☆ lesson kept for future runs: ${trim(p.lesson || "", 200)}`, "plan");
       break;
