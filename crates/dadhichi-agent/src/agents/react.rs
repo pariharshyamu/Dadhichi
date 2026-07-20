@@ -78,11 +78,15 @@ pub fn full_stack_system_prompt() -> &'static str {
      work, use `memory.write` to record durable facts and decisions so later turns can pick them \
      up.\n\
      - COMMIT sensibly when asked, with clear messages.\n\
-     - TOKEN DISCIPLINE: use the cheapest tool that answers the question. Locate before you \
-     read: `fs.grep`/`fs.glob` to find the place, then `fs.read` with offset/limit for just \
-     that slice — never re-read a file you already have in context. Change existing files with \
-     `fs.edit` (send only the snippet that changes); reserve `fs.write` for new files or full \
-     rewrites. After an edit, `code.check` the file instead of re-reading it whole.\n\
+     - SEARCH, DON'T SCAN. Never read a whole file to find something — it wastes context and \
+     money. To locate code use `fs.grep` (a symbol, string, or error text) or `fs.glob` (find \
+     files by name); the hits tell you the exact file and line. THEN `fs.read` that file with \
+     `offset`/`limit` around the hit — a focused window, not the whole file. Read a file whole \
+     only when it is genuinely small or you must understand all of it. Never re-read a file you \
+     already have in context; never read your own prior tool output back.\n\
+     - TOKEN DISCIPLINE: use the cheapest tool that answers the question. Change existing files \
+     with `fs.edit` (send only the snippet that changes); reserve `fs.write` for new files or \
+     full rewrites. After an edit, `code.check` the file instead of re-reading it whole.\n\
      - Prefer the project's existing conventions and dependencies; match the surrounding code."
 }
 
@@ -306,6 +310,18 @@ impl Agent for ReactAgent {
 
         ctx.emit("agent.status", serde_json::json!({ "status": "running" }));
 
+        // Token and wall-clock accounting for the whole run. `agent.tokens`
+        // previously reported only the *last* call's usage, so the console
+        // number reset every step; these accumulate across the run and split
+        // prompt vs completion so cost can be computed.
+        let run_start = std::time::Instant::now();
+        let mut prompt_tokens: u64 = 0;
+        let mut completion_tokens: u64 = 0;
+        let mut model_calls: u64 = 0;
+        // Total time spent waiting on the model — the "thinking" time, as
+        // distinct from tool-execution time.
+        let mut thinking_ms: u128 = 0;
+
         let mut final_answer: Option<String> = None;
         let mut steps_taken = 0usize;
         // Track the last few tool signatures to detect a stall (the model looping
@@ -333,6 +349,10 @@ impl Agent for ReactAgent {
             .map(|spec| spec.name.as_str())
             .collect();
         let goal_wants_mutation = goal_implies_mutation(goal) && !mutating_tools.is_empty();
+        let search_available = tool_specs
+            .iter()
+            .any(|s| s.name == "fs.grep" || s.name == "fs.glob");
+        let mut whole_file_nudged = false;
         let mut mutated = false;
         let mut completion_nudges = 0usize;
         const MAX_COMPLETION_NUDGES: usize = 2;
@@ -370,14 +390,37 @@ impl Agent for ReactAgent {
                     messages: messages.clone(),
                     params: Default::default(),
                 };
+                // Time the model call — this is the run's "thinking" latency,
+                // reported live so the console can show an elapsed timer.
+                ctx.emit("agent.thinking", serde_json::json!({ "state": "start" }));
+                let call_start = std::time::Instant::now();
                 let completion = ctx
                     .models
                     .complete(request)
                     .await
                     .map_err(|e| AgentError::Model(e.to_string()))?;
+                let call_ms = call_start.elapsed().as_millis();
+                thinking_ms += call_ms;
+
+                // Accumulate real usage across the whole run (not per call).
+                prompt_tokens += completion.usage.prompt_tokens as u64;
+                completion_tokens += completion.usage.completion_tokens as u64;
+                model_calls += 1;
                 ctx.emit(
                     "agent.tokens",
-                    serde_json::json!({ "total": completion.usage.total() }),
+                    serde_json::json!({
+                        "prompt": prompt_tokens,
+                        "completion": completion_tokens,
+                        "total": prompt_tokens + completion_tokens,
+                        "calls": model_calls,
+                        "last_call": completion.usage.total(),
+                        "thinking_ms": thinking_ms,
+                        "elapsed_ms": run_start.elapsed().as_millis(),
+                    }),
+                );
+                ctx.emit(
+                    "agent.thinking",
+                    serde_json::json!({ "state": "end", "ms": call_ms }),
                 );
 
                 let reply = completion.content.trim().to_string();
@@ -442,6 +485,11 @@ impl Agent for ReactAgent {
                 let edited_path = matches!(tool_name, "fs.write" | "fs.edit")
                     .then(|| args.get("path").and_then(|p| p.as_str()).map(String::from))
                     .flatten();
+                // A whole-file read (no offset/limit) of a big file, while
+                // search tools were available — the anti-pattern to nudge once.
+                let unfocused_read = tool_name == "fs.read"
+                    && args.get("offset").is_none()
+                    && args.get("limit").is_none();
                 match ctx.tools.invoke(tool_name, args, &ctx.grants).await {
                     Ok(result) => {
                         if mutating_tools.contains(tool_name) {
@@ -456,6 +504,18 @@ impl Agent for ReactAgent {
                         messages.push(Message::user(clip_result(&format!(
                             "TOOL RESULT [{tool_name}]: {result}"
                         ))));
+
+                        // One-time coaching: if the model read a big file whole
+                        // when it could have searched, teach the cheaper path.
+                        let big = result.get("lines").and_then(|l| l.as_u64()).unwrap_or(0) > 200;
+                        if unfocused_read && big && search_available && !whole_file_nudged {
+                            whole_file_nudged = true;
+                            messages.push(Message::user(
+                                "Note: that was a large whole-file read. Next time, fs.grep for \
+                                 the symbol or text you need and fs.read only that slice \
+                                 (offset/limit) — it is far cheaper. Continue.",
+                            ));
+                        }
 
                         // Verification loop: an edit is immediately checked
                         // (when a `code.check` tool is registered) and any
@@ -549,9 +609,15 @@ impl Agent for ReactAgent {
 
         // Self-improvement: distill one durable lesson from an eventful run
         // (tool errors, verification failures) into long-term memory. The
-        // session store persists it, so the *next* run starts smarter.
+        // session store persists it, so the *next* run starts smarter. Its
+        // model call is folded into the run's token tally.
         if !cancelled && (had_tool_errors || last_check_clean == Some(false) || steps_taken >= 4) {
-            self.reflect(ctx, &mut messages).await;
+            let (p, c) = self.reflect(ctx, &mut messages).await;
+            prompt_tokens += p;
+            completion_tokens += c;
+            if p + c > 0 {
+                model_calls += 1;
+            }
         }
 
         // Confidence is earned, not asserted: edits that were verified clean
@@ -562,6 +628,22 @@ impl Agent for ReactAgent {
             (true, Some(false)) => 0.4,
             (false, _) => 0.75,
         };
+
+        // Final run accounting: cumulative tokens, model calls, thinking vs
+        // total wall time — the numbers the console footer reports.
+        let elapsed_ms = run_start.elapsed().as_millis();
+        ctx.emit(
+            "agent.usage",
+            serde_json::json!({
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": prompt_tokens + completion_tokens,
+                "model_calls": model_calls,
+                "tool_calls": steps_taken,
+                "thinking_ms": thinking_ms,
+                "elapsed_ms": elapsed_ms,
+            }),
+        );
 
         let outcome = AgentOutcome {
             status: if cancelled {
@@ -627,7 +709,9 @@ impl ReactAgent {
     /// Ask the model for one durable, workspace-specific lesson from this run
     /// and store it as long-term memory (`lesson: …`). One cheap extra call;
     /// the session store persists it, so future runs are seeded with it.
-    async fn reflect(&self, ctx: &mut AgentContext, messages: &mut Vec<Message>) {
+    /// Returns the `(prompt, completion)` tokens it used so the caller can fold
+    /// them into the run tally.
+    async fn reflect(&self, ctx: &mut AgentContext, messages: &mut Vec<Message>) -> (u64, u64) {
         messages.push(Message::user(
             "Final step: in ONE line of at most 120 characters, state the single most useful \
              lesson from this run for future work in this workspace (a pitfall, a convention, a \
@@ -640,7 +724,7 @@ impl ReactAgent {
             params: Default::default(),
         };
         let Ok(completion) = ctx.models.complete(request).await else {
-            return;
+            return (0, 0);
         };
         let line = completion.content.trim();
         if let Some(text) = line.strip_prefix("lesson:") {
@@ -650,6 +734,10 @@ impl ReactAgent {
                 ctx.emit("agent.lesson", serde_json::json!({ "lesson": text }));
             }
         }
+        (
+            completion.usage.prompt_tokens as u64,
+            completion.usage.completion_tokens as u64,
+        )
     }
 }
 
@@ -754,7 +842,11 @@ mod tests {
             Ok(Completion {
                 content,
                 model: "mock".into(),
-                usage: Usage::default(),
+                // Non-zero so token-accounting assertions have something to add.
+                usage: Usage {
+                    prompt_tokens: 100,
+                    completion_tokens: 10,
+                },
             })
         }
     }
@@ -1015,6 +1107,47 @@ mod tests {
             "a failing post-edit check must dent confidence, got {}",
             outcome.confidence
         );
+    }
+
+    #[tokio::test]
+    async fn token_usage_accumulates_across_calls_not_resets() {
+        // Two model calls (tool then final) at 110 tokens each ⇒ the run's
+        // final agent.usage must report the *sum*, not the last call.
+        let recorder = RecordingTool::default();
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register(Arc::new(recorder));
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            r#"{"tool":"terminal.run","args":{"command":"ls"}}"#,
+            r#"{"final":"done"}"#,
+        ]));
+        let (mut ctx, bus) = ctx_with(provider, tools);
+        let mut usage = bus.subscribe_topic("agent.usage");
+
+        ReactAgent::new("mock").run("list things", &mut ctx).await.unwrap();
+
+        let event = usage.recv().await.unwrap();
+        assert_eq!(event.payload["model_calls"], 2);
+        assert_eq!(event.payload["prompt_tokens"], 200);
+        assert_eq!(event.payload["completion_tokens"], 20);
+        assert_eq!(event.payload["total_tokens"], 220);
+        assert!(event.payload["elapsed_ms"].as_u64().is_some());
+        assert!(event.payload["thinking_ms"].as_u64().is_some());
+    }
+
+    #[tokio::test]
+    async fn a_thinking_event_brackets_each_model_call() {
+        let tools = Arc::new(ToolRegistry::new());
+        let provider = Arc::new(ScriptedProvider::new(vec![r#"{"final":"hi"}"#]));
+        let (mut ctx, bus) = ctx_with(provider, tools);
+        let mut thinking = bus.subscribe_topic("agent.thinking");
+
+        ReactAgent::new("mock").run("say hi", &mut ctx).await.unwrap();
+
+        let start = thinking.recv().await.unwrap();
+        assert_eq!(start.payload["state"], "start");
+        let end = thinking.recv().await.unwrap();
+        assert_eq!(end.payload["state"], "end");
+        assert!(end.payload["ms"].as_u64().is_some());
     }
 
     #[test]

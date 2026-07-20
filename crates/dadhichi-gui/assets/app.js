@@ -25,6 +25,9 @@ const state = {
   autoAllow: new Set(),   // tool names auto-approved for this session
   fileCache: new Map(),   // rel path -> last-known text (diff baselines)
   lastToolCard: null,     // the open card awaiting its tool result
+  runStart: 0,            // ms epoch the current run began (0 = idle)
+  runTokens: 0,           // cumulative tokens for the current run
+  timerHandle: null,      // live elapsed-timer interval
 };
 
 /* ---------------- boot ---------------- */
@@ -656,6 +659,25 @@ function handleEvent(topic, p) {
       chatEvent(`☆ lesson kept for future runs: ${trim(p.lesson || "", 200)}`, "plan");
       break;
     }
+    case "agent.tokens": {
+      // Live cumulative token count for the running meter.
+      const total = p.total ?? 0;
+      state.runTokens = total;
+      $("run-tokens").textContent = fmtTokens(total);
+      break;
+    }
+    case "agent.usage": {
+      // End-of-run summary footer.
+      const secs = ((p.elapsed_ms ?? 0) / 1000).toFixed(1);
+      const think = ((p.thinking_ms ?? 0) / 1000).toFixed(1);
+      chatEvent(
+        `Σ run: ${fmtTokens(p.total_tokens ?? 0)} (${p.prompt_tokens ?? 0} in / ` +
+        `${p.completion_tokens ?? 0} out) · ${p.model_calls ?? 0} model calls · ` +
+        `${p.tool_calls ?? 0} tool calls · ${secs}s total, ${think}s thinking`,
+        "plan"
+      );
+      break;
+    }
     case "agent.message": {
       chatBubble(p.text || p.message || compact(p), "agent");
       break;
@@ -968,15 +990,43 @@ function resolveCard(id, decision) {
 }
 
 function setPhase(phase) {
+  const wasActive = state.phase !== "idle";
   state.phase = phase;
   const el = $("agent-phase");
   el.className = `phase ${phase}`;
   $("phase-label").textContent = phase;
   const active = phase !== "idle";
   $("stop-btn").classList.toggle("hidden", !active);
+  $("run-meter").classList.toggle("hidden", !active);
   $("goal").placeholder = active
     ? "Message the running agent…  (Enter to send)"
     : "Describe a goal for the agent…  (Enter to run)";
+
+  if (active && !wasActive) startRunMeter();
+  else if (!active && wasActive) stopRunMeter();
+}
+
+function startRunMeter() {
+  state.runStart = Date.now();
+  state.runTokens = 0;
+  $("run-tokens").textContent = "0 tok";
+  clearInterval(state.timerHandle);
+  const tick = () => {
+    const secs = (Date.now() - state.runStart) / 1000;
+    $("run-timer").textContent = `${secs.toFixed(1)}s`;
+  };
+  tick();
+  state.timerHandle = setInterval(tick, 100);
+}
+
+function stopRunMeter() {
+  clearInterval(state.timerHandle);
+  state.timerHandle = null;
+  // Leave the final elapsed on screen briefly by not clearing the text.
+}
+
+function fmtTokens(n) {
+  return n >= 1000 ? `${(n / 1000).toFixed(1)}k tok` : `${n} tok`;
 }
 
 /* ---------------- problems & markers ---------------- */
