@@ -206,6 +206,7 @@ mod tests {
                 prompt_tokens: 1_000_000,
                 completion_tokens: 0,
             },
+            tool_calls: Vec::new(),
         };
         assert!((router.cost_of(&completion) - 3.0).abs() < 1e-9);
     }

@@ -212,6 +212,7 @@ mod tests {
                 content: "x".into(),
                 model: "m".into(),
                 usage: Default::default(),
+                tool_calls: Vec::new(),
             },
         );
         assert!(cache.get(&a).is_some());
@@ -227,6 +228,7 @@ mod tests {
             content: "c".into(),
             model: "m".into(),
             usage: Default::default(),
+            tool_calls: Vec::new(),
         };
         cache.put(&a, c.clone());
         cache.put(&b, c.clone());
@@ -239,25 +241,16 @@ mod tests {
         // Guard against a key that ignores role: same content, different role.
         let cache = CompletionCache::new(8);
         let mut a = CompletionRequest::new("m");
-        a.messages.push(Message {
-            role: Role::User,
-            content: "hi".into(),
-            tool_call_id: None,
-            cache: false,
-        });
+        a.messages.push(Message::user("hi"));
         let mut b = CompletionRequest::new("m");
-        b.messages.push(Message {
-            role: Role::Assistant,
-            content: "hi".into(),
-            tool_call_id: None,
-            cache: false,
-        });
+        b.messages.push(Message::assistant("hi"));
         cache.put(
             &a,
             Completion {
                 content: "x".into(),
                 model: "m".into(),
                 usage: Default::default(),
+                tool_calls: Vec::new(),
             },
         );
         assert!(cache.get(&b).is_none());

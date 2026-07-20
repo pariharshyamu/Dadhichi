@@ -30,6 +30,10 @@ pub struct Message {
     /// For `Role::Tool` messages, the id of the tool call being answered.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// For a `Role::Assistant` turn that requested tools natively, the calls it
+    /// made — so the turn can be re-sent faithfully on the next request.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<ToolCall>,
     /// Marks this turn as a prompt-cache breakpoint. Providers that support
     /// server-side prompt caching (Anthropic) cache the prefix up to and
     /// including this message; the rest ignore it. Set it on large, stable
@@ -45,6 +49,7 @@ impl Message {
             role: Role::System,
             content: content.into(),
             tool_call_id: None,
+            tool_calls: Vec::new(),
             cache: false,
         }
     }
@@ -54,6 +59,7 @@ impl Message {
             role: Role::User,
             content: content.into(),
             tool_call_id: None,
+            tool_calls: Vec::new(),
             cache: false,
         }
     }
@@ -63,6 +69,30 @@ impl Message {
             role: Role::Assistant,
             content: content.into(),
             tool_call_id: None,
+            tool_calls: Vec::new(),
+            cache: false,
+        }
+    }
+
+    /// An assistant turn that requested native tool calls (its optional text
+    /// plus the calls), so it round-trips into the next request faithfully.
+    pub fn assistant_calls(content: impl Into<String>, tool_calls: Vec<ToolCall>) -> Self {
+        Self {
+            role: Role::Assistant,
+            content: content.into(),
+            tool_call_id: None,
+            tool_calls,
+            cache: false,
+        }
+    }
+
+    /// A tool-result message answering the call with `id`.
+    pub fn tool_result(id: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            role: Role::Tool,
+            content: content.into(),
+            tool_call_id: Some(id.into()),
+            tool_calls: Vec::new(),
             cache: false,
         }
     }
@@ -98,6 +128,30 @@ impl Default for GenerationParams {
     }
 }
 
+/// A tool the model may call, in provider-neutral form. Mirrors the JSON-Schema
+/// function-definition shape OpenAI, Anthropic, and Ollama all accept.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolDef {
+    /// The tool's unique name, e.g. `"fs.read"`.
+    pub name: String,
+    /// A one-line description the model uses to decide when to call it.
+    pub description: String,
+    /// JSON Schema for the arguments object.
+    pub parameters: serde_json::Value,
+}
+
+/// A tool invocation the model asked for, parsed from a native tool-calling
+/// response. `id` correlates the later [`Role::Tool`] result back to this call.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolCall {
+    /// Provider-assigned call id (echoed back in the tool result message).
+    pub id: String,
+    /// The tool name to invoke.
+    pub name: String,
+    /// The arguments object (already parsed from the provider's JSON string).
+    pub arguments: serde_json::Value,
+}
+
 /// A full completion request: the model to target, the conversation, and knobs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompletionRequest {
@@ -108,6 +162,11 @@ pub struct CompletionRequest {
     /// Sampling parameters.
     #[serde(default)]
     pub params: GenerationParams,
+    /// Tools the model may call natively. Empty ⇒ no tools advertised (the
+    /// caller falls back to a text protocol). Providers without tool support
+    /// ignore this.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<ToolDef>,
 }
 
 impl CompletionRequest {
@@ -117,12 +176,19 @@ impl CompletionRequest {
             model: model.into(),
             messages: Vec::new(),
             params: GenerationParams::default(),
+            tools: Vec::new(),
         }
     }
 
     /// Append a message, returning `self` for chaining.
     pub fn message(mut self, message: Message) -> Self {
         self.messages.push(message);
+        self
+    }
+
+    /// Advertise tools the model may call natively, returning `self`.
+    pub fn with_tools(mut self, tools: Vec<ToolDef>) -> Self {
+        self.tools = tools;
         self
     }
 }
@@ -152,6 +218,10 @@ pub struct Completion {
     pub model: String,
     /// Token accounting.
     pub usage: Usage,
+    /// Native tool calls the model requested, if any. Empty when the model
+    /// answered in text (or the provider does not support tool calling).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<ToolCall>,
 }
 
 /// An incremental chunk of a streamed completion.

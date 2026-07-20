@@ -136,6 +136,7 @@ impl LanguageModel for MockProvider {
             content,
             model: request.model,
             usage,
+            tool_calls: Vec::new(),
         })
     }
 
@@ -224,6 +225,7 @@ impl LanguageModel for ScriptProvider {
             content,
             model: request.model,
             usage: Usage::default(),
+            tool_calls: Vec::new(),
         })
     }
 }

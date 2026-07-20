@@ -39,7 +39,8 @@ pub use provider::{
 };
 pub use router::ModelRouter;
 pub use types::{
-    Completion, CompletionRequest, GenerationParams, Message, Role, StreamChunk, Usage,
+    Completion, CompletionRequest, GenerationParams, Message, Role, StreamChunk, ToolCall,
+    ToolDef, Usage,
 };
 
 #[cfg(feature = "http")]

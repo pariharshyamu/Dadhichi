@@ -294,6 +294,7 @@ impl Critic for ModelCritic {
             model: self.model.clone(),
             messages: vec![Message::system(system), Message::user(user)],
             params: Default::default(),
+            tools: Vec::new(),
         };
         match self.models.complete(request).await {
             Ok(completion) => Self::parse(&completion.content).unwrap_or(CriticVerdict {

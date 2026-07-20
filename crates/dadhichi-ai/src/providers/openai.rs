@@ -79,10 +79,32 @@ fn build_body(request: &CompletionRequest, stream: bool) -> serde_json::Value {
         .messages
         .iter()
         .map(|m| {
-            serde_json::json!({
+            let mut msg = serde_json::json!({
                 "role": role_str(m.role),
                 "content": m.content,
-            })
+            });
+            // A tool-result turn must carry the id of the call it answers.
+            if let Some(id) = &m.tool_call_id {
+                msg["tool_call_id"] = serde_json::json!(id);
+            }
+            // An assistant turn that made native tool calls re-sends them so
+            // the server can thread the following tool results.
+            if !m.tool_calls.is_empty() {
+                msg["tool_calls"] = serde_json::json!(
+                    m.tool_calls
+                        .iter()
+                        .map(|c| serde_json::json!({
+                            "id": c.id,
+                            "type": "function",
+                            "function": {
+                                "name": c.name,
+                                "arguments": serde_json::to_string(&c.arguments).unwrap_or_default(),
+                            }
+                        }))
+                        .collect::<Vec<_>>()
+                );
+            }
+            msg
         })
         .collect();
 
@@ -98,6 +120,23 @@ fn build_body(request: &CompletionRequest, stream: bool) -> serde_json::Value {
     }
     if !request.params.stop.is_empty() {
         body["stop"] = serde_json::json!(request.params.stop);
+    }
+    // Advertise tools in the OpenAI function-calling format.
+    if !request.tools.is_empty() {
+        body["tools"] = serde_json::json!(
+            request
+                .tools
+                .iter()
+                .map(|t| serde_json::json!({
+                    "type": "function",
+                    "function": {
+                        "name": t.name,
+                        "description": t.description,
+                        "parameters": t.parameters,
+                    }
+                }))
+                .collect::<Vec<_>>()
+        );
     }
     body
 }
@@ -127,8 +166,27 @@ struct ApiChoice {
 
 #[derive(Deserialize)]
 struct ApiMessage {
+    // Null when the model returns only tool calls, so this must be optional.
     #[serde(default)]
-    content: String,
+    content: Option<String>,
+    #[serde(default)]
+    tool_calls: Vec<ApiToolCall>,
+}
+
+#[derive(Deserialize)]
+struct ApiToolCall {
+    #[serde(default)]
+    id: String,
+    function: ApiFunction,
+}
+
+#[derive(Deserialize)]
+struct ApiFunction {
+    #[serde(default)]
+    name: String,
+    /// OpenAI sends arguments as a JSON *string*; Ollama sometimes as an object.
+    #[serde(default)]
+    arguments: serde_json::Value,
 }
 
 #[derive(Deserialize, Default)]
@@ -143,11 +201,32 @@ struct ApiUsage {
 fn parse_completion(json: &str, fallback_model: &str) -> ProviderResult<Completion> {
     let resp: ApiResponse = serde_json::from_str(json)
         .map_err(|e| ProviderError::Rejected(format!("malformed response: {e}")))?;
-    let content = resp
+    let message = resp
         .choices
-        .first()
-        .map(|c| c.message.content.clone())
+        .into_iter()
+        .next()
+        .map(|c| c.message)
         .ok_or_else(|| ProviderError::Rejected("response had no choices".into()))?;
+    let content = message.content.unwrap_or_default();
+    // Normalise tool calls: arguments may arrive as a JSON string (OpenAI) or
+    // an object (some Ollama models) — parse the string form into a value.
+    let tool_calls: Vec<crate::types::ToolCall> = message
+        .tool_calls
+        .into_iter()
+        .map(|c| {
+            let arguments = match c.function.arguments {
+                serde_json::Value::String(s) => {
+                    serde_json::from_str(&s).unwrap_or(serde_json::Value::Object(Default::default()))
+                }
+                other => other,
+            };
+            crate::types::ToolCall {
+                id: c.id,
+                name: c.function.name,
+                arguments,
+            }
+        })
+        .collect();
     let usage = resp.usage.unwrap_or_default();
     let model = if resp.model.is_empty() {
         fallback_model.to_string()
@@ -157,6 +236,7 @@ fn parse_completion(json: &str, fallback_model: &str) -> ProviderResult<Completi
     Ok(Completion {
         content,
         model,
+        tool_calls,
         usage: Usage {
             prompt_tokens: usage.prompt_tokens,
             completion_tokens: usage.completion_tokens,
@@ -303,6 +383,60 @@ mod tests {
     fn empty_choices_is_an_error() {
         let json = r#"{"model":"m","choices":[]}"#;
         assert!(parse_completion(json, "m").is_err());
+    }
+
+    #[test]
+    fn body_advertises_tools_in_function_format() {
+        use crate::types::ToolDef;
+        let req = CompletionRequest::new("gpt-4o")
+            .message(Message::user("go"))
+            .with_tools(vec![ToolDef {
+                name: "fs.read".into(),
+                description: "read a file".into(),
+                parameters: serde_json::json!({ "type": "object" }),
+            }]);
+        let body = build_body(&req, false);
+        assert_eq!(body["tools"][0]["type"], "function");
+        assert_eq!(body["tools"][0]["function"]["name"], "fs.read");
+    }
+
+    #[test]
+    fn parses_native_tool_calls_with_null_content() {
+        // The classic tool-calling response: content null, one tool_call whose
+        // arguments are a JSON *string*.
+        let json = r#"{
+            "model": "gpt-4o",
+            "choices": [{"message": {"role":"assistant","content":null,
+                "tool_calls":[{"id":"call_9","type":"function",
+                    "function":{"name":"fs.read","arguments":"{\"path\":\"a.rs\"}"}}]}}],
+            "usage": {"prompt_tokens": 20, "completion_tokens": 5}
+        }"#;
+        let c = parse_completion(json, "m").unwrap();
+        assert_eq!(c.content, "");
+        assert_eq!(c.tool_calls.len(), 1);
+        assert_eq!(c.tool_calls[0].id, "call_9");
+        assert_eq!(c.tool_calls[0].name, "fs.read");
+        assert_eq!(c.tool_calls[0].arguments["path"], "a.rs");
+    }
+
+    #[test]
+    fn round_trips_an_assistant_call_and_tool_result() {
+        use crate::types::{Message, ToolCall};
+        let req = CompletionRequest::new("gpt-4o")
+            .message(Message::assistant_calls(
+                "",
+                vec![ToolCall {
+                    id: "c1".into(),
+                    name: "fs.read".into(),
+                    arguments: serde_json::json!({ "path": "a" }),
+                }],
+            ))
+            .message(Message::tool_result("c1", "file contents"));
+        let body = build_body(&req, false);
+        // Assistant turn re-sends its tool_calls; tool turn carries the id.
+        assert_eq!(body["messages"][0]["tool_calls"][0]["id"], "c1");
+        assert_eq!(body["messages"][1]["tool_call_id"], "c1");
+        assert_eq!(body["messages"][1]["content"], "file contents");
     }
 
     #[test]

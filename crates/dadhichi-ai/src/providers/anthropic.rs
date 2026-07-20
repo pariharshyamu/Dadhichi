@@ -85,6 +85,34 @@ fn build_body(request: &CompletionRequest, stream: bool) -> serde_json::Value {
                 system.push_str(&m.content);
                 system_cached |= m.cache;
             }
+            Role::Tool => {
+                // A tool result is a user turn carrying a tool_result block.
+                messages.push(serde_json::json!({
+                    "role": "user",
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": m.tool_call_id.clone().unwrap_or_default(),
+                        "content": m.content,
+                    }],
+                }));
+            }
+            Role::Assistant if !m.tool_calls.is_empty() => {
+                // An assistant turn with native calls: optional text + tool_use
+                // blocks, so the following tool_result threads correctly.
+                let mut blocks = Vec::new();
+                if !m.content.trim().is_empty() {
+                    blocks.push(serde_json::json!({ "type": "text", "text": m.content }));
+                }
+                for call in &m.tool_calls {
+                    blocks.push(serde_json::json!({
+                        "type": "tool_use",
+                        "id": call.id,
+                        "name": call.name,
+                        "input": call.arguments,
+                    }));
+                }
+                messages.push(serde_json::json!({ "role": "assistant", "content": blocks }));
+            }
             role => messages.push(serde_json::json!({
                 "role": if matches!(role, Role::Assistant) { "assistant" } else { "user" },
                 "content": content_value(&m.content, m.cache),
@@ -112,6 +140,20 @@ fn build_body(request: &CompletionRequest, stream: bool) -> serde_json::Value {
     if !request.params.stop.is_empty() {
         body["stop_sequences"] = serde_json::json!(request.params.stop);
     }
+    // Advertise tools in Anthropic's input_schema format.
+    if !request.tools.is_empty() {
+        body["tools"] = serde_json::json!(
+            request
+                .tools
+                .iter()
+                .map(|t| serde_json::json!({
+                    "name": t.name,
+                    "description": t.description,
+                    "input_schema": t.parameters,
+                }))
+                .collect::<Vec<_>>()
+        );
+    }
     body
 }
 
@@ -128,9 +170,16 @@ struct ApiResponse {
 #[derive(Deserialize)]
 struct ContentBlock {
     #[serde(default, rename = "type")]
-    _kind: String,
+    kind: String,
     #[serde(default)]
     text: String,
+    // tool_use fields (present only on tool_use blocks).
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    input: serde_json::Value,
 }
 
 #[derive(Deserialize, Default)]
@@ -145,7 +194,23 @@ struct ApiUsage {
 fn parse_completion(json: &str, fallback_model: &str) -> ProviderResult<Completion> {
     let resp: ApiResponse = serde_json::from_str(json)
         .map_err(|e| ProviderError::Rejected(format!("malformed response: {e}")))?;
-    let content: String = resp.content.iter().map(|b| b.text.as_str()).collect();
+    // Text blocks concatenate into content; tool_use blocks become tool calls.
+    let content: String = resp
+        .content
+        .iter()
+        .filter(|b| b.kind == "text")
+        .map(|b| b.text.as_str())
+        .collect();
+    let tool_calls: Vec<crate::types::ToolCall> = resp
+        .content
+        .iter()
+        .filter(|b| b.kind == "tool_use")
+        .map(|b| crate::types::ToolCall {
+            id: b.id.clone(),
+            name: b.name.clone(),
+            arguments: b.input.clone(),
+        })
+        .collect();
     let usage = resp.usage.unwrap_or_default();
     let model = if resp.model.is_empty() {
         fallback_model.to_string()
@@ -155,6 +220,7 @@ fn parse_completion(json: &str, fallback_model: &str) -> ProviderResult<Completi
     Ok(Completion {
         content,
         model,
+        tool_calls,
         usage: Usage {
             prompt_tokens: usage.input_tokens,
             completion_tokens: usage.output_tokens,

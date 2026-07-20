@@ -288,6 +288,20 @@ impl Agent for ReactAgent {
         ctx.emit_plan(&plan);
 
         let tool_specs = ctx.tools.list();
+        // Native tool-calling: advertise the tools in the provider's own
+        // function-calling channel. The model then returns structured calls
+        // instead of hand-written JSON, which removes the whole class of
+        // parse/shape bugs and cuts prompt overhead. When the provider or model
+        // doesn't support it, the model just answers in text and the loop's
+        // JSON-scraping fallback takes over — so this is strictly additive.
+        let tool_defs: Vec<dadhichi_ai::ToolDef> = tool_specs
+            .iter()
+            .map(|s| dadhichi_ai::ToolDef {
+                name: s.name.clone(),
+                description: s.description.clone(),
+                parameters: s.input_schema.clone(),
+            })
+            .collect();
         let mut system = self.system_prompt(&Self::describe_tools(&tool_specs));
 
         // Self-improvement: lessons distilled from previous runs in this
@@ -396,6 +410,7 @@ impl Agent for ReactAgent {
                     model: self.model.clone(),
                     messages: messages.clone(),
                     params: Default::default(),
+                    tools: tool_defs.clone(),
                 };
                 // Time the model call — this is the run's "thinking" latency,
                 // reported live so the console can show an elapsed timer.
@@ -445,6 +460,85 @@ impl Agent for ReactAgent {
                     serde_json::json!({ "state": "end", "ms": call_ms }),
                 );
 
+                // ---- Native tool-calling path -------------------------------
+                // The model used the provider's structured tool channel. Run
+                // each call, thread proper assistant/tool messages, and loop.
+                if !completion.tool_calls.is_empty() {
+                    messages.push(Message::assistant_calls(
+                        completion.content.clone(),
+                        completion.tool_calls.clone(),
+                    ));
+                    let mut any_error = false;
+                    for call in &completion.tool_calls {
+                        // A finish disguised as a tool call still finishes.
+                        if is_finish_alias(&call.name) {
+                            let answer = call
+                                .arguments
+                                .get("content")
+                                .or_else(|| call.arguments.get("answer"))
+                                .or_else(|| call.arguments.get("text"))
+                                .and_then(|v| v.as_str())
+                                .map(String::from)
+                                .filter(|s| !s.is_empty())
+                                .unwrap_or_else(|| completion.content.clone());
+                            if goal_wants_mutation
+                                && !mutated
+                                && completion_nudges < MAX_COMPLETION_NUDGES
+                            {
+                                completion_nudges += 1;
+                                messages.push(Message::user(ACT_NUDGE));
+                            } else {
+                                final_answer = Some(answer);
+                                break 'rounds;
+                            }
+                            continue;
+                        }
+                        steps_taken += 1;
+                        ctx.emit(
+                            "agent.tool",
+                            serde_json::json!({ "tool": call.name, "args": call.arguments, "step": steps_taken }),
+                        );
+                        let edited_path = matches!(call.name.as_str(), "fs.write" | "fs.edit")
+                            .then(|| call.arguments.get("path").and_then(|p| p.as_str()).map(String::from))
+                            .flatten();
+                        match ctx.tools.invoke(&call.name, call.arguments.clone(), &ctx.grants).await {
+                            Ok(result) => {
+                                if mutating_tools.contains(call.name.as_str()) {
+                                    mutated = true;
+                                }
+                                ctx.emit(
+                                    "agent.tool.result",
+                                    serde_json::json!({ "tool": call.name, "result": result }),
+                                );
+                                messages.push(Message::tool_result(
+                                    &call.id,
+                                    clip_result(&result.to_string()),
+                                ));
+                                if let Some(path) = edited_path {
+                                    last_check_clean = self.auto_check(ctx, &path, &mut messages).await;
+                                }
+                            }
+                            Err(err) => {
+                                any_error = true;
+                                had_tool_errors = true;
+                                let msg = err.to_string();
+                                ctx.emit(
+                                    "agent.tool.error",
+                                    serde_json::json!({ "tool": call.name, "error": msg }),
+                                );
+                                messages.push(Message::tool_result(
+                                    &call.id,
+                                    format!("ERROR: {msg}. Try a different approach or finish."),
+                                ));
+                            }
+                        }
+                    }
+                    ctx.maybe_compact(&self.model).await;
+                    let _ = any_error;
+                    continue;
+                }
+                // ---- Text / JSON-scraping fallback path ---------------------
+
                 let reply = completion.content.trim().to_string();
                 let action = Self::extract_json(&reply);
 
@@ -491,10 +585,7 @@ impl Agent for ReactAgent {
                 // (`{"tool":"final","args":{"content":…}}`) instead of the
                 // `{"final":…}` shape. Treat those aliases as a real finish
                 // rather than trying to invoke a non-existent tool.
-                if matches!(
-                    tool_name.to_ascii_lowercase().as_str(),
-                    "final" | "finish" | "done" | "answer" | "final_answer" | "complete"
-                ) {
+                if is_finish_alias(tool_name) {
                     let answer = args
                         .get("content")
                         .or_else(|| args.get("answer"))
@@ -789,10 +880,12 @@ impl ReactAgent {
              faster/cheaper route).{cost_hint} Reply with exactly `lesson: <text>` and nothing \
              else. If there is no lesson worth keeping, reply `lesson: none`."
         )));
+        // Reflection is plain text — no tools needed.
         let request = CompletionRequest {
             model: self.model.clone(),
             messages: messages.clone(),
             params: Default::default(),
+            tools: Vec::new(),
         };
         let Ok(completion) = ctx.models.complete(request).await else {
             return (0, 0);
@@ -832,6 +925,15 @@ fn clip_result(text: &str) -> String {
         &text[..head_end],
         text.len() - head_end - (text.len() - tail_start),
         &text[tail_start..]
+    )
+}
+
+/// Whether a tool name is really a disguised "finish" — models emit these both
+/// as JSON `{"tool":"final"}` and as native calls to a nonexistent `final`.
+fn is_finish_alias(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "final" | "finish" | "done" | "answer" | "final_answer" | "complete"
     )
 }
 
@@ -918,6 +1020,49 @@ mod tests {
                     prompt_tokens: 100,
                     completion_tokens: 10,
                 },
+                tool_calls: Vec::new(),
+            })
+        }
+    }
+
+    /// A provider that returns one native tool call, then a native finish —
+    /// exercising the structured tool-calling path rather than JSON scraping.
+    #[derive(Debug)]
+    struct NativeToolProvider {
+        step: Mutex<u32>,
+    }
+
+    #[async_trait]
+    impl LanguageModel for NativeToolProvider {
+        fn id(&self) -> &str {
+            "mock"
+        }
+        fn capabilities(&self) -> ModelCapabilities {
+            ModelCapabilities { tools: true, local: true, ..Default::default() }
+        }
+        async fn complete(&self, request: CompletionRequest) -> ProviderResult<Completion> {
+            // The loop must have advertised the registered tools natively.
+            assert!(!request.tools.is_empty(), "tools were not advertised to the provider");
+            let n = {
+                let mut s = self.step.lock().unwrap();
+                let v = *s;
+                *s += 1;
+                v
+            };
+            let tool_calls = if n == 0 {
+                vec![dadhichi_ai::ToolCall {
+                    id: "call_1".into(),
+                    name: "terminal.run".into(),
+                    arguments: serde_json::json!({ "command": "ls" }),
+                }]
+            } else {
+                Vec::new()
+            };
+            Ok(Completion {
+                content: if n == 0 { String::new() } else { "all done".into() },
+                model: "mock".into(),
+                usage: Usage { prompt_tokens: 50, completion_tokens: 5 },
+                tool_calls,
             })
         }
     }
@@ -1000,6 +1145,34 @@ mod tests {
                 .unwrap()
                 .contains("git repository")
         );
+    }
+
+    #[tokio::test]
+    async fn native_tool_calls_are_executed_and_threaded() {
+        // The model uses the provider's structured tool channel (no JSON in
+        // text). The loop must run the tool and finish on the follow-up.
+        let recorder = RecordingTool::default();
+        let calls = recorder.calls.clone();
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register(Arc::new(recorder));
+        let (mut ctx, bus) =
+            ctx_with(Arc::new(NativeToolProvider { step: Mutex::new(0) }), tools);
+        let mut tool_events = bus.subscribe_topic("agent.tool");
+
+        let outcome = ReactAgent::new("mock")
+            .run("run ls for me", &mut ctx)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.status, AgentStatus::Completed);
+        assert!(outcome.summary.contains("all done"));
+        // The native call actually reached the tool with its arguments.
+        let recorded = calls.lock().unwrap();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0]["command"], "ls");
+        // And it surfaced on the bus as a normal tool event.
+        let ev = tool_events.recv().await.unwrap();
+        assert_eq!(ev.payload["tool"], "terminal.run");
     }
 
     #[tokio::test]
